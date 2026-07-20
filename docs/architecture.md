@@ -4,13 +4,13 @@ Repogent is a synchronous, artifact-first local workflow for conventional Python
 
 ## Runtime flow
 
-The detailed state machine is preserved in `RunStage`; its five user-visible stages are:
+The detailed state machine is preserved in `RunStage`. The following are conceptual/user-facing phases, not literal emitted stage labels: **Understand → Localize → Propose → Validate → Decide**.
 
-1. **Assess:** preflight, inventory, symbol graph, and localization.
-2. **Specify:** requirements and plan generation with two approval gates.
-3. **Evaluate:** create and validate a candidate only in a disposable repository copy.
-4. **Decide:** compare candidate evidence and require exact patch approval.
-5. **Apply and verify:** apply once to the real checkout, validate in a new isolated copy, run QA, and finalize evidence.
+1. **Understand:** preflight, bounded inventory, then typed requirements/specification generation and its approval gate.
+2. **Localize:** graph construction and localization after requirements are generated.
+3. **Propose:** planning after localization, plan approval, and candidate generation.
+4. **Validate:** disposable-copy policy checks and deterministic candidate validation with retained evidence.
+5. **Decide:** evidence selection or ambiguity escalation; after patch approval, a single real-checkout apply, isolated final validation, QA, and finalization.
 
 `candidate-1` is the default low-risk path. Validation failure, incomplete acceptance coverage, high risk, a broad patch, or unresolved ambiguity may create a further candidate; the policy caps the sequence at `candidate-3`. Candidates with required failures cannot be selected. Equal evidence is explicitly ambiguous and ends in human intervention rather than a tie-break mutation.
 
@@ -36,7 +36,7 @@ The detailed state machine is preserved in `RunStage`; its five user-visible sta
 
 ## Evidence
 
-Each external run directory contains `run.json`, `events.jsonl`, `report.md`, versioned inventory/graph/localization/context artifacts, role inputs and outputs, approvals, candidate records and evidence, selection, diffs, validation output, provider usage, repairs, and QA results. Structured models currently use `schema_version: "1"`; `run.json` atomically records fingerprints, candidate IDs, selected candidate, event linkage, and terminal state while stage artifacts remain append-only.
+Each external run directory contains `run.json`, `events.jsonl`, `report.md`, inventory/graph/localization/context artifacts, role inputs and outputs, approvals, candidate records and evidence, selection, diffs, validation output, provider usage, repairs, and QA results. Versioned domain/model artifacts use `schema_version: "1"`; raw role-input JSON/text payloads are retained but are not versioned model envelopes. `run.json` atomically records fingerprints, candidate IDs, selected candidate, event linkage, and terminal state while stage artifacts remain append-only.
 
 Failed preflight writes its report and manifest without constructing a provider. Candidate workspaces must restore to the captured baseline; failed recovery, required validation failures, ambiguous selection, root drift, changed final evidence, provider/budget/timeout errors, or persistence trouble all preserve evidence and end in an explicit terminal status.
 

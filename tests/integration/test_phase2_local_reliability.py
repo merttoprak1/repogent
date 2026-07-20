@@ -17,10 +17,11 @@ from repogent.cli import app
 from repogent.domain import (
     ApprovalKind,
     Budget,
-    CheckResult,
-    CheckStatus,
     Decision,
+    EventKind,
+    RunEvent,
     RunManifest,
+    RunStage,
     RunStatus,
     ValidationReport,
 )
@@ -155,6 +156,23 @@ def _patch_output(case: FixtureCase, *, summary: str | None = None) -> dict[str,
     }
 
 
+def _wrong_patch_output(case: FixtureCase, body: str, summary: str) -> dict[str, object]:
+    """Return a policy-valid but behaviorally incorrect source-only patch."""
+    before_line = "    return min(max(value, lower), upper)\n"
+    if case.name != "python_library" or before_line not in case.before_source:
+        raise ValueError("wrong-patch fixture is defined for the clamp library only")
+    after_source = case.before_source.replace(before_line, f"    {body}\n")
+    return {
+        "summary": summary,
+        "diff": _unified_diff(case.source_path, case.before_source, after_source),
+        "acceptance_criteria_addressed": [
+            f"{case.function} behavior matches the request",
+            "Validation succeeds",
+        ],
+        "focused_tests": ["python -m pytest -q"],
+    }
+
+
 def _scripted_outputs(case: FixtureCase) -> list[dict[str, object]]:
     return [
         {
@@ -228,25 +246,17 @@ class RecordingValidator:
         return self.pipeline.run(root, timeout_seconds=timeout_seconds)
 
 
-class AlwaysFailValidator:
-    def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
-        del root, timeout_seconds
-        return ValidationReport(
-            checks=[
-                CheckResult(
-                    name="pytest",
-                    argv=["python", "-m", "pytest", "-q"],
-                    status=CheckStatus.FAILED,
-                    exit_code=1,
-                    stdout="scripted required failure",
-                )
-            ]
-        )
-
-
 def _tree_bytes(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and ".git" not in path.parts
+    }
+
+
+def _tree_modes(root: Path) -> dict[str, int]:
+    return {
+        path.relative_to(root).as_posix(): path.stat().st_mode
         for path in sorted(root.rglob("*"))
         if path.is_file() and ".git" not in path.parts
     }
@@ -343,10 +353,28 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     assert (evidence / "candidate-evidence-001.json").exists()
     assert (evidence / "run.json").exists()
     assert (evidence / "report.md").exists()
+    selection = json.loads(
+        next(evidence.glob("candidate-selection-*.json")).read_text()
+    )
+    assert selection["selected_candidate_id"] == "candidate-1"
     persisted = json.loads((evidence / "run.json").read_text())
     assert persisted["repository_fingerprint"]
     assert persisted["configuration_fingerprint"]
     assert persisted["selected_candidate_id"] == "candidate-1"
+    assert persisted["events_file"] == "events.jsonl"
+    events = [
+        RunEvent.model_validate(json.loads(line))
+        for line in (evidence / "events.jsonl").read_text().splitlines()
+    ]
+    assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+    assert {event.run_id for event in events} == {manifest.run_id}
+    terminal = events[-1]
+    assert terminal.kind is EventKind.TERMINAL
+    assert terminal.stage == RunStage.FINISHED.value
+    assert terminal.data["status"] == manifest.status.value
+    report = (evidence / "report.md").read_text()
+    assert "candidate-1" in report
+    assert "| selected |" in report
 
 
 @pytest.mark.parametrize("name", ["python_library", "python_cli", "python_data"])
@@ -368,19 +396,26 @@ def test_all_failed_candidates_leave_the_real_repository_unchanged(tmp_path: Pat
     target = tmp_path / case.name
     shutil.copytree(FIXTURES / case.name, target)
     baseline = _tree_bytes(target)
+    baseline_modes = _tree_modes(target)
     patch_applier = CountingPatchApplier(target)
+    policy = ValidationPolicy()
+    executor = LocalExecutor(
+        allowed={command.name: command.argv for command in policy.commands(target)}
+    )
+    validator = RecordingValidator(ValidationPipeline(executor, policy))
+    approver = FakeApprover([Decision.APPROVED, Decision.APPROVED])
     workflow = _workflow_for(
         target,
         tmp_path / "runs",
         case,
         outputs=[
             *_scripted_outputs(case)[:2],
-            _patch_output(case, summary="First failed candidate"),
-            _patch_output(case, summary="Second failed candidate"),
-            _patch_output(case, summary="Third failed candidate"),
+            _wrong_patch_output(case, "return lower", "First failed candidate"),
+            _wrong_patch_output(case, "return value", "Second failed candidate"),
+            _wrong_patch_output(case, "return upper - 1", "Third failed candidate"),
         ],
-        approver=FakeApprover([Decision.APPROVED, Decision.APPROVED]),
-        validator=AlwaysFailValidator(),
+        approver=approver,
+        validator=validator,
         patch_applier=patch_applier,
     )
 
@@ -391,5 +426,31 @@ def test_all_failed_candidates_leave_the_real_repository_unchanged(tmp_path: Pat
     assert manifest.candidate_ids == ["candidate-1", "candidate-2", "candidate-3"]
     assert manifest.selected_candidate_id is None
     assert _tree_bytes(target) == baseline
+    assert _tree_modes(target) == baseline_modes
     assert patch_applier.target_apply_calls == 0
-    assert len(list(workflow.artifacts.root.glob("candidate-evidence-*.json"))) == 3
+    assert [record.kind for record in approver.records] == [
+        ApprovalKind.REQUIREMENTS,
+        ApprovalKind.PLAN,
+    ]
+    candidate_evidence = [
+        json.loads(path.read_text())
+        for path in sorted(workflow.artifacts.root.glob("candidate-evidence-*.json"))
+    ]
+    assert len(candidate_evidence) == 3
+    assert all("pytest" in item["required_failures"] for item in candidate_evidence)
+    assert all(
+        any(
+            check["name"] == "pytest"
+            and check["required"]
+            and check["status"] == "failed"
+            and check["exit_code"] != 0
+            for check in item["validation"]["checks"]
+        )
+        for item in candidate_evidence
+    )
+    assert len(validator.roots) == 3
+    assert len(set(validator.roots)) == 3
+    assert all(root != target.resolve() for root in validator.roots)
+    report = (workflow.artifacts.root / "report.md").read_text()
+    assert all(candidate_id in report for candidate_id in manifest.candidate_ids)
+    assert "rejected" in report

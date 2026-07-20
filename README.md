@@ -30,13 +30,13 @@ The static graph intentionally has limits: dynamic imports, reflection, generate
 
 ## v0.2 local workflow
 
-Every run follows five user-visible stages:
+Repogent describes five conceptual, user-facing phases — **Understand → Localize → Propose → Validate → Decide** — rather than claiming those labels are literal emitted `RunStage` event values:
 
-1. **Assess** — preflight, bounded repository inventory, symbol graph, and localization.
-2. **Specify** — typed requirements and implementation plan, each approval-gated.
-3. **Evaluate** — one candidate is applied and validated only in a disposable copy.
-4. **Decide** — evidence selects a candidate, or reports ambiguity for human review.
-5. **Apply and verify** — the approved candidate applies once to the real checkout, then receives an isolated final validation and independent QA pass.
+1. **Understand** — preflight, bounded repository inventory, and typed requirements/specification generation with its approval gate.
+2. **Localize** — build the deterministic Python symbol graph and localize after requirements are known.
+3. **Propose** — generate the implementation plan after localization, obtain plan approval, then generate a candidate patch.
+4. **Validate** — policy-check and validate candidates only in disposable copies, retaining their evidence.
+5. **Decide** — select evidence or surface ambiguity for human review; after patch approval, apply once to the real checkout, run isolated final validation and QA, then finalize the run.
 
 Repogent starts with `candidate-1`. It can generate `candidate-2` and then `candidate-3` only when validation fails, localization remains ambiguous, the patch is high risk or broad, or acceptance coverage is incomplete. It never exceeds three candidates. Equal eligible evidence is an ambiguity, not an arbitrary selection; no patch is applied and the terminal status is `human_intervention_required`.
 
@@ -107,7 +107,7 @@ A rejection ends the run as `cancelled`. The checkout is unchanged before patch 
 - raw validation status, fixed argument arrays, output, exit codes, durations, and reasons for skipped checks;
 - provider usage and the independent QA result.
 
-All structured artifacts currently declare `schema_version: "1"`. Stage artifacts are append-only, while `run.json` is atomically replaced as the state changes. It records repository and configuration fingerprints, candidate IDs, the selected candidate (if any), the events filename, and the terminal reason. Common credential forms and configured secrets are redacted before persistence, but evidence still deserves careful handling.
+Versioned domain/model artifacts currently declare `schema_version: "1"` (for example, manifests, events, localization, candidates, evidence, selection, and validation models). Raw role-input JSON/text payload artifacts, such as `requirements-input`, `planning-input`, `candidate-input`, and `qa-input`, preserve input material but are not versioned model envelopes. Stage artifacts are append-only, while `run.json` is atomically replaced as the state changes. It records repository and configuration fingerprints, candidate IDs, the selected candidate (if any), the events filename, and the terminal reason. Common credential forms and configured secrets are redacted before persistence, but evidence still deserves careful handling.
 
 ## Terminal statuses
 
