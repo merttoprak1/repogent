@@ -197,9 +197,11 @@ class Workflow:
         self.advance(RunStage.PLAN_APPROVED)
 
         candidate_evaluator = cast(CandidateEvaluator, self.candidate_evaluator)
-        approval_baseline = candidate_evaluator.capture_baseline(self.root)
+        approval_baseline = candidate_evaluator.capture_baseline(
+            self.root, deadline=self.deadline
+        )
         candidates, evidence = self._evaluate_candidates(localization)
-        if not approval_baseline.matches(self.root):
+        if not approval_baseline.matches(self.root, deadline=self.deadline):
             raise RuntimeError("repository baseline changed before approval")
         candidate_selector = cast(CandidateSelector, self.candidate_selector)
         selection = candidate_selector.select(candidates, evidence)

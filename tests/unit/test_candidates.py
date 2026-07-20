@@ -503,7 +503,18 @@ def test_candidate_evaluator_times_out_during_copy_setup(
     )
 
     assert evidence.eligible is False
-    assert evidence.required_failures == ["timeout"]
+    assert [check.name for check in evidence.validation.checks] == [
+        "timeout",
+        "repository-drift",
+    ]
+    assert len({check.name for check in evidence.validation.checks}) == len(
+        evidence.validation.checks
+    )
+    assert evidence.required_failures == [
+        check.name
+        for check in evidence.validation.checks
+        if check.required and check.status is not CheckStatus.PASSED
+    ]
 
 
 def test_candidate_evaluator_rejects_unmapped_acceptance_without_mutation(tmp_path: Path) -> None:

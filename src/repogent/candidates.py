@@ -609,7 +609,17 @@ class CandidateEvaluator:
         restored_to_baseline: bool = True,
         validation: ValidationReport | None = None,
     ) -> CandidateEvidence:
-        validation = _with_failure(validation or ValidationReport(checks=[]), name, reason)
+        validation = validation or ValidationReport(checks=[])
+        if not any(check.name == name for check in validation.checks):
+            validation = _with_failure(validation, name, reason)
+        required_failures = [
+            check.name
+            for check in validation.checks
+            if check.required and check.status is not CheckStatus.PASSED
+        ]
+        skipped_checks = [
+            check.name for check in validation.checks if check.status is CheckStatus.SKIPPED
+        ]
         return CandidateEvidence(
             candidate_id=candidate_id,
             validation=validation,
@@ -618,16 +628,23 @@ class CandidateEvaluator:
             changed_files=0,
             changed_lines=0,
             duration_seconds=max(0.0, time.monotonic() - started),
-            required_failures=[name],
-            skipped_checks=[],
+            required_failures=required_failures,
+            skipped_checks=skipped_checks,
             restored_to_baseline=restored_to_baseline,
         )
 
 
 def _with_failure(validation: ValidationReport, name: str, reason: str) -> ValidationReport:
+    """Record one authoritative failure per check name.
+
+    A timeout can occur while both the disposable copy and the post-run
+    integrity check are executing.  Replacing an existing same-named result
+    keeps the report unambiguous while retaining distinct failures such as
+    ``repository-drift``.
+    """
     return ValidationReport(
         checks=[
-            *validation.checks,
+            *(check for check in validation.checks if check.name != name),
             CheckResult(
                 name=name,
                 argv=[],

@@ -304,6 +304,46 @@ def test_workflow_rechecks_complete_baseline_before_patch_approval(tmp_path: Pat
     ]
 
 
+def test_outer_baseline_capture_honors_workflow_deadline_before_candidate_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = Clock()
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT],
+        validation_statuses=[],
+        budget=Budget(timeout_seconds=1),
+    )
+    evaluator = workflow.candidate_evaluator
+    assert evaluator is not None
+    original_capture = evaluator.capture_baseline
+
+    def expired_capture(root: Path, *, deadline: float | None = None) -> object:
+        clock.now = 2.0
+        return original_capture(root, deadline=deadline)
+
+    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
+    evaluator.capture_baseline = expired_capture  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    provider = workflow.roles.implementation.provider
+    assert isinstance(provider, ScriptedProvider)
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "candidate evaluation timeout exceeded"
+    assert len(provider.calls) == 2
+    assert [record.kind for record in workflow.approver.records] == [
+        ApprovalKind.REQUIREMENTS,
+        ApprovalKind.PLAN,
+    ]
+
+
 def test_patch_approval_drift_stops_before_application_and_preserves_user_change(
     tmp_path: Path,
 ) -> None:
