@@ -12,9 +12,11 @@ from repogent.approvals import CliApprover
 from repogent.artifacts import ArtifactStore, ArtifactStoreError
 from repogent.domain import Budget, RunManifest, RunStatus
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
+from repogent.localization import PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
 from repogent.repository import LexicalRetriever, RepositoryInspector
+from repogent.symbols import PythonSymbolGraphBuilder
 from repogent.validation import ValidationPipeline
 from repogent.workflow import Workflow
 
@@ -28,14 +30,16 @@ def analyze(
         str, typer.Option("--request", help="Task used to rank relevant files")
     ] = "",
 ) -> None:
-    """Print a read-only repository inventory and request-ranked context as JSON."""
+    """Print a read-only repository inventory, symbol graph, and localization as JSON."""
     inventory = RepositoryInspector().inspect(repository)
-    context = LexicalRetriever().retrieve(inventory, request) if request else []
+    graph = PythonSymbolGraphBuilder().build(inventory)
+    localization = PythonLocalizer().localize(inventory, graph, request) if request else None
     typer.echo(
         json.dumps(
             {
                 "inventory": inventory.model_dump(),
-                "context": [item.model_dump() for item in context],
+                "symbol_graph": graph.model_dump(),
+                "localization": localization.model_dump() if localization else None,
             },
             indent=2,
         )

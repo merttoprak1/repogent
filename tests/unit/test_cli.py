@@ -12,7 +12,7 @@ from repogent.domain import RunStatus
 runner = CliRunner()
 
 
-def test_analyze_prints_inventory_and_ranked_context(tmp_path: Path) -> None:
+def test_analyze_prints_inventory_and_ranked_localization(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     (target / "auth.py").write_text("def login():\n    return True\n")
@@ -20,7 +20,8 @@ def test_analyze_prints_inventory_and_ranked_context(tmp_path: Path) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["inventory"]["files"][0]["path"] == "auth.py"
-    assert payload["context"][0]["path"] == "auth.py"
+    assert payload["localization"]["snippets"][0]["path"] == "auth.py"
+    assert any(node["qualified_name"] == "auth.login" for node in payload["symbol_graph"]["nodes"])
 
 
 def test_run_requires_script_for_scripted_provider(tmp_path: Path) -> None:
