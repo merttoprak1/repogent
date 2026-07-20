@@ -206,7 +206,7 @@ class Workflow:
         approval_baseline = candidate_evaluator.capture_baseline(
             self.root, deadline=self.deadline
         )
-        self.candidates, self.candidate_evidence = self._evaluate_candidates(self.localization)
+        self._evaluate_candidates(self.localization)
         if not approval_baseline.matches(self.root, deadline=self.deadline):
             raise RuntimeError("repository baseline changed before approval")
         candidate_selector = cast(CandidateSelector, self.candidate_selector)
@@ -359,18 +359,16 @@ class Workflow:
         )
         return broader
 
-    def _evaluate_candidates(
-        self, localization: LocalizationReport
-    ) -> tuple[list[CandidateRecord], list[CandidateEvidence]]:
+    def _evaluate_candidates(self, localization: LocalizationReport) -> None:
         if self.requirements is None or self.plan is None:
             raise RuntimeError("requirements and plan must exist before candidate evaluation")
-        candidates: list[CandidateRecord] = []
-        evidence: list[CandidateEvidence] = []
+        self.candidates = []
+        self.candidate_evidence = []
         expansion_reason: str | None = None
-        while len(candidates) < 3:
-            candidate_id = f"candidate-{len(candidates) + 1}"
-            previous = candidates[-1] if candidates else None
-            previous_evidence = evidence[-1] if evidence else None
+        while len(self.candidates) < 3:
+            candidate_id = f"candidate-{len(self.candidates) + 1}"
+            previous = self.candidates[-1] if self.candidates else None
+            previous_evidence = self.candidate_evidence[-1] if self.candidate_evidence else None
             payload: dict[str, object] = {
                 "requirements": self.requirements.model_dump(),
                 "plan": self.plan.model_dump(),
@@ -397,11 +395,11 @@ class Workflow:
                 diff_sha256=hashlib.sha256(result.output.diff.encode()).hexdigest(),
                 usage=result.usage,
             )
-            candidates.append(candidate)
+            self.candidates.append(candidate)
             self.manifest = self.manifest.model_copy(
                 update={
-                    "candidate_ids": [item.candidate_id for item in candidates],
-                    "repair_attempts": len(candidates) - 1,
+                    "candidate_ids": [item.candidate_id for item in self.candidates],
+                    "repair_attempts": len(self.candidates) - 1,
                     "updated_at": utc_now(),
                 }
             )
@@ -415,7 +413,7 @@ class Workflow:
                 self.requirements.acceptance_criteria,
                 self.remaining_time(),
             )
-            evidence.append(candidate_evidence)
+            self.candidate_evidence.append(candidate_evidence)
             self.write("candidate-evidence", candidate_evidence)
             self.emit(
                 EventKind.VALIDATION,
@@ -428,9 +426,9 @@ class Workflow:
                 raise RuntimeError("candidate evaluation did not restore repository baseline")
             candidate_policy = cast(CandidatePolicy, self.candidate_policy)
             expansion = candidate_policy.should_expand(
-                localization, candidate_evidence, len(candidates)
+                localization, candidate_evidence, len(self.candidates)
             )
-            if expansion is None and localization.ambiguous and len(candidates) == 1:
+            if expansion is None and localization.ambiguous and len(self.candidates) == 1:
                 # The one bounded broader pass still left competing locations.  Gather
                 # one independent alternative even when a caller configured a one-shot
                 # policy, then let evidence decide rather than silently applying a tie.
@@ -438,7 +436,6 @@ class Workflow:
             if expansion is None:
                 break
             expansion_reason = expansion.value
-        return candidates, evidence
 
     def ensure_time(self) -> None:
         self.remaining_time()

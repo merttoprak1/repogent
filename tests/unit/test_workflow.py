@@ -14,6 +14,7 @@ from repogent.domain import (
     ApprovalKind,
     Budget,
     CandidateEvidence,
+    CandidateRecord,
     CheckResult,
     CheckStatus,
     Decision,
@@ -543,6 +544,55 @@ def test_validation_events_include_concise_check_counts(tmp_path: Path) -> None:
         "restored_to_baseline": True,
     }
     assert validation_events[1]["data"] == {"passed": 1, "failed": 0, "skipped": 0}
+
+
+def test_terminal_report_retains_candidate_evidence_after_unrecovered_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[],
+    )
+
+    def unrecovered_evaluation(
+        _root: Path,
+        candidate: CandidateRecord,
+        _criteria: list[str],
+        _timeout_seconds: float,
+    ) -> CandidateEvidence:
+        return CandidateEvidence(
+            candidate_id=candidate.candidate_id,
+            validation=ValidationReport(
+                checks=[
+                    CheckResult(
+                        name="repository-drift",
+                        argv=[],
+                        status=CheckStatus.FAILED,
+                        reason="evaluation copy was not restored",
+                    )
+                ]
+            ),
+            acceptance_criteria_coverage=0,
+            risk_level=RiskLevel.HIGH,
+            changed_files=1,
+            changed_lines=1,
+            duration_seconds=0,
+            required_failures=["repository-drift"],
+            restored_to_baseline=False,
+        )
+
+    assert workflow.candidate_evaluator is not None
+    monkeypatch.setattr(workflow.candidate_evaluator, "evaluate", unrecovered_evaluation)
+
+    manifest = workflow.run()
+    report = (workflow.artifacts.root / "report.md").read_text()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "candidate evaluation did not restore repository baseline"
+    assert "candidate-1" in report
+    assert "repository-drift" in report
+    assert "not restored" in report
 
 
 def test_final_manifest_persistence_failure_downgrades_and_persists_human_state(

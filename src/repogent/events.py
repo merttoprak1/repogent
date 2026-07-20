@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
+import re
 from collections.abc import Callable, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -14,6 +16,9 @@ from repogent.domain import RunEvent
 from repogent.sanitization import redact_text, sanitize_data
 
 MAX_EVENT_BYTES = 65_536
+MAX_TIMELINE_COUNT = 1_000_000_000
+MAX_TIMELINE_COST_CHARS = 32
+_COUNT_TEXT = re.compile(r"[0-9]+$")
 
 
 class EventSink(Protocol):
@@ -59,7 +64,25 @@ class ConsoleEventSink:
 
 
 def _nonnegative_int(value: object) -> int:
-    return value if isinstance(value, int) and value >= 0 else 0
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if 0 <= value <= MAX_TIMELINE_COUNT else 0
+    if isinstance(value, Decimal):
+        if (
+            value.is_finite()
+            and 0 <= value <= MAX_TIMELINE_COUNT
+            and value == value.to_integral_value()
+        ):
+            return int(value)
+        return 0
+    if isinstance(value, float):
+        if math.isfinite(value) and 0 <= value <= MAX_TIMELINE_COUNT and value.is_integer():
+            return int(value)
+        return 0
+    if isinstance(value, str) and len(value) <= len(str(MAX_TIMELINE_COUNT)):
+        return int(value) if _COUNT_TEXT.fullmatch(value) else 0
+    return 0
 
 
 def _cost(value: object) -> str | None:
@@ -67,9 +90,12 @@ def _cost(value: object) -> str | None:
         return None
     try:
         cost = Decimal(str(value))
-    except InvalidOperation:
+    except (InvalidOperation, ValueError):
         return None
-    return str(cost) if cost >= 0 else None
+    if not cost.is_finite() or cost < 0:
+        return None
+    rendered = str(cost)
+    return rendered if len(rendered) <= MAX_TIMELINE_COST_CHARS else None
 
 
 class JsonlEventStore:

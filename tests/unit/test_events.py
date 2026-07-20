@@ -197,3 +197,33 @@ def test_console_sink_redacts_event_message_secrets() -> None:
     )
 
     assert output == ["[warning] provider returned [REDACTED]"]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"passed": True, "failed": "1.5", "skipped": "not-a-count", "cost_usd": "NaN"},
+        {"passed": "Infinity", "failed": -1, "skipped": 2.5, "cost_usd": "Infinity"},
+        {"passed": "4", "failed": False, "skipped": "2", "cost_usd": True},
+        {"passed": "4", "failed": 0, "skipped": "2", "cost_usd": "-Infinity"},
+    ],
+)
+def test_console_sink_rejects_unsafe_numeric_event_data(data: dict[str, object]) -> None:
+    output: list[str] = []
+    sink = ConsoleEventSink(output.append)
+
+    sink.emit(
+        RunEvent(
+            run_id="r",
+            sequence=1,
+            kind=EventKind.VALIDATION,
+            message="validation completed",
+            data=data,
+        )
+    )
+
+    assert output == [
+        "[validation] validation completed (4 passed, 0 failed, 2 skipped)"
+        if data["passed"] == "4"
+        else "[validation] validation completed (0 passed, 0 failed, 0 skipped)"
+    ]
