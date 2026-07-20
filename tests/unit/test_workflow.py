@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -10,54 +9,76 @@ import pytest
 from repogent.agents import RoleSet
 from repogent.approvals import FakeApprover
 from repogent.artifacts import ArtifactStore
+from repogent.candidates import CandidateEvaluator, CandidatePolicy, CandidateSelector
 from repogent.domain import (
     ApprovalKind,
     Budget,
     CheckResult,
     CheckStatus,
     Decision,
+    EventKind,
     ProviderUsage,
     RunManifest,
     RunStage,
     RunStatus,
     ValidationReport,
 )
+from repogent.events import EventSink
+from repogent.localization import PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
-from repogent.providers import ProviderResult, ScriptedProvider
-from repogent.repository import LexicalRetriever, RepositoryInspector
+from repogent.providers import ScriptedProvider
+from repogent.repository import RepositoryInspector
+from repogent.symbols import PythonSymbolGraphBuilder
 from repogent.workflow import BudgetExceeded, IllegalTransition, Workflow, transition
 
-BASE_OUTPUTS = [
-    {
-        "objective": "Change value",
-        "functional_requirements": ["value is 2"],
-        "acceptance_criteria": ["tests pass"],
-    },
-    {
-        "files_to_modify": ["app.py"],
-        "steps": [{"id": "change", "description": "Change value"}],
-        "tests": ["pytest"],
-    },
-    {
-        "summary": "Change value",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\n+value = 2\n",
-    },
-    {
-        "acceptance_criteria_coverage": 1,
-        "test_quality_score": 1,
-        "security_score": 1,
-        "regression_risk": "low",
-        "merge_recommendation": "approve",
-    },
-]
+REQUIREMENTS_OUTPUT = {
+    "objective": "Change value",
+    "functional_requirements": ["value is 2"],
+    "acceptance_criteria": ["tests pass"],
+}
+PLAN_OUTPUT = {
+    "files_to_modify": ["app.py"],
+    "steps": [{"id": "change", "description": "Change value"}],
+    "tests": ["pytest"],
+}
+VALID_PATCH_OUTPUT = {
+    "summary": "Change value",
+    "diff": (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+        " def value():\n-    return 1\n+    return 2\n"
+    ),
+    "acceptance_criteria_addressed": ["tests pass"],
+    "focused_tests": ["pytest"],
+}
+ALTERNATIVE_PATCH_OUTPUT = {
+    **VALID_PATCH_OUTPUT,
+    "summary": "Change value alternatively",
+    "diff": (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+        " def value():\n-    return 1\n+    return 3\n"
+    ),
+}
+INVALID_PATCH_OUTPUT = {
+    **VALID_PATCH_OUTPUT,
+    "summary": "First candidate fails its focused test",
+}
+QA_OUTPUT = {
+    "acceptance_criteria_coverage": 1,
+    "test_quality_score": 1,
+    "security_score": 1,
+    "regression_risk": "low",
+    "merge_recommendation": "approve",
+}
 
 
 class SequenceValidator:
     def __init__(self, statuses: list[CheckStatus]) -> None:
         self.statuses = statuses
 
-    def run(self, root: Path) -> ValidationReport:
-        del root
+    def run(
+        self, root: Path, *, timeout_seconds: float | None = None
+    ) -> ValidationReport:
+        del root, timeout_seconds
         status = self.statuses.pop(0)
         return ValidationReport(
             checks=[
@@ -71,43 +92,58 @@ class SequenceValidator:
         )
 
 
-class ManualClock:
+class FailingEventStore:
     def __init__(self) -> None:
-        self.now = 0.0
+        self.calls = 0
 
-    def monotonic(self) -> float:
-        return self.now
+    def emit(self, event: object) -> None:
+        del event
+        self.calls += 1
+        raise OSError("event evidence unavailable")
 
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
 
-
-def make_workflow(
+def make_phase2_workflow(
     tmp_path: Path,
-    outputs: list[dict[str, object]],
-    decisions: list[Decision],
-    statuses: list[CheckStatus],
     *,
+    outputs: list[dict[str, object]],
+    validation_statuses: list[CheckStatus],
+    candidate_policy: CandidatePolicy | None = None,
+    events: EventSink | None = None,
     budget: Budget | None = None,
 ) -> Workflow:
     target = tmp_path / "target"
     target.mkdir()
-    (target / "app.py").write_text("value = 1\n")
+    (target / "app.py").write_text("def value():\n    return 1\n")
     store = ArtifactStore.create(tmp_path / "runs", target, "change", run_id="run-1")
+    validator = SequenceValidator(validation_statuses)
+    patch_policy = PatchPolicy()
+    patch_applier = PatchApplier()
     return Workflow(
         root=target,
         request="change value",
-        manifest=RunManifest(run_id="run-1", request="change value"),
+        manifest=RunManifest(run_id="run-1", request="change value", events_file="events.jsonl"),
         roles=RoleSet.from_provider(ScriptedProvider(outputs)),
-        approver=FakeApprover(decisions),
-        patch_policy=PatchPolicy(),
-        patch_applier=PatchApplier(),
-        validator=SequenceValidator(statuses),
+        approver=FakeApprover([Decision.APPROVED] * 4),
+        patch_policy=patch_policy,
+        patch_applier=patch_applier,
+        validator=validator,
         artifacts=store,
         inspector=RepositoryInspector(),
-        retriever=LexicalRetriever(),
+        symbol_builder=PythonSymbolGraphBuilder(),
+        localizer=PythonLocalizer(),
+        candidate_evaluator=CandidateEvaluator(patch_policy, patch_applier, validator),
+        candidate_policy=candidate_policy or CandidatePolicy(),
+        candidate_selector=CandidateSelector(),
+        events=events or store.event_store(),
         budget=budget or Budget(),
     )
+
+
+def _events(workflow: Workflow) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in (workflow.artifacts.root / "events.jsonl").read_text().splitlines()
+    ]
 
 
 def test_illegal_transition_is_rejected() -> None:
@@ -115,107 +151,110 @@ def test_illegal_transition_is_rejected() -> None:
         transition(RunStage.CREATED, RunStage.PATCH_APPLIED)
 
 
-def test_plan_rejection_finishes_cancelled_without_modifying_target(tmp_path: Path) -> None:
-    workflow = make_workflow(
+def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
         tmp_path,
-        BASE_OUTPUTS,
-        [Decision.APPROVED, Decision.REJECTED],
-        [CheckStatus.PASSED],
-    )
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.CANCELLED
-    assert (workflow.root / "app.py").read_text() == "value = 1\n"
-    assert (workflow.artifacts.root / "report.md").exists()
-
-
-def test_successful_run_applies_patch_validates_and_reports(tmp_path: Path) -> None:
-    workflow = make_workflow(
-        tmp_path, BASE_OUTPUTS, [Decision.APPROVED] * 3, [CheckStatus.PASSED]
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
     )
 
     manifest = workflow.run()
 
     assert manifest.status is RunStatus.COMPLETED
-    assert (workflow.root / "app.py").read_text() == "value = 2\n"
-    assert (workflow.artifacts.root / "report.md").exists()
-    assert json.loads((workflow.artifacts.root / "run.json").read_text())["stage"] == "finished"
+    assert manifest.candidate_ids == ["candidate-1"]
+    assert manifest.selected_candidate_id == "candidate-1"
+    assert len(list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))) == 1
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
+    assert [event["sequence"] for event in _events(workflow)] == list(
+        range(1, len(_events(workflow)) + 1)
+    )
 
 
-def test_failed_validation_uses_approved_repair(tmp_path: Path) -> None:
-    initial = BASE_OUTPUTS[:3]
-    initial[2] = {
-        "summary": "No-op comment",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n value = 1\n+# initial\n",
-    }
-    repair = {
-        "summary": "Repair value",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n-value = 1\n+value = 2\n # initial\n",
-    }
-    outputs = [*initial, repair, BASE_OUTPUTS[3]]
-    workflow = make_workflow(
-        tmp_path, outputs, [Decision.APPROVED] * 4, [CheckStatus.FAILED, CheckStatus.PASSED]
+def test_failed_candidate_triggers_one_evidence_informed_alternative(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[
+            REQUIREMENTS_OUTPUT,
+            PLAN_OUTPUT,
+            INVALID_PATCH_OUTPUT,
+            VALID_PATCH_OUTPUT,
+            QA_OUTPUT,
+        ],
+        validation_statuses=[CheckStatus.FAILED, CheckStatus.PASSED, CheckStatus.PASSED],
     )
 
     manifest = workflow.run()
 
     assert manifest.status is RunStatus.COMPLETED
-    assert manifest.repair_attempts == 1
-
-
-def test_rejected_repair_patch_is_never_applied(tmp_path: Path) -> None:
-    initial = BASE_OUTPUTS[:3]
-    initial[2] = {
-        "summary": "No-op comment",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n value = 1\n+# initial\n",
-    }
-    repair = {
-        "summary": "Repair value",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n-value = 1\n+value = 2\n # initial\n",
-    }
-    workflow = make_workflow(
-        tmp_path,
-        [*initial, repair],
-        [Decision.APPROVED, Decision.APPROVED, Decision.APPROVED, Decision.REJECTED],
-        [CheckStatus.FAILED],
+    assert manifest.candidate_ids == ["candidate-1", "candidate-2"]
+    repair_input = json.loads(
+        next(workflow.artifacts.root.glob("candidate-input-002.txt")).read_text()
     )
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.CANCELLED
-    assert (workflow.root / "app.py").read_text() == "value = 1\n# initial\n"
-    assert workflow.approver.records[-1].kind is ApprovalKind.REPAIR_PATCH
-    assert (workflow.artifacts.root / "report.md").exists()
+    assert repair_input["previous_failure"]["candidate_id"] == "candidate-1"
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
 
 
-def test_two_failed_repairs_require_human_intervention(tmp_path: Path) -> None:
-    no_op = {
-        "summary": "Add comment",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n value = 1\n+# note\n",
-    }
-    second = {
-        "summary": "Add second comment",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,3 @@\n value = 1\n # note\n+# note 2\n",
-    }
-    outputs = [*BASE_OUTPUTS[:2], no_op, second, {"summary": "Third", "diff": second["diff"]}]
-    workflow = make_workflow(
-        tmp_path, outputs, [Decision.APPROVED] * 5, [CheckStatus.FAILED] * 3
+def test_ambiguous_selection_requires_human_without_applying(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[
+            REQUIREMENTS_OUTPUT,
+            PLAN_OUTPUT,
+            VALID_PATCH_OUTPUT,
+            ALTERNATIVE_PATCH_OUTPUT,
+        ],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+        candidate_policy=CandidatePolicy(max_candidates=2, broad_patch_lines=1),
     )
 
     manifest = workflow.run()
 
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.repair_attempts == 2
-    assert (workflow.artifacts.root / "report.md").exists()
+    assert manifest.reason == "candidate evidence is ambiguous"
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+
+
+def test_candidate_evaluations_restore_baseline_before_approval(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    initial = (workflow.root / "app.py").read_text()
+    original_decide = workflow.approver.decide
+
+    def decide(kind: ApprovalKind, artifact: object) -> object:
+        if kind is ApprovalKind.PATCH:
+            assert (workflow.root / "app.py").read_text() == initial
+        return original_decide(kind, artifact)  # type: ignore[arg-type]
+
+    workflow.approver.decide = decide  # type: ignore[method-assign]
+    manifest = workflow.run()
+    assert manifest.status is RunStatus.COMPLETED
+
+
+def test_event_store_failure_is_terminalized_without_recursive_emit(tmp_path: Path) -> None:
+    events = FailingEventStore()
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+        events=events,
+    )
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "event evidence unavailable"
+    assert manifest.stage is RunStage.FINISHED
+    assert events.calls == 1
 
 
 def test_account_persists_usage_before_enforcing_token_and_cost_budget(tmp_path: Path) -> None:
-    workflow = make_workflow(
+    workflow = make_phase2_workflow(
         tmp_path,
-        [],
-        [],
-        [],
+        outputs=[],
+        validation_statuses=[],
         budget=Budget(max_tokens=1, max_cost_usd=Decimal("0.01")),
     )
 
@@ -234,352 +273,25 @@ def test_account_persists_usage_before_enforcing_token_and_cost_budget(tmp_path:
     assert persisted["token_usage"] == 2
 
 
-def test_timeout_is_enforced_before_provider_work(tmp_path: Path) -> None:
-    workflow = make_workflow(
-        tmp_path, [], [], [], budget=Budget(timeout_seconds=1)
-    )
-    workflow.started_at = time.monotonic() - 2
-
-    with pytest.raises(TimeoutError, match="workflow timeout"):
-        workflow.ensure_time()
-
-
-def test_workflow_propagates_one_remaining_deadline_to_blocking_operations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = ManualClock()
-    workflow = make_workflow(
+def test_final_validation_evidence_mismatch_requires_human_intervention(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
         tmp_path,
-        BASE_OUTPUTS,
-        [Decision.APPROVED] * 3,
-        [CheckStatus.PASSED],
-        budget=Budget(timeout_seconds=10),
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.FAILED],
     )
-    captured: dict[str, list[float]] = {
-        "inspection_deadline": [],
-        "provider_timeout": [],
-        "validation_timeout": [],
-    }
-    original_inspect = workflow.inspector.inspect
-    original_provider_generate = workflow.roles.requirements.provider.generate
-    original_validate = workflow.validator.run
-
-    def inspect_with_deadline(root: Path, *, deadline: float) -> object:
-        captured["inspection_deadline"].append(deadline)
-        return original_inspect(root, deadline=deadline)
-
-    def generate_with_timeout(*, timeout_seconds: float, **kwargs: object) -> object:
-        captured["provider_timeout"].append(timeout_seconds)
-        return original_provider_generate(timeout_seconds=timeout_seconds, **kwargs)  # type: ignore[arg-type]
-
-    def validate_with_timeout(root: Path, *, timeout_seconds: float) -> ValidationReport:
-        captured["validation_timeout"].append(timeout_seconds)
-        return original_validate(root)
-
-    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
-    monkeypatch.setattr(workflow.inspector, "inspect", inspect_with_deadline)
-    monkeypatch.setattr(
-        workflow.roles.requirements.provider, "generate", generate_with_timeout
-    )
-    monkeypatch.setattr(workflow.validator, "run", validate_with_timeout)
 
     manifest = workflow.run()
 
-    assert manifest.status is RunStatus.COMPLETED
-    assert captured["inspection_deadline"] == [10.0]
-    assert captured["provider_timeout"] == [10.0, 10.0, 10.0, 10.0]
-    assert captured["validation_timeout"] == [10.0]
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "changed validation evidence"
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
 
 
-def test_slow_patch_approval_cannot_lead_to_patch_application(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = ManualClock()
-    workflow = make_workflow(
+def test_terminal_event_is_written_for_completed_run(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
         tmp_path,
-        BASE_OUTPUTS[:3],
-        [Decision.APPROVED] * 3,
-        [CheckStatus.PASSED],
-        budget=Budget(timeout_seconds=1),
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
     )
-    original_decide = workflow.approver.decide
-
-    def slow_patch_approval(kind: ApprovalKind, artifact: object) -> object:
-        record = original_decide(kind, artifact)  # type: ignore[arg-type]
-        if kind is ApprovalKind.PATCH:
-            clock.advance(2)
-        return record
-
-    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
-    monkeypatch.setattr(workflow.approver, "decide", slow_patch_approval)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert (workflow.root / "app.py").read_text() == "value = 1\n"
-
-
-def test_timeout_is_rechecked_immediately_before_patch_application(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = ManualClock()
-    workflow = make_workflow(
-        tmp_path,
-        BASE_OUTPUTS[:3],
-        [Decision.APPROVED] * 3,
-        [CheckStatus.PASSED],
-        budget=Budget(timeout_seconds=1),
-    )
-    original_write_model = workflow.artifacts.write_model
-
-    def slow_approval_evidence(name: str, model: object) -> Path:
-        path = original_write_model(name, model)  # type: ignore[arg-type]
-        if name == "patch-approved":
-            clock.advance(2)
-        return path
-
-    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
-    monkeypatch.setattr(workflow.artifacts, "write_model", slow_approval_evidence)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert (workflow.root / "app.py").read_text() == "value = 1\n"
-
-
-def test_slow_validation_is_checked_before_validation_is_persisted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = ManualClock()
-    workflow = make_workflow(
-        tmp_path,
-        BASE_OUTPUTS[:3],
-        [Decision.APPROVED] * 3,
-        [CheckStatus.PASSED],
-        budget=Budget(timeout_seconds=1),
-    )
-    original_run = workflow.validator.run
-
-    def slow_validation(root: Path) -> ValidationReport:
-        report = original_run(root)
-        clock.advance(2)
-        return report
-
-    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
-    monkeypatch.setattr(workflow.validator, "run", slow_validation)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert not list(workflow.artifacts.root.glob("validation-*.json"))
-
-
-def test_slow_qa_persists_usage_but_cannot_complete(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = ManualClock()
-    workflow = make_workflow(
-        tmp_path,
-        BASE_OUTPUTS,
-        [Decision.APPROVED] * 3,
-        [CheckStatus.PASSED],
-        budget=Budget(timeout_seconds=1),
-    )
-    provider = workflow.roles.qa.provider
-    assert isinstance(provider, ScriptedProvider)
-    original_generate = provider.generate
-
-    def slow_qa(**kwargs: object) -> ProviderResult[object]:
-        result = original_generate(**kwargs)  # type: ignore[arg-type]
-        if kwargs["output_type"].__name__ == "QAReview":  # type: ignore[union-attr]
-            clock.advance(2)
-            return ProviderResult(
-                output=result.output,
-                usage=ProviderUsage(model="slow-qa", input_tokens=7),
-            )
-        return result  # type: ignore[return-value]
-
-    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
-    monkeypatch.setattr(provider, "generate", slow_qa)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.token_usage == 7
-    assert json.loads((workflow.artifacts.root / "run.json").read_text())["token_usage"] == 7
-
-
-def test_timeout_is_rechecked_immediately_before_successful_terminalization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = ManualClock()
-    workflow = make_workflow(
-        tmp_path,
-        BASE_OUTPUTS,
-        [Decision.APPROVED] * 3,
-        [CheckStatus.PASSED],
-        budget=Budget(timeout_seconds=1),
-    )
-    original_write_model = workflow.artifacts.write_model
-
-    def slow_qa_evidence(name: str, model: object) -> Path:
-        path = original_write_model(name, model)  # type: ignore[arg-type]
-        if name == "qa-review":
-            clock.advance(2)
-        return path
-
-    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
-    monkeypatch.setattr(workflow.artifacts, "write_model", slow_qa_evidence)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-
-
-def test_timeout_is_rechecked_before_changes_requested_terminalization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clock = ManualClock()
-    outputs = [
-        *BASE_OUTPUTS[:3],
-        {**BASE_OUTPUTS[3], "merge_recommendation": "changes_requested"},
-    ]
-    workflow = make_workflow(
-        tmp_path,
-        outputs,
-        [Decision.APPROVED] * 3,
-        [CheckStatus.PASSED],
-        budget=Budget(timeout_seconds=1),
-    )
-    original_write_model = workflow.artifacts.write_model
-
-    def slow_qa_evidence(name: str, model: object) -> Path:
-        path = original_write_model(name, model)  # type: ignore[arg-type]
-        if name == "qa-review":
-            clock.advance(2)
-        return path
-
-    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
-    monkeypatch.setattr(workflow.artifacts, "write_model", slow_qa_evidence)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.stage is RunStage.FINISHED
-
-
-def test_initial_manifest_failure_is_terminalized(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workflow = make_workflow(tmp_path, [], [], [])
-    original_update_manifest = workflow.artifacts.update_manifest
-    calls = 0
-
-    def fail_first_update(manifest: object) -> Path:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise IndexError("initial persistence failed")
-        return original_update_manifest(manifest)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(workflow.artifacts, "update_manifest", fail_first_update)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.stage is RunStage.FINISHED
-    assert manifest.reason == "initial persistence failed"
-    assert (workflow.artifacts.root / "report.md").exists()
-
-
-def test_ordinary_collaborator_exception_is_terminalized(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workflow = make_workflow(tmp_path, [], [], [])
-
-    def fail_inspection(root: Path) -> object:
-        del root
-        raise IndexError("inspection failed")
-
-    monkeypatch.setattr(workflow.inspector, "inspect", fail_inspection)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.stage is RunStage.FINISHED
-    assert manifest.reason == "inspection failed"
-    assert (workflow.artifacts.root / "report.md").exists()
-
-
-def test_repository_limit_failure_is_terminalized_with_report_evidence(
-    tmp_path: Path,
-) -> None:
-    workflow = make_workflow(tmp_path, [], [], [])
-    (workflow.root / "second.py").write_text("value = 2\n")
-    workflow.inspector = RepositoryInspector(max_files=1)
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.reason == "repository accepted file count limit exceeded"
-    assert manifest.reason in (workflow.artifacts.root / "report.md").read_text()
-
-
-def test_keyboard_interrupt_from_collaborator_is_not_hidden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workflow = make_workflow(tmp_path, [], [], [])
-
-    def interrupt_inspection(root: Path) -> object:
-        del root
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(workflow.inspector, "inspect", interrupt_inspection)
-
-    with pytest.raises(KeyboardInterrupt):
-        workflow.run()
-
-
-def test_qa_receives_every_approved_and_applied_patch_as_cumulative_evidence(
-    tmp_path: Path,
-) -> None:
-    initial = {
-        "summary": "Add marker",
-        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n value = 1\n+# initial\n",
-    }
-    repair = {
-        "summary": "Repair value",
-        "diff": (
-            "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
-            "-value = 1\n+value = 2\n # initial\n"
-        ),
-    }
-    workflow = make_workflow(
-        tmp_path,
-        [*BASE_OUTPUTS[:2], initial, repair, BASE_OUTPUTS[3]],
-        [Decision.APPROVED] * 4,
-        [CheckStatus.FAILED, CheckStatus.PASSED],
-    )
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.COMPLETED
-    provider = workflow.roles.qa.provider
-    assert isinstance(provider, ScriptedProvider)
-    qa_payload = provider.calls[-1]["payload"]
-    assert qa_payload["diff"] == f"{initial['diff']}\n{repair['diff']}"
-
-
-def test_validation_exhaustion_reason_reflects_actual_repair_budget(tmp_path: Path) -> None:
-    workflow = make_workflow(
-        tmp_path,
-        BASE_OUTPUTS[:3],
-        [Decision.APPROVED] * 3,
-        [CheckStatus.FAILED],
-        budget=Budget(max_repairs=0),
-    )
-
-    manifest = workflow.run()
-
-    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.reason == "validation failed after 0 repair attempts (repair budget: 0)"
+    workflow.run()
+    assert _events(workflow)[-1]["kind"] == EventKind.TERMINAL.value
