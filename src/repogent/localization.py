@@ -65,7 +65,7 @@ class PythonLocalizer:
             return self._report([], inventory)
 
         records = {record.path: record for record in inventory.files}
-        incoming = _incoming_edges(graph.edges, graph.nodes)
+        incoming, source_paths = _incoming_edges(graph.edges, graph.nodes)
         test_paths = {record.path for record in inventory.files if record.kind == "test"}
         failure_tokens = _failure_tokens(failure_evidence)
         locations: list[LocalizedSymbol] = []
@@ -80,7 +80,7 @@ class PythonLocalizer:
                 failure_tokens,
                 incoming.get(node.symbol_id, []),
                 test_paths,
-                graph.nodes,
+                source_paths,
             )
             if signals:
                 locations.append(
@@ -104,7 +104,7 @@ class PythonLocalizer:
         failure_tokens: set[str],
         incoming: list[SymbolEdge],
         test_paths: set[str],
-        nodes: list[SymbolNode],
+        source_paths: dict[str, str],
     ) -> list[LocalizationSignal]:
         signals: list[LocalizationSignal] = []
         lexical_matches = _matches(query_tokens, _tokens(" ".join((record.path, record.text))))
@@ -118,7 +118,7 @@ class PythonLocalizer:
         if any(edge.kind == "calls" for edge in incoming):
             signals.append(_signal("call", ["referenced by call"]))
         if node.path not in test_paths and any(
-            _source_path(edge.source, nodes) in test_paths for edge in incoming
+            source_paths.get(edge.source) in test_paths for edge in incoming
         ):
             signals.append(_signal("test", ["referenced by test"]))
         failure_matches = sorted(
@@ -154,17 +154,22 @@ class PythonLocalizer:
                 continue
             lines = record.text.splitlines()
             start_line = max(1, location.start_line - 20)
-            end_line = min(max(1, len(lines)), location.end_line + 20)
-            text = "\n".join(lines[start_line - 1 : end_line])
+            last_available_line = min(max(1, len(lines)), location.end_line + 20)
             remaining = self.max_total_chars - total_chars
-            text = text[:remaining]
-            if not text:
-                break
+            included_lines: list[str] = []
+            for line in lines[start_line - 1 : last_available_line]:
+                separator = "\n" if included_lines else ""
+                if len("\n".join(included_lines)) + len(separator) + len(line) > remaining:
+                    break
+                included_lines.append(line)
+            if not included_lines:
+                continue
+            text = "\n".join(included_lines)
             snippets.append(
                 ContextSnippet(
                     path=location.path,
                     start_line=start_line,
-                    end_line=end_line,
+                    end_line=start_line + len(included_lines) - 1,
                     text=text,
                     score=location.score,
                     reason="; ".join(signal.reason for signal in location.signals),
@@ -192,26 +197,77 @@ def _matches(query_tokens: list[str], document_tokens: list[str]) -> list[str]:
 
 def _incoming_edges(
     edges: list[SymbolEdge], nodes: list[SymbolNode]
-) -> dict[str, list[SymbolEdge]]:
+) -> tuple[dict[str, list[SymbolEdge]], dict[str, str]]:
+    nodes_by_id = {node.symbol_id: node for node in nodes}
+    qualified_nodes = _unique_qualified_nodes(nodes)
+    parent_ids = {node.symbol_id: node.parent_id for node in nodes}
+    bindings: dict[str, dict[str, str]] = defaultdict(dict)
     incoming: dict[str, list[SymbolEdge]] = defaultdict(list)
     for edge in edges:
-        for node in nodes:
-            if _edge_targets_node(edge, node):
-                incoming[node.symbol_id].append(edge)
-    return incoming
+        if edge.kind != "imports" or edge.source not in nodes_by_id:
+            continue
+        target = qualified_nodes.get(edge.target)
+        if target is None:
+            continue
+        incoming[target.symbol_id].append(edge)
+        local_name = edge.alias or edge.target.rsplit(".", maxsplit=1)[-1]
+        bindings[edge.source][local_name] = target.qualified_name
+    for edge in edges:
+        if edge.kind != "calls" or edge.source not in nodes_by_id:
+            continue
+        target = _resolve_call_target(
+            edge.target,
+            edge.source,
+            bindings,
+            parent_ids,
+            nodes_by_id,
+            qualified_nodes,
+        )
+        if target is not None:
+            incoming[target.symbol_id].append(edge)
+    return incoming, {symbol_id: node.path for symbol_id, node in nodes_by_id.items()}
 
 
-def _edge_targets_node(edge: SymbolEdge, node: SymbolNode) -> bool:
-    return edge.target in {node.symbol_id, node.qualified_name, node.name} or edge.target.endswith(
-        f".{node.qualified_name}"
-    ) or edge.target.endswith(f".{node.name}") or edge.alias == node.name
-
-
-def _source_path(symbol_id: str, nodes: list[SymbolNode]) -> str | None:
+def _unique_qualified_nodes(nodes: list[SymbolNode]) -> dict[str, SymbolNode]:
+    grouped: dict[str, list[SymbolNode]] = defaultdict(list)
     for node in nodes:
-        if node.symbol_id == symbol_id:
-            return node.path
-    return None
+        grouped[node.qualified_name].append(node)
+    return {name: matches[0] for name, matches in grouped.items() if len(matches) == 1}
+
+
+def _resolve_call_target(
+    target: str,
+    source_id: str,
+    bindings: dict[str, dict[str, str]],
+    parent_ids: dict[str, str | None],
+    nodes_by_id: dict[str, SymbolNode],
+    qualified_nodes: dict[str, SymbolNode],
+) -> SymbolNode | None:
+    first, *remainder = target.split(".")
+    scope_id: str | None = source_id
+    while scope_id is not None:
+        bound_target = bindings.get(scope_id, {}).get(first)
+        if bound_target is not None:
+            candidate = ".".join((bound_target, *remainder))
+            return qualified_nodes.get(candidate)
+        scope_id = parent_ids.get(scope_id)
+    direct = qualified_nodes.get(target)
+    if direct is not None:
+        return direct
+    module = _module_for(source_id, parent_ids, nodes_by_id)
+    return qualified_nodes.get(f"{module.qualified_name}.{target}") if module else None
+
+
+def _module_for(
+    source_id: str, parent_ids: dict[str, str | None], nodes_by_id: dict[str, SymbolNode]
+) -> SymbolNode | None:
+    scope_id = source_id
+    while parent_ids.get(scope_id) is not None:
+        parent_id = parent_ids[scope_id]
+        if parent_id is None:
+            break
+        scope_id = parent_id
+    return nodes_by_id.get(scope_id)
 
 
 def _failure_tokens(failure_evidence: ValidationReport | None) -> set[str]:
