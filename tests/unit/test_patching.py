@@ -56,6 +56,17 @@ def test_applier_changes_file_after_validation(tmp_path: Path) -> None:
     assert target.read_text() == "value = 2\n"
 
 
+def test_patch_transaction_restores_successful_patch_without_commit(tmp_path: Path) -> None:
+    target = tmp_path / "app.py"
+    target.write_text("value = 1\n")
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="change", diff=GOOD_DIFF))
+
+    with PatchApplier().transaction(tmp_path, patch):
+        assert target.read_text() == "value = 2\n"
+
+    assert target.read_text() == "value = 1\n"
+
+
 def test_applier_creates_file_in_missing_directory_after_validation(tmp_path: Path) -> None:
     diff = "--- /dev/null\n+++ b/generated/app.py\n@@ -0,0 +1 @@\n+value = 1\n"
     patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="add", diff=diff))
