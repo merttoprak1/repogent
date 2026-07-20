@@ -26,8 +26,7 @@ from repogent.domain import (
     ValidationReport,
     utc_now,
 )
-from repogent.patching import PatchApplier, PatchPolicy, PatchPolicyError
-from repogent.providers import ProviderError
+from repogent.patching import PatchApplier, PatchPolicy
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
 
@@ -91,143 +90,163 @@ class Workflow:
 
     def run(self) -> RunManifest:
         self.started_at = time.monotonic()
-        self.artifacts.update_manifest(self.manifest)
         try:
-            inventory = self.inspector.inspect(self.root)
-            self.write("inventory", inventory)
-            self.advance(RunStage.ANALYZED)
-            context = self.retriever.retrieve(inventory, self.request)
-            self.artifacts.write_text(
-                "context", json.dumps([item.model_dump() for item in context], indent=2)
-            )
-
-            self.ensure_time()
-            requirements_payload = {
-                "request": self.request,
-                "repository_context": [item.model_dump() for item in context],
-            }
-            self.artifacts.write_text(
-                "requirements-input", json.dumps(requirements_payload, indent=2)
-            )
-            requirements_result = self.roles.requirements.run(requirements_payload)
-            self.requirements = requirements_result.output
-            self.account(requirements_result.usage)
-            self.write("requirements", self.requirements)
-            self.advance(RunStage.REQUIREMENTS)
-            if not self.approve(ApprovalKind.REQUIREMENTS, self.requirements):
-                return self.finish(RunStatus.CANCELLED, "requirements rejected")
-            self.advance(RunStage.REQUIREMENTS_APPROVED)
-
-            self.ensure_time()
-            plan_payload = {
-                "requirements": self.requirements.model_dump(),
-                "repository_context": [item.model_dump() for item in context],
-            }
-            self.artifacts.write_text("planning-input", json.dumps(plan_payload, indent=2))
-            plan_result = self.roles.planning.run(plan_payload)
-            self.plan = plan_result.output
-            self.account(plan_result.usage)
-            self.write("plan", self.plan)
-            self.advance(RunStage.PLANNED)
-            if not self.approve(ApprovalKind.PLAN, self.plan):
-                return self.finish(RunStatus.CANCELLED, "implementation plan rejected")
-            self.advance(RunStage.PLAN_APPROVED)
-
-            self.ensure_time()
-            implementation_payload = {
-                "requirements": self.requirements.model_dump(),
-                "plan": self.plan.model_dump(),
-                "repository_context": [item.model_dump() for item in context],
-            }
-            self.artifacts.write_text(
-                "implementation-input", json.dumps(implementation_payload, indent=2)
-            )
-            patch_result = self.roles.implementation.run(implementation_payload)
-            self.account(patch_result.usage)
-            current_patch = self.patch_policy.validate(self.root, patch_result.output)
-            self.write("patch-proposal", patch_result.output)
-            self.advance(RunStage.PATCH_PROPOSED)
-            if not self.approve(ApprovalKind.PATCH, patch_result.output):
-                return self.finish(RunStatus.CANCELLED, "patch rejected")
-            self.write("patch-approved", patch_result.output)
-            self.advance(RunStage.PATCH_APPROVED)
-            self.patch_applier.apply(self.root, current_patch)
-            self.write("patch-applied", patch_result.output)
-            self.advance(RunStage.PATCH_APPLIED)
-
-            self.ensure_time()
-            self.validation = self.validator.run(self.root)
-            self.write("validation", self.validation)
-            self.advance(RunStage.VALIDATED)
-            while (
-                not self.validation.passed
-                and self.manifest.repair_attempts < self.budget.max_repairs
-            ):
-                self.manifest = self.manifest.model_copy(
-                    update={"repair_attempts": self.manifest.repair_attempts + 1}
-                )
-                self.advance(RunStage.REPAIRING)
-                self.ensure_time()
-                repair_payload = {
-                    "requirements": self.requirements.model_dump(),
-                    "plan": self.plan.model_dump(),
-                    "failed_validation": self.validation.model_dump(),
-                }
-                self.artifacts.write_text("repair-input", json.dumps(repair_payload, indent=2))
-                repair_result = self.roles.repair.run(repair_payload)
-                self.account(repair_result.usage)
-                current_patch = self.patch_policy.validate(self.root, repair_result.output)
-                self.write("repair-patch", repair_result.output)
-                self.advance(RunStage.PATCH_PROPOSED)
-                if not self.approve(ApprovalKind.REPAIR_PATCH, repair_result.output):
-                    return self.finish(RunStatus.CANCELLED, "repair patch rejected")
-                self.write("repair-patch-approved", repair_result.output)
-                self.advance(RunStage.PATCH_APPROVED)
-                self.patch_applier.apply(self.root, current_patch)
-                self.write("repair-patch-applied", repair_result.output)
-                self.advance(RunStage.PATCH_APPLIED)
-                self.ensure_time()
-                self.validation = self.validator.run(self.root)
-                self.write("validation", self.validation)
-                self.advance(RunStage.VALIDATED)
-
-            if not self.validation.passed:
-                return self.finish(
-                    RunStatus.HUMAN_INTERVENTION_REQUIRED,
-                    "validation failed after two repairs",
-                )
-
-            self.ensure_time()
-            qa_payload = {
-                "requirements": self.requirements.model_dump(),
-                "plan": self.plan.model_dump(),
-                "validation": self.validation.model_dump(),
-                "diff": current_patch.proposal.diff,
-            }
-            self.artifacts.write_text("qa-input", json.dumps(qa_payload, indent=2))
-            review_result = self.roles.qa.run(qa_payload)
-            self.review = review_result.output
-            self.account(review_result.usage)
-            self.write("qa-review", self.review)
-            self.advance(RunStage.REVIEWED)
-            status = {
-                MergeRecommendation.APPROVE: RunStatus.COMPLETED,
-                MergeRecommendation.APPROVE_WITH_FINDINGS: RunStatus.COMPLETED_WITH_FINDINGS,
-                MergeRecommendation.CHANGES_REQUESTED: RunStatus.CHANGES_REQUESTED,
-            }[self.review.merge_recommendation]
-            return self.finish(status, None)
-        except (
-            PatchPolicyError,
-            ProviderError,
-            BudgetExceeded,
-            TimeoutError,
-            RuntimeError,
-            OSError,
-            ValueError,
-        ) as error:
-            return self.finish(RunStatus.HUMAN_INTERVENTION_REQUIRED, str(error))
+            try:
+                self.artifacts.update_manifest(self.manifest)
+                status, reason = self._execute()
+                if status in {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FINDINGS}:
+                    self.ensure_time()
+            except Exception as error:
+                status = RunStatus.HUMAN_INTERVENTION_REQUIRED
+                reason = str(error)
+            return self.finish(status, reason)
         finally:
             self.elapsed_seconds = time.monotonic() - self.started_at
+
+    def _execute(self) -> tuple[RunStatus, str | None]:
+        inventory = self.inspector.inspect(self.root)
+        self.write("inventory", inventory)
+        self.advance(RunStage.ANALYZED)
+        context = self.retriever.retrieve(inventory, self.request)
+        context_payload = [item.model_dump() for item in context]
+        self.artifacts.write_text("context", json.dumps(context_payload, indent=2))
+
+        self.ensure_time()
+        requirements_payload = {
+            "request": self.request,
+            "repository_context": context_payload,
+        }
+        self.artifacts.write_text(
+            "requirements-input", json.dumps(requirements_payload, indent=2)
+        )
+        requirements_result = self.roles.requirements.run(requirements_payload)
+        self.requirements = requirements_result.output
+        self.account(requirements_result.usage)
+        self.ensure_time()
+        self.write("requirements", self.requirements)
+        self.advance(RunStage.REQUIREMENTS)
+        requirements_approved = self.approve(ApprovalKind.REQUIREMENTS, self.requirements)
+        self.ensure_time()
+        if not requirements_approved:
+            return RunStatus.CANCELLED, "requirements rejected"
+        self.advance(RunStage.REQUIREMENTS_APPROVED)
+
+        self.ensure_time()
+        plan_payload = {
+            "requirements": self.requirements.model_dump(),
+            "repository_context": context_payload,
+        }
+        self.artifacts.write_text("planning-input", json.dumps(plan_payload, indent=2))
+        plan_result = self.roles.planning.run(plan_payload)
+        self.plan = plan_result.output
+        self.account(plan_result.usage)
+        self.ensure_time()
+        self.write("plan", self.plan)
+        self.advance(RunStage.PLANNED)
+        plan_approved = self.approve(ApprovalKind.PLAN, self.plan)
+        self.ensure_time()
+        if not plan_approved:
+            return RunStatus.CANCELLED, "implementation plan rejected"
+        self.advance(RunStage.PLAN_APPROVED)
+
+        self.ensure_time()
+        implementation_payload = {
+            "requirements": self.requirements.model_dump(),
+            "plan": self.plan.model_dump(),
+            "repository_context": context_payload,
+        }
+        self.artifacts.write_text(
+            "implementation-input", json.dumps(implementation_payload, indent=2)
+        )
+        patch_result = self.roles.implementation.run(implementation_payload)
+        self.account(patch_result.usage)
+        self.ensure_time()
+        current_patch = self.patch_policy.validate(self.root, patch_result.output)
+        self.write("patch-proposal", patch_result.output)
+        self.advance(RunStage.PATCH_PROPOSED)
+        patch_approved = self.approve(ApprovalKind.PATCH, patch_result.output)
+        self.ensure_time()
+        if not patch_approved:
+            return RunStatus.CANCELLED, "patch rejected"
+        self.write("patch-approved", patch_result.output)
+        self.advance(RunStage.PATCH_APPROVED)
+        self.ensure_time()
+        self.patch_applier.apply(self.root, current_patch)
+        applied_diffs = [current_patch.proposal.diff]
+        self.write("patch-applied", patch_result.output)
+        self.advance(RunStage.PATCH_APPLIED)
+
+        self.ensure_time()
+        self.validation = self.validator.run(self.root)
+        self.ensure_time()
+        self.write("validation", self.validation)
+        self.advance(RunStage.VALIDATED)
+        while (
+            not self.validation.passed
+            and self.manifest.repair_attempts < self.budget.max_repairs
+        ):
+            self.manifest = self.manifest.model_copy(
+                update={"repair_attempts": self.manifest.repair_attempts + 1}
+            )
+            self.advance(RunStage.REPAIRING)
+            self.ensure_time()
+            repair_payload = {
+                "requirements": self.requirements.model_dump(),
+                "plan": self.plan.model_dump(),
+                "failed_validation": self.validation.model_dump(),
+            }
+            self.artifacts.write_text("repair-input", json.dumps(repair_payload, indent=2))
+            repair_result = self.roles.repair.run(repair_payload)
+            self.account(repair_result.usage)
+            self.ensure_time()
+            current_patch = self.patch_policy.validate(self.root, repair_result.output)
+            self.write("repair-patch", repair_result.output)
+            self.advance(RunStage.PATCH_PROPOSED)
+            repair_approved = self.approve(ApprovalKind.REPAIR_PATCH, repair_result.output)
+            self.ensure_time()
+            if not repair_approved:
+                return RunStatus.CANCELLED, "repair patch rejected"
+            self.write("repair-patch-approved", repair_result.output)
+            self.advance(RunStage.PATCH_APPROVED)
+            self.ensure_time()
+            self.patch_applier.apply(self.root, current_patch)
+            applied_diffs.append(current_patch.proposal.diff)
+            self.write("repair-patch-applied", repair_result.output)
+            self.advance(RunStage.PATCH_APPLIED)
+            self.ensure_time()
+            self.validation = self.validator.run(self.root)
+            self.ensure_time()
+            self.write("validation", self.validation)
+            self.advance(RunStage.VALIDATED)
+
+        if not self.validation.passed:
+            attempts = self.manifest.repair_attempts
+            return (
+                RunStatus.HUMAN_INTERVENTION_REQUIRED,
+                f"validation failed after {attempts} repair attempts "
+                f"(repair budget: {self.budget.max_repairs})",
+            )
+
+        self.ensure_time()
+        qa_payload = {
+            "requirements": self.requirements.model_dump(),
+            "plan": self.plan.model_dump(),
+            "validation": self.validation.model_dump(),
+            "diff": "\n".join(applied_diffs),
+        }
+        self.artifacts.write_text("qa-input", json.dumps(qa_payload, indent=2))
+        review_result = self.roles.qa.run(qa_payload)
+        self.review = review_result.output
+        self.account(review_result.usage)
+        self.ensure_time()
+        self.write("qa-review", self.review)
+        self.advance(RunStage.REVIEWED)
+        status = {
+            MergeRecommendation.APPROVE: RunStatus.COMPLETED,
+            MergeRecommendation.APPROVE_WITH_FINDINGS: RunStatus.COMPLETED_WITH_FINDINGS,
+            MergeRecommendation.CHANGES_REQUESTED: RunStatus.CHANGES_REQUESTED,
+        }[self.review.merge_recommendation]
+        return status, None
 
     def ensure_time(self) -> None:
         if time.monotonic() - self.started_at > self.budget.timeout_seconds:
