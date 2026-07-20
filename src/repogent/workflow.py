@@ -248,6 +248,11 @@ class Workflow:
         )
         if not self.approve(ApprovalKind.PATCH, approval_artifact):
             return RunStatus.CANCELLED, "selected patch rejected"
+        if not approval_baseline.matches(self.root, deadline=self.deadline):
+            return (
+                RunStatus.HUMAN_INTERVENTION_REQUIRED,
+                "repository baseline changed after approval",
+            )
         self.advance(RunStage.PATCH_APPROVED)
 
         self.ensure_time()
@@ -255,10 +260,19 @@ class Workflow:
         self.patch_applier.apply(self.root, validated)
         self.write("patch-applied", selected.proposal)
         self.advance(RunStage.PATCH_APPLIED)
-        self.validation = self._run_validation()
+        post_patch_baseline = candidate_evaluator.capture_baseline(
+            self.root, deadline=self.deadline
+        )
+        self.validation, final_root_stable = candidate_evaluator.validate_isolated(
+            self.root,
+            timeout_seconds=self.remaining_time(),
+            baseline=post_patch_baseline,
+        )
         self.write("validation", self.validation)
         self.emit(EventKind.VALIDATION, "final validation completed", passed=self.validation.passed)
         self.advance(RunStage.VALIDATED)
+        if not final_root_stable:
+            return RunStatus.HUMAN_INTERVENTION_REQUIRED, "repository drift during final validation"
         if not _same_required_results(selected_evidence.validation, self.validation):
             return RunStatus.HUMAN_INTERVENTION_REQUIRED, "changed validation evidence"
         if not self.validation.passed:

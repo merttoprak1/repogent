@@ -431,6 +431,81 @@ def test_candidate_evaluator_copies_safe_symlinks_and_cleans_special_eval_nodes(
     assert (root / "app.py").stat().st_mtime_ns == unchanged_mtime
 
 
+def test_candidate_evaluator_passes_remaining_timeout_after_copy_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    class TimeoutRecordingValidator:
+        received: float | None = None
+
+        def run(
+            self, root: Path, *, timeout_seconds: float | None = None
+        ) -> ValidationReport:
+            del root
+            self.received = timeout_seconds
+            return ValidationReport(
+                checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
+            )
+
+    clock = Clock()
+    root = repository_with_value(tmp_path, 1)
+    validator = TimeoutRecordingValidator()
+    evaluator = CandidateEvaluator(PatchPolicy(), PatchApplier(), validator)
+    from repogent import candidates as candidates_module
+
+    original_copy = candidates_module._copy_for_evaluation
+
+    def delayed_copy(source: Path, destination: Path, *, deadline: float) -> None:
+        clock.advance(3)
+        original_copy(source, destination, deadline=deadline)
+
+    monkeypatch.setattr("repogent.candidates.time.monotonic", clock.monotonic)
+    monkeypatch.setattr(candidates_module, "_copy_for_evaluation", delayed_copy)
+
+    evidence = evaluator.evaluate(root, candidate("candidate-1", 1, 2), ["value changes"], 10)
+
+    assert evidence.eligible is True
+    assert validator.received == 7
+
+
+def test_candidate_evaluator_times_out_during_copy_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = Clock()
+    root = repository_with_value(tmp_path, 1)
+    from repogent import candidates as candidates_module
+
+    original_copy = candidates_module._copy_for_evaluation
+
+    def expired_copy(source: Path, destination: Path, *, deadline: float) -> None:
+        clock.now = 11
+        original_copy(source, destination, deadline=deadline)
+
+    monkeypatch.setattr("repogent.candidates.time.monotonic", clock.monotonic)
+    monkeypatch.setattr(candidates_module, "_copy_for_evaluation", expired_copy)
+
+    evidence = CandidateEvaluator(PatchPolicy(), PatchApplier(), RecordingValidator()).evaluate(
+        root, candidate("candidate-1", 1, 2), ["value changes"], 10
+    )
+
+    assert evidence.eligible is False
+    assert evidence.required_failures == ["timeout"]
+
+
 def test_candidate_evaluator_rejects_unmapped_acceptance_without_mutation(tmp_path: Path) -> None:
     root = repository_with_value(tmp_path, 1)
 

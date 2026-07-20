@@ -22,6 +22,34 @@ from repogent.domain import (
 from repogent.localization import LocalizationReport
 from repogent.patching import PatchApplier, PatchPolicy, PatchPolicyError, ValidatedPatch
 
+_EVALUATION_COPY_IGNORES = {
+    ".git",
+    ".hg",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
+
+
+class EvaluationTimeout(TimeoutError):
+    pass
+
+
+def _deadline_after(timeout_seconds: float) -> float:
+    if timeout_seconds <= 0:
+        raise EvaluationTimeout("candidate evaluation timeout exceeded")
+    return time.monotonic() + timeout_seconds
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise EvaluationTimeout("candidate evaluation timeout exceeded")
+    return remaining
+
 
 class Validator(Protocol):
     def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport: ...
@@ -42,7 +70,11 @@ class RepositoryIntegritySnapshot:
     entries: dict[Path, NodeFingerprint]
 
     @classmethod
-    def capture(cls, root: Path) -> RepositoryIntegritySnapshot:
+    def capture(
+        cls, root: Path, *, deadline: float | None = None
+    ) -> RepositoryIntegritySnapshot:
+        if deadline is not None:
+            _remaining(deadline)
         repository = root.resolve(strict=True)
         entries: dict[Path, NodeFingerprint] = {
             Path(): NodeFingerprint("directory", stat.S_IMODE(repository.stat().st_mode))
@@ -51,9 +83,13 @@ class RepositoryIntegritySnapshot:
 
         def walk(directory_fd: int, relative: Path) -> None:
             try:
+                if deadline is not None:
+                    _remaining(deadline)
                 with os.scandir(directory_fd) as scanned:
                     names = sorted(entry.name for entry in scanned)
                 for name in names:
+                    if deadline is not None:
+                        _remaining(deadline)
                     path = relative / name
                     metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                     mode = stat.S_IMODE(metadata.st_mode)
@@ -65,7 +101,7 @@ class RepositoryIntegritySnapshot:
                         walk(child, path)
                     elif stat.S_ISREG(metadata.st_mode):
                         entries[path] = NodeFingerprint(
-                            "regular", mode, digest=_digest_file(directory_fd, name)
+                            "regular", mode, digest=_digest_file(directory_fd, name, deadline)
                         )
                     elif stat.S_ISLNK(metadata.st_mode):
                         entries[path] = NodeFingerprint(
@@ -79,21 +115,23 @@ class RepositoryIntegritySnapshot:
         walk(descriptor, Path())
         return cls(entries)
 
-    def matches(self, root: Path) -> bool:
+    def matches(self, root: Path, *, deadline: float | None = None) -> bool:
         try:
-            current = self.capture(root)
-        except (OSError, ValueError):
+            current = self.capture(root, deadline=deadline)
+        except (OSError, ValueError, EvaluationTimeout):
             return False
         return current == self
 
 
-def _digest_file(directory_fd: int, name: str) -> str:
+def _digest_file(directory_fd: int, name: str, deadline: float | None = None) -> str:
     import hashlib
 
     descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
     try:
         digest = hashlib.sha256()
         while chunk := os.read(descriptor, 65_536):
+            if deadline is not None:
+                _remaining(deadline)
             digest.update(chunk)
         return digest.hexdigest()
     finally:
@@ -112,19 +150,22 @@ def _special_kind(mode: int) -> str:
     return "unknown"
 
 
-def _copy_for_evaluation(source: Path, destination: Path) -> None:
+def _copy_for_evaluation(source: Path, destination: Path, *, deadline: float) -> None:
     """Copy only into a disposable tree; never mutate or follow source symlinks."""
 
+    _remaining(deadline)
     repository = source.resolve(strict=True)
     destination.mkdir(mode=0o700)
     source_fd = os.open(repository, PatchApplier._directory_flags())
 
     def copy_tree(directory_fd: int, source_directory: Path, target_directory: Path) -> None:
         try:
+            _remaining(deadline)
             with os.scandir(directory_fd) as entries:
                 names = sorted(entry.name for entry in entries)
             for name in names:
-                if name in {".git", ".hg"}:
+                _remaining(deadline)
+                if name in _EVALUATION_COPY_IGNORES:
                     continue
                 metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                 target = target_directory / name
@@ -136,7 +177,7 @@ def _copy_for_evaluation(source: Path, destination: Path) -> None:
                     copy_tree(child, source_directory / name, target)
                     os.chmod(target, stat.S_IMODE(metadata.st_mode))
                 elif stat.S_ISREG(metadata.st_mode):
-                    _copy_regular_file(directory_fd, name, target, metadata)
+                    _copy_regular_file(directory_fd, name, target, metadata, deadline)
                 elif stat.S_ISLNK(metadata.st_mode):
                     link_target = os.readlink(name, dir_fd=directory_fd)
                     if _is_safe_symlink(repository, source_directory, link_target):
@@ -154,7 +195,13 @@ def _is_safe_symlink(repository: Path, parent: Path, target: str) -> bool:
     return resolved == repository or repository in resolved.parents
 
 
-def _copy_regular_file(source_fd: int, name: str, target: Path, metadata: os.stat_result) -> None:
+def _copy_regular_file(
+    source_fd: int,
+    name: str,
+    target: Path,
+    metadata: os.stat_result,
+    deadline: float,
+) -> None:
     source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
     destination = os.open(
         target,
@@ -163,6 +210,7 @@ def _copy_regular_file(source_fd: int, name: str, target: Path, metadata: os.sta
     )
     try:
         while chunk := os.read(source, 65_536):
+            _remaining(deadline)
             _write_all(destination, chunk)
         os.fchmod(destination, stat.S_IMODE(metadata.st_mode))
     finally:
@@ -384,6 +432,10 @@ class CandidateEvaluator:
         timeout_seconds: float,
     ) -> CandidateEvidence:
         started = time.monotonic()
+        try:
+            deadline = _deadline_after(timeout_seconds)
+        except EvaluationTimeout as error:
+            return self._failure_evidence(candidate.candidate_id, "timeout", str(error), started)
         unknown_criteria = set(candidate.proposal.acceptance_criteria_addressed) - set(
             acceptance_criteria
         )
@@ -401,12 +453,14 @@ class CandidateEvaluator:
         validated: ValidatedPatch | None = None
         evaluation_error: Exception | None = None
         validator_error: Exception | None = None
+        timeout_error: EvaluationTimeout | None = None
 
         try:
-            baseline = self.capture_baseline(root)
+            baseline = self.capture_baseline(root, deadline=deadline)
             with tempfile.TemporaryDirectory(prefix="repogent-candidate-") as temporary:
                 evaluation_root = Path(temporary) / "repository"
-                _copy_for_evaluation(root, evaluation_root)
+                _copy_for_evaluation(root, evaluation_root, deadline=deadline)
+                _remaining(deadline)
                 try:
                     validated = self.patch_policy.validate(evaluation_root, candidate.proposal)
                 except PatchPolicyError as error:
@@ -416,19 +470,32 @@ class CandidateEvaluator:
                         with self.patch_applier.transaction(evaluation_root, validated):
                             try:
                                 validation = self.validator.run(
-                                    evaluation_root, timeout_seconds=timeout_seconds
+                                    evaluation_root, timeout_seconds=_remaining(deadline)
                                 )
                             except Exception as error:
                                 validator_error = error
                     except Exception as error:
                         evaluation_error = error
+        except EvaluationTimeout as error:
+            timeout_error = error
         except Exception as error:
             evaluation_error = error
 
-        restored_to_baseline = baseline is not None and baseline.matches(root)
+        restored_to_baseline = False
+        if baseline is not None:
+            try:
+                restored_to_baseline = baseline == RepositoryIntegritySnapshot.capture(
+                    root, deadline=deadline
+                )
+            except EvaluationTimeout as error:
+                timeout_error = error
+            except (OSError, ValueError):
+                restored_to_baseline = False
 
         if validator_error is not None:
             validation = _with_failure(validation, "validation", str(validator_error))
+        if timeout_error is not None:
+            validation = _with_failure(validation, "timeout", str(timeout_error))
         if evaluation_error is not None and not isinstance(evaluation_error, PatchPolicyError):
             validation = _with_failure(validation, "evaluation", str(evaluation_error))
         if not restored_to_baseline:
@@ -438,12 +505,24 @@ class CandidateEvaluator:
                 "real repository state changed during candidate evaluation",
             )
         if validated is None:
+            failure_name = (
+                "timeout"
+                if timeout_error is not None
+                else "patch-policy"
+                if isinstance(evaluation_error, PatchPolicyError)
+                else "evaluation"
+            )
+            failure_reason = (
+                str(timeout_error)
+                if timeout_error is not None
+                else str(evaluation_error)
+                if evaluation_error is not None
+                else "candidate evaluation did not produce a validated patch"
+            )
             return self._failure_evidence(
                 candidate.candidate_id,
-                "patch-policy" if isinstance(evaluation_error, PatchPolicyError) else "evaluation",
-                str(evaluation_error)
-                if evaluation_error is not None
-                else "candidate evaluation did not produce a validated patch",
+                failure_name,
+                failure_reason,
                 started,
                 restored_to_baseline=restored_to_baseline,
                 validation=validation,
@@ -473,8 +552,52 @@ class CandidateEvaluator:
             restored_to_baseline=restored_to_baseline,
         )
 
-    def capture_baseline(self, root: Path) -> RepositoryIntegritySnapshot:
-        return RepositoryIntegritySnapshot.capture(root)
+    def validate_isolated(
+        self,
+        root: Path,
+        *,
+        timeout_seconds: float,
+        baseline: RepositoryIntegritySnapshot | None = None,
+    ) -> tuple[ValidationReport, bool]:
+        deadline = _deadline_after(timeout_seconds)
+        baseline = baseline or RepositoryIntegritySnapshot.capture(root, deadline=deadline)
+        validation = ValidationReport(checks=[])
+        error: Exception | None = None
+        timeout_error: EvaluationTimeout | None = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="repogent-final-validation-") as temporary:
+                evaluation_root = Path(temporary) / "repository"
+                _copy_for_evaluation(root, evaluation_root, deadline=deadline)
+                validation = self.validator.run(
+                    evaluation_root, timeout_seconds=_remaining(deadline)
+                )
+        except EvaluationTimeout as caught:
+            timeout_error = caught
+        except Exception as caught:
+            error = caught
+        stable = False
+        try:
+            stable = baseline == RepositoryIntegritySnapshot.capture(root, deadline=deadline)
+        except EvaluationTimeout as caught:
+            timeout_error = caught
+        except (OSError, ValueError):
+            stable = False
+        if timeout_error is not None:
+            validation = _with_failure(validation, "timeout", str(timeout_error))
+        if error is not None:
+            validation = _with_failure(validation, "validation", str(error))
+        if not stable:
+            validation = _with_failure(
+                validation,
+                "repository-drift",
+                "real repository state changed during isolated final validation",
+            )
+        return validation, stable
+
+    def capture_baseline(
+        self, root: Path, *, deadline: float | None = None
+    ) -> RepositoryIntegritySnapshot:
+        return RepositoryIntegritySnapshot.capture(root, deadline=deadline)
 
     @staticmethod
     def _failure_evidence(
@@ -514,10 +637,6 @@ def _with_failure(validation: ValidationReport, name: str, reason: str) -> Valid
             ),
         ]
     )
-
-
-def _is_restoration_error(error: Exception) -> bool:
-    return str(error).startswith("patch restoration failed:")
 
 
 def _acceptance_coverage(

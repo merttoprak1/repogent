@@ -304,6 +304,69 @@ def test_workflow_rechecks_complete_baseline_before_patch_approval(tmp_path: Pat
     ]
 
 
+def test_patch_approval_drift_stops_before_application_and_preserves_user_change(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    (workflow.root / "other.py").write_text("original\n")
+    original_decide = workflow.approver.decide
+
+    def decide(kind: ApprovalKind, artifact: object) -> object:
+        record = original_decide(kind, artifact)  # type: ignore[arg-type]
+        if kind is ApprovalKind.PATCH:
+            (workflow.root / "other.py").write_text("concurrent edit\n")
+        return record
+
+    workflow.approver.decide = decide  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "repository baseline changed after approval"
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+    assert (workflow.root / "other.py").read_text() == "concurrent edit\n"
+
+
+def test_candidate_and_final_validation_run_only_in_disposable_roots(tmp_path: Path) -> None:
+    class MutatingValidator:
+        def __init__(self) -> None:
+            self.roots: list[Path] = []
+
+        def run(
+            self, root: Path, *, timeout_seconds: float | None = None
+        ) -> ValidationReport:
+            del timeout_seconds
+            self.roots.append(root)
+            (root / "other.py").write_text("validator side effect\n")
+            return ValidationReport(
+                checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
+            )
+
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[],
+    )
+    (workflow.root / "other.py").write_text("original\n")
+    validator = MutatingValidator()
+    workflow.validator = validator
+    workflow.candidate_evaluator = CandidateEvaluator(
+        workflow.patch_policy, workflow.patch_applier, validator
+    )
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.COMPLETED
+    assert len(validator.roots) == 2
+    assert all(root != workflow.root for root in validator.roots)
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
+    assert (workflow.root / "other.py").read_text() == "original\n"
+
+
 def test_patch_approval_contains_all_candidate_proposals_and_evidence(tmp_path: Path) -> None:
     workflow = make_phase2_workflow(
         tmp_path,
