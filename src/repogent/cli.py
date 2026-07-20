@@ -10,11 +10,13 @@ from openai import OpenAIError
 from repogent.agents import RoleSet
 from repogent.approvals import CliApprover
 from repogent.artifacts import ArtifactStore, ArtifactStoreError
-from repogent.domain import Budget, RunManifest, RunStatus
+from repogent.domain import Budget, RunManifest, RunStage, RunStatus
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
 from repogent.localization import PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
+from repogent.preflight import Preflight, configuration_fingerprint
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
+from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
 from repogent.symbols import PythonSymbolGraphBuilder
 from repogent.validation import ValidationPipeline
@@ -80,6 +82,40 @@ def run_command(
         typer.echo(f"could not create evidence directory: {error}")
         raise typer.Exit(2) from error
 
+    policy = ValidationPolicy()
+    command_executor = (
+        DockerExecutor()
+        if executor == "docker"
+        else LocalExecutor(
+            allowed={command.name: command.argv for command in policy.commands(repository)}
+        )
+    )
+    preflight = Preflight(command_executor, policy).run(repository)
+    store.write_model("preflight", preflight)
+    for check in preflight.checks:
+        if check.reason and check.status.value != "passed":
+            typer.echo(f"{check.name}: {check.reason}")
+    manifest = RunManifest(
+        run_id=store.root.name,
+        request=request,
+        repository_fingerprint=preflight.repository_fingerprint,
+        configuration_fingerprint=configuration_fingerprint(
+            provider, model, executor, policy.commands(repository)
+        ),
+    )
+    if not preflight.passed:
+        manifest = manifest.model_copy(
+            update={
+                "status": RunStatus.HUMAN_INTERVENTION_REQUIRED,
+                "stage": RunStage.FINISHED,
+                "reason": "repository preflight failed",
+            }
+        )
+        store.update_manifest(manifest)
+        store.write_final("report.md", render_report(manifest, None, None, None, None))
+        typer.echo(f"Evidence: {store.root}")
+        raise typer.Exit(2)
+
     model_provider: ModelProvider
     if provider == "scripted":
         try:
@@ -93,15 +129,6 @@ def run_command(
         except OpenAIError as error:
             typer.echo(f"could not load OpenAI provider: {error}")
             raise typer.Exit(2) from error
-    policy = ValidationPolicy()
-    command_executor = (
-        DockerExecutor()
-        if executor == "docker"
-        else LocalExecutor(
-            allowed={command.name: command.argv for command in policy.commands(repository)}
-        )
-    )
-    manifest = RunManifest(run_id=store.root.name, request=request)
     workflow = Workflow(
         root=repository,
         request=request,

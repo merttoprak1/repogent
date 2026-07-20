@@ -58,6 +58,14 @@ def test_local_executor_reports_missing_module_as_unavailable() -> None:
     assert not LocalExecutor(allowed={"optional": command.argv}).available(command)
 
 
+def test_local_executor_readiness_warns_without_affecting_command_availability() -> None:
+    command = CommandSpec("python", ("python", "-c", "print('ok')"), True)
+    executor = LocalExecutor(allowed={"python": command.argv})
+
+    assert executor.readiness() == (True, "restricted local execution provides weaker isolation")
+    assert executor.available(command) is True
+
+
 def test_local_executor_returns_timeout_result(tmp_path: Path) -> None:
     command = CommandSpec(
         name="python",
@@ -218,6 +226,14 @@ def test_docker_executor_skips_when_docker_is_unavailable(
     assert result.status is CheckStatus.SKIPPED
     assert result.argv == list(command.argv)
     assert result.reason == "docker executable or validator image unavailable"
+
+
+def test_docker_executor_readiness_reports_missing_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: None)
+
+    assert DockerExecutor().readiness() == (False, "docker executable is unavailable")
 
 
 def test_docker_executor_skips_missing_image_without_running_container(

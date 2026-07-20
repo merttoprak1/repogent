@@ -158,6 +158,7 @@ class ValidationPolicy:
 
 
 class Executor(Protocol):
+    def readiness(self) -> tuple[bool, str | None]: ...
     def available(self, command: CommandSpec) -> bool: ...
     def run(self, command: CommandSpec, root: Path) -> CheckResult: ...
 
@@ -208,6 +209,9 @@ class LocalExecutor(_RestrictedExecutor):
             allowed=allowed,
             max_output_chars=max_output_chars,
         )
+
+    def readiness(self) -> tuple[bool, str | None]:
+        return (True, "restricted local execution provides weaker isolation")
 
     def available(self, command: CommandSpec) -> bool:
         return self._is_allowed(command) and (
@@ -271,6 +275,18 @@ class DockerExecutor(_RestrictedExecutor):
             allowed=allowed,
             max_output_chars=max_output_chars,
         )
+
+    def readiness(self) -> tuple[bool, str | None]:
+        if self.docker is None:
+            return (False, "docker executable is unavailable")
+        inspection = self._inspect_image()
+        if inspection is None:
+            return (False, "docker image inspection failed")
+        if inspection.timed_out:
+            return (False, "docker image inspection timed out")
+        if inspection.exit_code != 0:
+            return (False, f"validator image is unavailable: {self.image}")
+        return (True, None)
 
     def available(self, command: CommandSpec) -> bool:
         if not self._is_allowed(command):
