@@ -44,6 +44,18 @@ def test_redaction_removes_named_secrets_and_common_api_keys() -> None:
     assert "ghp_" not in redact(text, [])
 
 
+def test_raw_text_redaction_preserves_database_url_delimiters() -> None:
+    text = "dsn=postgresql://alice:secret@db.example/app,next=visible"
+
+    sanitized = redact(text, [])
+
+    assert sanitized == "dsn=[REDACTED],next=visible"
+
+
+def test_explicit_secret_redaction_does_not_duplicate_placeholder_delimiters() -> None:
+    assert redact("token=named-secret", ["named-secret"]) == "token=[REDACTED]"
+
+
 @pytest.mark.parametrize("name", ["/" + "tmp/escape", "../escape"])
 def test_text_write_rejects_unsafe_artifact_names(tmp_path: Path, name: str) -> None:
     target = tmp_path / "target"
@@ -73,5 +85,99 @@ def test_manifest_write_redacts_explicit_and_pattern_secrets(tmp_path: Path) -> 
     )
     store.update_manifest(manifest)
     persisted = (store.root / "run.json").read_text()
+    assert json.loads(persisted)["run_id"] == "run-1"
     assert "named-secret" not in persisted
     assert "ghp_" not in persisted
+
+
+def test_json_artifact_recursively_redacts_secret_value_families(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    store = ArtifactStore.create(
+        tmp_path / "runs",
+        target,
+        "change",
+        run_id="run-1",
+        secrets=["configured-secret"],
+    )
+    secrets = [
+        "password=hunter2",
+        "token=ghp_abcdefghijklmnopqrstuvwxyz123456",
+        "api_key=sk-proj-abcdefghijklmnop",
+        "AKIAIOSFODNN7EXAMPLE",
+        "postgresql://alice:db-secret@db.example/app",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signatureABCDE",
+        "configured-secret",
+    ]
+
+    artifact = store.write_text(
+        "payload", json.dumps({"nested": [{"value": secret} for secret in secrets]}), suffix=".json"
+    )
+
+    payload = json.loads(artifact.read_text())
+    persisted = json.dumps(payload)
+    assert len(payload["nested"]) == len(secrets)
+    for secret in (
+        "hunter2",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456",
+        "sk-proj-abcdefghijklmnop",
+        "AKIAIOSFODNN7EXAMPLE",
+        "postgresql://alice:db-secret@db.example/app",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signatureABCDE",
+        "configured-secret",
+    ):
+        assert secret not in persisted
+
+
+def test_json_artifact_redacts_sensitive_fields_and_quoted_assignments(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    store = ArtifactStore.create(tmp_path / "runs", target, "change", run_id="run-1")
+    artifact = store.write_text(
+        "payload",
+        json.dumps(
+            {
+                "credentials": {
+                    "password": "correct horse battery staple",
+                    "token": "opaque-token-value",
+                    "api-key": "opaque-api-key-value",
+                },
+                "note": 'password="another secret with spaces"',
+                "embedded": '{"password": "embedded secret with spaces"}',
+                "safe": "ordinary source remains visible",
+            }
+        ),
+        suffix=".json",
+    )
+
+    persisted = artifact.read_text()
+    payload = json.loads(persisted)
+    assert payload["safe"] == "ordinary source remains visible"
+    for secret in (
+        "correct horse battery staple",
+        "opaque-token-value",
+        "opaque-api-key-value",
+        "another secret with spaces",
+        "embedded secret with spaces",
+    ):
+        assert secret not in persisted
+
+
+def test_manifest_redaction_preserves_valid_json_structure(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    store = ArtifactStore.create(
+        tmp_path / "runs", target, "change", run_id="run-1", secrets=["named-secret"]
+    )
+    manifest = RunManifest(
+        run_id="run-1",
+        request="password=hunter2",
+    )
+
+    store.update_manifest(manifest)
+
+    payload = json.loads((store.root / "run.json").read_text())
+    assert payload["run_id"] == "run-1"
+    assert "hunter2" not in payload["request"]

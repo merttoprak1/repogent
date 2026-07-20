@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -8,27 +9,19 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from repogent.sanitization import redact_text, sanitize_data
+
 
 class ArtifactStoreError(ValueError):
     pass
 
 
-SECRET_PATTERNS = (
-    re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"(?i)(password|token|secret)\s*[=:]\s*[^\s]+"),
-)
 SAFE_STEM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def redact(text: str, explicit_secrets: list[str]) -> str:
-    result = text
-    for secret in sorted((item for item in explicit_secrets if item), key=len, reverse=True):
-        result = result.replace(secret, "[REDACTED]")
-    for pattern in SECRET_PATTERNS:
-        result = pattern.sub("[REDACTED]", result)
-    return result
+    return redact_text(text, explicit_secrets)
 
 
 class ArtifactStore:
@@ -59,7 +52,11 @@ class ArtifactStore:
         return cls(root, secrets)
 
     def write_model(self, name: str, model: BaseModel) -> Path:
-        return self.write_text(name, model.model_dump_json(indent=2), suffix=".json")
+        return self.write_text(
+            name,
+            json.dumps(sanitize_data(model.model_dump(mode="json"), self.secrets), indent=2),
+            suffix=".json",
+        )
 
     def write_text(self, name: str, text: str, *, suffix: str = ".txt") -> Path:
         if not _is_plain_component(name, SAFE_STEM):
@@ -68,20 +65,30 @@ class ArtifactStore:
             raise ArtifactStoreError("suffix must be a plain suffix beginning with one dot")
         index = len(list(self.root.glob(f"{name}-*{suffix}"))) + 1
         path = self._path_in_root(f"{name}-{index:03d}{suffix}")
-        self._atomic_write(path, redact(text, self.secrets))
+        self._atomic_write(path, self._sanitize_text(text))
         return path
 
     def update_manifest(self, manifest: BaseModel) -> Path:
         path = self._path_in_root("run.json")
-        self._atomic_write(path, redact(manifest.model_dump_json(indent=2), self.secrets))
+        content = json.dumps(
+            sanitize_data(manifest.model_dump(mode="json"), self.secrets), indent=2
+        )
+        self._atomic_write(path, content)
         return path
 
     def write_final(self, filename: str, content: str) -> Path:
         if Path(filename).name != filename or not filename.endswith((".md", ".json")):
             raise ArtifactStoreError("final artifact must be a plain Markdown or JSON filename")
         path = self._path_in_root(filename)
-        self._atomic_write(path, redact(content, self.secrets))
+        self._atomic_write(path, self._sanitize_text(content))
         return path
+
+    def _sanitize_text(self, content: str) -> str:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return redact(content, self.secrets)
+        return json.dumps(sanitize_data(payload, self.secrets), indent=2)
 
     def _path_in_root(self, filename: str) -> Path:
         path = self.root / filename

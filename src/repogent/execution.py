@@ -275,21 +275,27 @@ class DockerExecutor(_RestrictedExecutor):
     def available(self, command: CommandSpec) -> bool:
         if not self._is_allowed(command):
             return False
-        inspection = self._inspect_image()
+        inspection = self._inspect_image(
+            timeout_seconds=min(
+                _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
+            )
+        )
         return (
             inspection is not None
             and not inspection.timed_out
             and inspection.exit_code == 0
         )
 
-    def _inspect_image(self) -> _ProcessResult | None:
+    def _inspect_image(
+        self, *, timeout_seconds: int = _DOCKER_CONTROL_TIMEOUT_SECONDS
+    ) -> _ProcessResult | None:
         docker = self.docker
         if docker is None:
             return None
         try:
             return _run_with_bounded_output(
                 [docker, "image", "inspect", self.image],
-                timeout_seconds=_DOCKER_CONTROL_TIMEOUT_SECONDS,
+                timeout_seconds=timeout_seconds,
                 max_output_chars=self.max_output_chars,
             )
         except OSError:
@@ -298,7 +304,11 @@ class DockerExecutor(_RestrictedExecutor):
     def run(self, command: CommandSpec, root: Path) -> CheckResult:
         self._validate_command(command)
         docker = self.docker
-        inspection = self._inspect_image()
+        inspection = self._inspect_image(
+            timeout_seconds=min(
+                _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
+            )
+        )
         if inspection is not None and inspection.timed_out:
             return CheckResult(
                 name=command.name,

@@ -6,7 +6,9 @@ import math
 import os
 import re
 import stat
+import time
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import Field
@@ -23,8 +25,50 @@ IGNORED_DIRECTORIES = {
     "__pycache__",
     "node_modules",
 }
+SENSITIVE_DIRECTORIES = {
+    ".aws",
+    ".azure",
+    ".docker",
+    ".gcloud",
+    ".gnupg",
+    ".kube",
+    ".ssh",
+}
+SENSITIVE_CONFIG_DIRECTORIES = {"aws", "azure", "gcloud", "gh"}
+SENSITIVE_FILENAMES = {
+    ".envrc",
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "application_default_credentials.json",
+    "credentials",
+    "credentials.json",
+    "service-account.json",
+    "service_account.json",
+}
+SENSITIVE_SUFFIXES = {".jks", ".key", ".keystore", ".p12", ".pfx"}
+SAFE_ENV_SUFFIXES = {".dist", ".example", ".sample", ".template"}
+PRIVATE_KEY_HEADERS = (
+    b"-----BEGIN PRIVATE KEY-----",
+    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN DSA PRIVATE KEY-----",
+    b"-----BEGIN EC PRIVATE KEY-----",
+    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+)
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
 ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+
+
+class RepositoryLimitError(RuntimeError):
+    pass
+
+
+@dataclass
+class _InspectionState:
+    directory_entries: int = 0
+    aggregate_bytes: int = 0
 
 
 class FileRecord(VersionedModel):
@@ -45,21 +89,52 @@ class RepositoryInventory(VersionedModel):
 
 
 class RepositoryInspector:
-    def __init__(self, *, max_file_bytes: int = 1_000_000) -> None:
+    def __init__(
+        self,
+        *,
+        max_file_bytes: int = 1_000_000,
+        max_files: int = 10_000,
+        max_total_bytes: int = 50_000_000,
+        max_directory_entries: int = 50_000,
+        max_depth: int = 20,
+        max_elapsed_seconds: float = 30.0,
+    ) -> None:
+        positive_limits = {
+            "max_file_bytes": max_file_bytes,
+            "max_files": max_files,
+            "max_total_bytes": max_total_bytes,
+            "max_directory_entries": max_directory_entries,
+            "max_elapsed_seconds": max_elapsed_seconds,
+        }
+        if any(value <= 0 for value in positive_limits.values()) or max_depth < 0:
+            raise ValueError("repository limits must be positive and depth must be non-negative")
         self.max_file_bytes = max_file_bytes
+        self.max_files = max_files
+        self.max_total_bytes = max_total_bytes
+        self.max_directory_entries = max_directory_entries
+        self.max_depth = max_depth
+        self.max_elapsed_seconds = max_elapsed_seconds
 
-    def inspect(self, root: Path) -> RepositoryInventory:
+    def inspect(self, root: Path, *, deadline: float | None = None) -> RepositoryInventory:
+        local_deadline = time.monotonic() + self.max_elapsed_seconds
+        effective_deadline = (
+            min(local_deadline, deadline) if deadline is not None else local_deadline
+        )
+        self._ensure_deadline(effective_deadline)
         resolved = root.resolve(strict=True)
         if not resolved.is_dir():
             raise ValueError("repository root must be a directory")
         records: list[FileRecord] = []
         skipped: set[str] = set()
+        state = _InspectionState()
         try:
             root_fd = os.open(resolved, self._directory_flags)
         except OSError as error:
             raise ValueError("repository root must be a directory") from error
         try:
-            self._inspect_directory(root_fd, Path(), records, skipped)
+            self._inspect_directory(
+                root_fd, Path(), records, skipped, state, effective_deadline
+            )
         finally:
             os.close(root_fd)
         return RepositoryInventory(
@@ -78,15 +153,28 @@ class RepositoryInspector:
         relative_directory: Path,
         records: list[FileRecord],
         skipped: set[str],
+        state: _InspectionState,
+        deadline: float,
     ) -> None:
+        self._ensure_deadline(deadline)
         try:
-            names = sorted(os.listdir(directory_fd))
+            names: list[str] = []
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    self._ensure_deadline(deadline)
+                    state.directory_entries += 1
+                    if state.directory_entries > self.max_directory_entries:
+                        raise RepositoryLimitError(
+                            "repository directory entries limit exceeded"
+                        )
+                    names.append(entry.name)
         except OSError:
             return
-        for name in names:
+        for name in sorted(names):
+            self._ensure_deadline(deadline)
             relative_path = relative_directory / name
             relative = relative_path.as_posix()
-            if name in IGNORED_DIRECTORIES:
+            if name in IGNORED_DIRECTORIES or self._is_sensitive_directory(relative_path):
                 skipped.add(relative)
                 continue
             try:
@@ -98,14 +186,31 @@ class RepositoryInspector:
                 skipped.add(relative)
             elif stat.S_ISDIR(metadata.st_mode):
                 self._inspect_child_directory(
-                    directory_fd, name, relative_path, records, skipped
+                    directory_fd,
+                    name,
+                    relative_path,
+                    records,
+                    skipped,
+                    state,
+                    deadline,
                 )
             elif stat.S_ISREG(metadata.st_mode):
-                read_result = self._read_regular_file(directory_fd, name)
+                if self._is_sensitive_file(relative_path):
+                    skipped.add(relative)
+                    continue
+                read_result = self._read_regular_file(directory_fd, name, deadline)
                 if read_result is None:
                     skipped.add(relative)
                     continue
                 data, size = read_result
+                if any(header in data for header in PRIVATE_KEY_HEADERS):
+                    skipped.add(relative)
+                    continue
+                if len(records) >= self.max_files:
+                    raise RepositoryLimitError("repository accepted file count limit exceeded")
+                if state.aggregate_bytes + size > self.max_total_bytes:
+                    raise RepositoryLimitError("repository aggregate bytes limit exceeded")
+                state.aggregate_bytes += size
                 text = data.decode("utf-8", errors="replace")
                 symbols, imports, routes = self._python_metadata(relative_path, text)
                 records.append(
@@ -130,7 +235,12 @@ class RepositoryInspector:
         relative_path: Path,
         records: list[FileRecord],
         skipped: set[str],
+        state: _InspectionState,
+        deadline: float,
     ) -> None:
+        if len(relative_path.parts) > self.max_depth:
+            raise RepositoryLimitError("repository traversal depth limit exceeded")
+        self._ensure_deadline(deadline)
         try:
             child_fd = os.open(name, self._directory_flags, dir_fd=directory_fd)
         except OSError:
@@ -138,13 +248,18 @@ class RepositoryInspector:
             return
         try:
             if stat.S_ISDIR(os.fstat(child_fd).st_mode):
-                self._inspect_directory(child_fd, relative_path, records, skipped)
+                self._inspect_directory(
+                    child_fd, relative_path, records, skipped, state, deadline
+                )
             else:
                 skipped.add(relative_path.as_posix())
         finally:
             os.close(child_fd)
 
-    def _read_regular_file(self, directory_fd: int, name: str) -> tuple[bytes, int] | None:
+    def _read_regular_file(
+        self, directory_fd: int, name: str, deadline: float
+    ) -> tuple[bytes, int] | None:
+        self._ensure_deadline(deadline)
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             file_fd = os.open(name, flags, dir_fd=directory_fd)
@@ -157,6 +272,7 @@ class RepositoryInspector:
             remaining = metadata.st_size
             chunks: list[bytes] = []
             while remaining:
+                self._ensure_deadline(deadline)
                 chunk = os.read(file_fd, remaining)
                 if not chunk:
                     break
@@ -169,6 +285,36 @@ class RepositoryInspector:
             return None
         finally:
             os.close(file_fd)
+
+    @staticmethod
+    def _ensure_deadline(deadline: float) -> None:
+        if time.monotonic() >= deadline:
+            raise RepositoryLimitError("repository inspection deadline exceeded")
+
+    @staticmethod
+    def _is_sensitive_directory(path: Path) -> bool:
+        if path.name.lower() in SENSITIVE_DIRECTORIES:
+            return True
+        parts = tuple(part.lower() for part in path.parts)
+        return (
+            len(parts) >= 2
+            and parts[-2] == ".config"
+            and parts[-1] in SENSITIVE_CONFIG_DIRECTORIES
+        )
+
+    @staticmethod
+    def _is_sensitive_file(path: Path) -> bool:
+        name = path.name.lower()
+        if name == ".env" or (
+            name.startswith(".env.")
+            and not any(name.endswith(suffix) for suffix in SAFE_ENV_SUFFIXES)
+        ):
+            return True
+        if name in SENSITIVE_FILENAMES or path.suffix.lower() in SENSITIVE_SUFFIXES:
+            return True
+        return bool(
+            re.fullmatch(r"id_(?:rsa|dsa|ecdsa|ed25519)", name)
+        )
 
     @staticmethod
     def _kind(path: Path) -> str:

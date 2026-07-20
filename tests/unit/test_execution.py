@@ -270,6 +270,30 @@ def test_docker_executor_skips_when_image_preflight_times_out(
     assert result.reason == "docker image inspection timed out"
 
 
+def test_docker_image_preflight_is_capped_by_command_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+    timeouts: list[int] = []
+
+    def fake_bounded_run(
+        _argv: list[str], *, timeout_seconds: int, **_kwargs: object
+    ) -> object:
+        timeouts.append(timeout_seconds)
+        return execution_module._ProcessResult(0, "", "", False)
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
+    command = CommandSpec(
+        name="python",
+        argv=("python", "-c", "print('ok')"),
+        required=True,
+        timeout_seconds=2,
+    )
+
+    assert DockerExecutor(allowed={"python": command.argv}).available(command) is True
+    assert timeouts == [2]
+
+
 def test_docker_timeout_force_removes_the_internal_container_name(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -12,6 +12,7 @@ from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, ValidationError
 
 from repogent.domain import ProviderUsage
+from repogent.sanitization import redact_text, sanitize_data
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -53,7 +54,9 @@ class ScriptedProvider:
         system_prompt: str,
         payload: Mapping[str, Any],
         output_type: type[T],
+        timeout_seconds: float | None = None,
     ) -> ProviderResult[T]:
+        del timeout_seconds
         self.calls.append(
             {
                 "system_prompt": system_prompt,
@@ -85,10 +88,12 @@ class OpenAIProvider:
         client: OpenAI | None = None,
         model: str = "gpt-5.6-sol",
         pricing: ModelPricing | None = None,
+        secrets: Sequence[str] = (),
     ) -> None:
         self.client = client or OpenAI()
         self.model = model
         self.pricing = pricing or ModelPricing()
+        self.secrets = tuple(secrets)
 
     def generate(
         self,
@@ -96,14 +101,27 @@ class OpenAIProvider:
         system_prompt: str,
         payload: Mapping[str, Any],
         output_type: type[T],
+        timeout_seconds: float | None = None,
     ) -> ProviderResult[T]:
         started = time.monotonic()
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ProviderError("provider timeout exhausted")
+        request_client = self.client
+        if timeout_seconds is not None:
+            request_client = self.client.with_options(
+                timeout=timeout_seconds, max_retries=0
+            )
         try:
-            response = self.client.responses.parse(
+            response = request_client.responses.parse(
                 model=self.model,
                 input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(payload, sort_keys=True)},
+                    {"role": "system", "content": redact_text(system_prompt, self.secrets)},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            sanitize_data(payload, self.secrets), sort_keys=True
+                        ),
+                    },
                 ],
                 text_format=output_type,
             )

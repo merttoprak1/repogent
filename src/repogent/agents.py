@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
@@ -24,18 +26,44 @@ class RoleAgent(Generic[T]):
         self.output_type = output_type
         self.provider = provider
 
-    def run(self, payload: Mapping[str, Any]) -> ProviderResult[T]:
+    def run(
+        self, payload: Mapping[str, Any], *, timeout_seconds: float | None = None
+    ) -> ProviderResult[T]:
         last_error: ProviderError | None = None
+        deadline = (
+            time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+        )
         for _attempt in range(2):
             try:
+                options: dict[str, Any] = {
+                    "system_prompt": f"You are the Repogent {self.name} role. {ROLE_RULES}",
+                    "payload": payload,
+                    "output_type": self.output_type,
+                }
+                if deadline is not None and _accepts_keyword(
+                    self.provider.generate, "timeout_seconds"
+                ):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProviderError(f"{self.name} provider timeout exhausted")
+                    options["timeout_seconds"] = remaining
                 return self.provider.generate(
-                    system_prompt=f"You are the Repogent {self.name} role. {ROLE_RULES}",
-                    payload=payload,
-                    output_type=self.output_type,
+                    **options,
                 )
             except ProviderError as error:
                 last_error = error
         raise ProviderError(f"{self.name} failed structured generation twice") from last_error
+
+
+def _accepts_keyword(callable_object: object, name: str) -> bool:
+    try:
+        parameters = inspect.signature(callable_object).parameters.values()  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 @dataclass(frozen=True)

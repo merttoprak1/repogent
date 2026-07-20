@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel
 
@@ -28,7 +30,7 @@ from repogent.domain import (
 )
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.reporting import render_report
-from repogent.repository import LexicalRetriever, RepositoryInspector
+from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
 
 
 class IllegalTransition(ValueError):
@@ -86,10 +88,12 @@ class Workflow:
     validation: ValidationReport | None = field(default=None, init=False)
     review: QAReview | None = field(default=None, init=False)
     started_at: float = field(default=0, init=False)
+    deadline: float = field(default=0, init=False)
     elapsed_seconds: float = field(default=0, init=False)
 
     def run(self) -> RunManifest:
         self.started_at = time.monotonic()
+        self.deadline = self.started_at + self.budget.timeout_seconds
         try:
             try:
                 self.artifacts.update_manifest(self.manifest)
@@ -108,7 +112,7 @@ class Workflow:
             self.elapsed_seconds = time.monotonic() - self.started_at
 
     def _execute(self) -> tuple[RunStatus, str | None]:
-        inventory = self.inspector.inspect(self.root)
+        inventory = self._inspect_repository()
         self.write("inventory", inventory)
         self.advance(RunStage.ANALYZED)
         context = self.retriever.retrieve(inventory, self.request)
@@ -123,7 +127,9 @@ class Workflow:
         self.artifacts.write_text(
             "requirements-input", json.dumps(requirements_payload, indent=2)
         )
-        requirements_result = self.roles.requirements.run(requirements_payload)
+        requirements_result = self.roles.requirements.run(
+            requirements_payload, timeout_seconds=self.remaining_time()
+        )
         self.requirements = requirements_result.output
         self.account(requirements_result.usage)
         self.ensure_time()
@@ -141,7 +147,9 @@ class Workflow:
             "repository_context": context_payload,
         }
         self.artifacts.write_text("planning-input", json.dumps(plan_payload, indent=2))
-        plan_result = self.roles.planning.run(plan_payload)
+        plan_result = self.roles.planning.run(
+            plan_payload, timeout_seconds=self.remaining_time()
+        )
         self.plan = plan_result.output
         self.account(plan_result.usage)
         self.ensure_time()
@@ -162,7 +170,9 @@ class Workflow:
         self.artifacts.write_text(
             "implementation-input", json.dumps(implementation_payload, indent=2)
         )
-        patch_result = self.roles.implementation.run(implementation_payload)
+        patch_result = self.roles.implementation.run(
+            implementation_payload, timeout_seconds=self.remaining_time()
+        )
         self.account(patch_result.usage)
         self.ensure_time()
         current_patch = self.patch_policy.validate(self.root, patch_result.output)
@@ -181,7 +191,7 @@ class Workflow:
         self.advance(RunStage.PATCH_APPLIED)
 
         self.ensure_time()
-        self.validation = self.validator.run(self.root)
+        self.validation = self._run_validation()
         self.ensure_time()
         self.write("validation", self.validation)
         self.advance(RunStage.VALIDATED)
@@ -200,7 +210,9 @@ class Workflow:
                 "failed_validation": self.validation.model_dump(),
             }
             self.artifacts.write_text("repair-input", json.dumps(repair_payload, indent=2))
-            repair_result = self.roles.repair.run(repair_payload)
+            repair_result = self.roles.repair.run(
+                repair_payload, timeout_seconds=self.remaining_time()
+            )
             self.account(repair_result.usage)
             self.ensure_time()
             current_patch = self.patch_policy.validate(self.root, repair_result.output)
@@ -218,7 +230,7 @@ class Workflow:
             self.write("repair-patch-applied", repair_result.output)
             self.advance(RunStage.PATCH_APPLIED)
             self.ensure_time()
-            self.validation = self.validator.run(self.root)
+            self.validation = self._run_validation()
             self.ensure_time()
             self.write("validation", self.validation)
             self.advance(RunStage.VALIDATED)
@@ -239,7 +251,9 @@ class Workflow:
             "diff": "\n".join(applied_diffs),
         }
         self.artifacts.write_text("qa-input", json.dumps(qa_payload, indent=2))
-        review_result = self.roles.qa.run(qa_payload)
+        review_result = self.roles.qa.run(
+            qa_payload, timeout_seconds=self.remaining_time()
+        )
         self.review = review_result.output
         self.account(review_result.usage)
         self.ensure_time()
@@ -253,8 +267,26 @@ class Workflow:
         return status, None
 
     def ensure_time(self) -> None:
-        if time.monotonic() - self.started_at > self.budget.timeout_seconds:
+        self.remaining_time()
+
+    def remaining_time(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
             raise TimeoutError("workflow timeout exceeded")
+        return remaining
+
+    def _inspect_repository(self) -> RepositoryInventory:
+        self.ensure_time()
+        if _accepts_keyword(self.inspector.inspect, "deadline"):
+            return self.inspector.inspect(self.root, deadline=self.deadline)
+        return self.inspector.inspect(self.root)
+
+    def _run_validation(self) -> ValidationReport:
+        remaining = self.remaining_time()
+        if _accepts_keyword(self.validator.run, "timeout_seconds"):
+            run_with_timeout = cast(Callable[..., ValidationReport], self.validator.run)
+            return run_with_timeout(self.root, timeout_seconds=remaining)
+        return self.validator.run(self.root)
 
     def advance(self, stage: RunStage) -> None:
         self.manifest = self.manifest.model_copy(
@@ -299,3 +331,14 @@ class Workflow:
         )
         self.artifacts.write_final("report.md", report)
         return self.manifest
+
+
+def _accepts_keyword(callable_object: object, name: str) -> bool:
+    try:
+        parameters = inspect.signature(callable_object).parameters.values()  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )

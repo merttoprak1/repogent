@@ -9,13 +9,13 @@ Request → inspect and retrieve → requirements approval → plan approval →
 ## Boundaries
 
 - `domain.py`: versioned contracts and status enums.
-- `repository.py`: confined traversal, AST metadata, and lexical ranking.
-- `providers.py` and `agents.py`: schema-bound generation with untrusted-content prompts.
+- `repository.py`: confined and aggregate-bounded traversal, sensitive-path exclusion, AST metadata, and lexical ranking.
+- `providers.py`, `agents.py`, and `sanitization.py`: deadline-bounded schema generation, final-boundary recursive redaction, and untrusted-content prompts.
 - `approvals.py`: requirements, plan, patch, and repair decisions.
 - `patching.py`: default-deny unified-diff validation and transactional application.
 - `execution.py` and `validation.py`: fixed commands through Docker or explicit local fallback.
 - `workflow.py`: legal transitions, budgets, repairs, and terminal outcomes.
-- `artifacts.py` and `reporting.py`: redacted evidence and final reports.
+- `artifacts.py` and `reporting.py`: structurally sanitized JSON evidence and final reports.
 
 ## Terminal statuses
 

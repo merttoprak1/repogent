@@ -244,6 +244,53 @@ def test_timeout_is_enforced_before_provider_work(tmp_path: Path) -> None:
         workflow.ensure_time()
 
 
+def test_workflow_propagates_one_remaining_deadline_to_blocking_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = ManualClock()
+    workflow = make_workflow(
+        tmp_path,
+        BASE_OUTPUTS,
+        [Decision.APPROVED] * 3,
+        [CheckStatus.PASSED],
+        budget=Budget(timeout_seconds=10),
+    )
+    captured: dict[str, list[float]] = {
+        "inspection_deadline": [],
+        "provider_timeout": [],
+        "validation_timeout": [],
+    }
+    original_inspect = workflow.inspector.inspect
+    original_provider_generate = workflow.roles.requirements.provider.generate
+    original_validate = workflow.validator.run
+
+    def inspect_with_deadline(root: Path, *, deadline: float) -> object:
+        captured["inspection_deadline"].append(deadline)
+        return original_inspect(root, deadline=deadline)
+
+    def generate_with_timeout(*, timeout_seconds: float, **kwargs: object) -> object:
+        captured["provider_timeout"].append(timeout_seconds)
+        return original_provider_generate(timeout_seconds=timeout_seconds, **kwargs)  # type: ignore[arg-type]
+
+    def validate_with_timeout(root: Path, *, timeout_seconds: float) -> ValidationReport:
+        captured["validation_timeout"].append(timeout_seconds)
+        return original_validate(root)
+
+    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
+    monkeypatch.setattr(workflow.inspector, "inspect", inspect_with_deadline)
+    monkeypatch.setattr(
+        workflow.roles.requirements.provider, "generate", generate_with_timeout
+    )
+    monkeypatch.setattr(workflow.validator, "run", validate_with_timeout)
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.COMPLETED
+    assert captured["inspection_deadline"] == [10.0]
+    assert captured["provider_timeout"] == [10.0, 10.0, 10.0, 10.0]
+    assert captured["validation_timeout"] == [10.0]
+
+
 def test_slow_patch_approval_cannot_lead_to_patch_application(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -462,6 +509,20 @@ def test_ordinary_collaborator_exception_is_terminalized(
     assert manifest.stage is RunStage.FINISHED
     assert manifest.reason == "inspection failed"
     assert (workflow.artifacts.root / "report.md").exists()
+
+
+def test_repository_limit_failure_is_terminalized_with_report_evidence(
+    tmp_path: Path,
+) -> None:
+    workflow = make_workflow(tmp_path, [], [], [])
+    (workflow.root / "second.py").write_text("value = 2\n")
+    workflow.inspector = RepositoryInspector(max_files=1)
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "repository accepted file count limit exceeded"
+    assert manifest.reason in (workflow.artifacts.root / "report.md").read_text()
 
 
 def test_keyboard_interrupt_from_collaborator_is_not_hidden(
