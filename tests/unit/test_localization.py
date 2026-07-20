@@ -321,3 +321,34 @@ def test_localizer_resolves_unaliased_dotted_imports_from_package_binding(tmp_pa
 
     assert {"call", "test"} <= signals["pkg/auth.py:pkg.auth.login"]
     assert not {"call", "test"} & signals["billing.py:billing.login"]
+
+
+def test_localizer_excludes_class_bindings_from_methods_but_keeps_function_bindings(
+    tmp_path: Path,
+) -> None:
+    from repogent.localization import _incoming_edges
+
+    _inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "a.py": "def login():\n    return True\n",
+            "consumer.py": (
+                "class C:\n"
+                "    from a import login\n"
+                "    def method(self):\n"
+                "        login()\n"
+                "\n"
+                "def outer():\n"
+                "    from a import login\n"
+                "    def inner():\n"
+                "        login()\n"
+            ),
+        },
+    )
+
+    incoming, _source_paths = _incoming_edges(graph.edges, graph.nodes)
+    call_lines = [
+        edge.line for edge in incoming["a.py:a.login"] if edge.kind == "calls"
+    ]
+
+    assert call_lines == [9]

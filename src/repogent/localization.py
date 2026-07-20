@@ -255,7 +255,12 @@ def _incoming_edges(
                     if target is not None:
                         incoming[target.symbol_id].append(edge)
 
-            work.append((True, node_id, current_module, pushed_bindings))
+            bindings_to_pop = pushed_bindings
+            if node.kind is SymbolKind.CLASS:
+                for binding in reversed(pushed_bindings):
+                    binding_stacks[binding].pop()
+                bindings_to_pop = []
+            work.append((True, node_id, current_module, bindings_to_pop))
             for child_id in reversed(children.get(node_id, [])):
                 work.append((False, child_id, current_module, []))
 
