@@ -631,7 +631,7 @@ Add `configuration_fingerprint(provider: str, model: str, executor: str, command
 
 - [ ] **Step 5: Invoke preflight before evidence/provider initialization**
 
-In `run_command`, construct the validation policy and executor, run preflight, print each failed or warning check, and exit 2 if `not report.passed`. Only then create the artifact store and provider. Persist `preflight` as the first model artifact and copy its repository fingerprint plus `configuration_fingerprint(provider, model, executor, policy.commands(repository))` into `RunManifest`.
+In `run_command`, construct the validation policy and executor, create the external artifact store, run preflight, and persist `preflight` as the first model artifact. Print each failed or warning check and, when `not report.passed`, write a terminal manifest and report before exiting 2. Construct no provider on this path, so failed preflight spends no model budget while still producing durable evidence. On success, copy the repository fingerprint plus `configuration_fingerprint(provider, model, executor, policy.commands(repository))` into `RunManifest`, then construct the provider.
 
 - [ ] **Step 6: Run focused tests and static checks**
 
@@ -1119,7 +1119,7 @@ Emit at preflight import, stage changes, model completion, candidate creation, v
 
 - [ ] **Step 4: Replace lexical context with graph localization**
 
-After inspection, build and persist the graph, localize with the request plus requirements acceptance criteria after requirements generation, and persist the localization report. If the report has no locations, finish with `human_intervention_required`. If it is ambiguous, continue to planning but force the candidate policy to consider an alternative.
+After inspection, build and persist the graph, localize with the request plus requirements acceptance criteria after requirements generation, and persist the localization report. If the report has no locations or is ambiguous, perform exactly one broader deterministic pass with doubled snippet and character budgets plus available failing-test evidence, then persist that second report separately. If the broadened report still has no locations, finish with `human_intervention_required`. If it remains ambiguous, continue to planning but force the candidate policy to consider an alternative. Never add an unbounded third pass.
 
 Pass `localization.snippets` to planning and implementation payloads and include the full localization report separately so the model sees selection reasons.
 
