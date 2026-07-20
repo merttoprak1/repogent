@@ -588,13 +588,26 @@ class Workflow:
                     self.validation,
                     self.review,
                     localization=self.localization,
-                    candidates=tuple(zip(self.candidates, self.candidate_evidence, strict=True)),
+                    candidates=self._report_candidates(),
                     selection=self.selection,
                 ),
             )
         except Exception as error:
             return error
         return None
+
+    def _report_candidates(self) -> tuple[tuple[CandidateRecord, CandidateEvidence | None], ...]:
+        """Pair durable candidate records with first matching evidence for terminal reports."""
+        known_ids = {candidate.candidate_id for candidate in self.candidates}
+        evidence_by_id: dict[str, CandidateEvidence] = {}
+        for evidence in self.candidate_evidence:
+            if evidence.candidate_id in known_ids and evidence.candidate_id not in evidence_by_id:
+                evidence_by_id[evidence.candidate_id] = evidence
+        return tuple(
+            (candidate, evidence_by_id.get(candidate.candidate_id))
+            for candidate in self.candidates
+        )
+
     def _persist_final_manifest(self) -> Exception | None:
         try:
             self.artifacts.update_manifest(self.manifest)

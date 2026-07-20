@@ -22,7 +22,7 @@ def render_report(
     review: QAReview | None,
     *,
     localization: LocalizationReport | None = None,
-    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence]] = (),
+    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence | None]] = (),
     selection: CandidateSelection | None = None,
 ) -> str:
     lines = [
@@ -79,7 +79,7 @@ def _render_localization(localization: LocalizationReport | None) -> list[str]:
 
 
 def _render_candidates(
-    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence]],
+    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence | None]],
     selection: CandidateSelection | None,
 ) -> list[str]:
     lines = ["## Candidate comparison", ""]
@@ -96,19 +96,30 @@ def _render_candidates(
     )
     selected_id = selection.selected_candidate_id if selection else None
     for candidate, evidence in sorted(candidates, key=lambda item: item[0].candidate_id):
-        failures = ", ".join(evidence.required_failures) or "none"
-        skipped = ", ".join(evidence.skipped_checks) or "none"
-        marker = "selected" if candidate.candidate_id == selected_id else "rejected"
+        if evidence is None:
+            eligible = "unknown"
+            failures = "not evaluated"
+            skipped = "not evaluated"
+            size = "unknown"
+            coverage = "unknown"
+            marker = "selected" if candidate.candidate_id == selected_id else "not evaluated"
+        else:
+            eligible = "yes" if evidence.eligible else "no"
+            failures = ", ".join(evidence.required_failures) or "none"
+            skipped = ", ".join(evidence.skipped_checks) or "none"
+            size = f"{evidence.changed_files}/{evidence.changed_lines}"
+            coverage = str(evidence.acceptance_criteria_coverage)
+            marker = "selected" if candidate.candidate_id == selected_id else "rejected"
         lines.append(
             "| "
             + " | ".join(
                 (
                     _markdown_text(candidate.candidate_id),
-                    "yes" if evidence.eligible else "no",
+                    eligible,
                     _markdown_text(failures),
                     _markdown_text(skipped),
-                    f"{evidence.changed_files}/{evidence.changed_lines}",
-                    str(evidence.acceptance_criteria_coverage),
+                    size,
+                    coverage,
                     f"${candidate.usage.estimated_cost_usd}",
                     marker,
                 )
@@ -140,14 +151,19 @@ def _render_selection(selection: CandidateSelection | None) -> list[str]:
 
 def _render_cost_and_duration(
     manifest: RunManifest,
-    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence]],
+    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence | None]],
 ) -> list[str]:
     candidate_cost = sum(
         (candidate.usage.estimated_cost_usd for candidate, _ in candidates), Decimal("0")
     )
-    candidate_duration = sum(evidence.duration_seconds for _, evidence in candidates)
+    candidate_duration = sum(
+        evidence.duration_seconds for _, evidence in candidates if evidence is not None
+    )
     validation_duration = sum(
-        check.duration_seconds for _, evidence in candidates for check in evidence.validation.checks
+        check.duration_seconds
+        for _, evidence in candidates
+        if evidence is not None
+        for check in evidence.validation.checks
     )
     return [
         "",
@@ -162,13 +178,19 @@ def _render_cost_and_duration(
 
 
 def _render_recovery(
-    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence]],
+    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence | None]],
 ) -> list[str]:
     lines = ["## Recovery", ""]
     if not candidates:
         return [*lines, "No candidate evaluation recovery was required.", ""]
     for candidate, evidence in sorted(candidates, key=lambda item: item[0].candidate_id):
-        state = "restored" if evidence.restored_to_baseline else "not restored"
+        state = (
+            "evaluation interrupted; recovery unknown"
+            if evidence is None
+            else "restored"
+            if evidence.restored_to_baseline
+            else "not restored"
+        )
         lines.append(f"- {_markdown_text(candidate.candidate_id)}: {state}")
     lines.append("")
     return lines

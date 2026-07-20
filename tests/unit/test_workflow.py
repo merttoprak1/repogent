@@ -595,6 +595,58 @@ def test_terminal_report_retains_candidate_evidence_after_unrecovered_evaluation
     assert "not restored" in report
 
 
+def test_terminal_report_retains_unevaluated_candidate_after_evaluator_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[],
+    )
+
+    def evaluation_error(
+        _root: Path,
+        _candidate: CandidateRecord,
+        _criteria: list[str],
+        _timeout_seconds: float,
+    ) -> CandidateEvidence:
+        raise RuntimeError("candidate evaluator unavailable")
+
+    assert workflow.candidate_evaluator is not None
+    monkeypatch.setattr(workflow.candidate_evaluator, "evaluate", evaluation_error)
+
+    manifest = workflow.run()
+    report = (workflow.artifacts.root / "report.md").read_text()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "candidate evaluator unavailable"
+    assert "candidate-1" in report
+    assert "not evaluated" in report
+    assert "evaluation interrupted" in report
+
+
+def test_terminal_report_pairing_ignores_duplicate_and_unknown_evidence(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+
+    workflow.run()
+
+    known_evidence = workflow.candidate_evidence[0]
+    workflow.candidate_evidence.extend(
+        [
+            known_evidence,
+            known_evidence.model_copy(update={"candidate_id": "candidate-2"}),
+        ]
+    )
+
+    pairs = workflow._report_candidates()
+
+    assert pairs == ((workflow.candidates[0], known_evidence),)
+
+
 def test_final_manifest_persistence_failure_downgrades_and_persists_human_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

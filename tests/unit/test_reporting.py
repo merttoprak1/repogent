@@ -157,3 +157,16 @@ def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
     assert "0.875" in report
     assert "$0.18" in report
     assert "restored" in report
+
+    interrupted_report = render_report(
+        manifest,
+        None,
+        None,
+        None,
+        None,
+        candidates=[(candidates[0][0], None)],
+    )
+
+    assert "candidate-2" in interrupted_report
+    assert "not evaluated" in interrupted_report
+    assert "evaluation interrupted; recovery unknown" in interrupted_report
