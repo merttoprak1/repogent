@@ -39,7 +39,8 @@ class ValidationPipeline:
                 continue
             if deadline is not None:
                 command = _cap_command_timeout(command, deadline)
-            checks.append(self.executor.run(command, root))
+            result = self.executor.run(command, root)
+            checks.append(result.model_copy(update={"required": command.required}))
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("validation timeout exceeded")
         return ValidationReport(checks=checks)

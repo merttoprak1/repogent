@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -25,23 +26,25 @@ class JsonlEventStore:
         self._last_sequence = self._load_last_sequence()
 
     def emit(self, event: RunEvent) -> None:
-        if event.sequence <= self._last_sequence:
-            raise ValueError("event sequence must increase monotonically")
         line = self._serialize_event(event)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(
-            self.path,
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-            0o600,
-        )
+        lock_descriptor = os.open(self._lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
         try:
-            with os.fdopen(descriptor, "a", encoding="utf-8", closefd=False) as handle:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+            try:
+                last_sequence = self._load_last_sequence()
+                if event.sequence <= last_sequence:
+                    raise ValueError("event sequence must increase monotonically")
+                self._append_line(line)
+                self._last_sequence = event.sequence
+            finally:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
-        self._last_sequence = event.sequence
+            os.close(lock_descriptor)
+
+    @property
+    def _lock_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.lock")
 
     def _load_last_sequence(self) -> int:
         if not self.path.exists():
@@ -68,3 +71,17 @@ class JsonlEventStore:
         if len(line.encode()) > MAX_EVENT_BYTES:
             raise ValueError(f"event exceeds maximum size of {MAX_EVENT_BYTES} bytes")
         return line
+
+    def _append_line(self, line: str) -> None:
+        descriptor = os.open(
+            self.path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "a", encoding="utf-8", closefd=False) as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)

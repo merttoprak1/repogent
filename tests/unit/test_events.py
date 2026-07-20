@@ -65,6 +65,21 @@ def test_jsonl_event_store_reopens_from_last_persisted_sequence(tmp_path: Path) 
     assert sequences == [1, 2]
 
 
+def test_jsonl_event_store_serializes_preconstructed_stores(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    first = JsonlEventStore(path)
+    second = JsonlEventStore(path)
+
+    first.emit(_event(1))
+
+    with pytest.raises(ValueError, match="sequence"):
+        second.emit(_event(1))
+    second.emit(_event(2))
+
+    sequences = [json.loads(line)["sequence"] for line in path.read_text().splitlines()]
+    assert sequences == [1, 2]
+
+
 @pytest.mark.parametrize(
     ("contents", "match"),
     [
