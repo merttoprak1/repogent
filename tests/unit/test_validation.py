@@ -42,6 +42,7 @@ def test_pipeline_records_missing_optional_check_as_skipped(tmp_path: Path) -> N
     ruff = next(check for check in report.checks if check.name == "ruff")
     assert ruff.status is CheckStatus.SKIPPED
     assert ruff.reason == "optional tool unavailable"
+    assert ruff.required is False
     assert report.passed is True
 
 

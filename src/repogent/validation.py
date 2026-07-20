@@ -33,6 +33,7 @@ class ValidationPipeline:
                         argv=list(command.argv),
                         status=status,
                         reason=reason,
+                        required=command.required,
                     )
                 )
                 continue

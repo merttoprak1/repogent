@@ -203,7 +203,7 @@ class RunEvent(VersionedModel):
     sequence: int = Field(ge=1)
     kind: EventKind
     stage: str | None = None
-    message: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=4096)
     data: dict[str, object] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 

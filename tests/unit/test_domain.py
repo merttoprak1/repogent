@@ -12,6 +12,7 @@ from repogent.domain import (
     PlanStep,
     RequirementsSpec,
     RiskLevel,
+    RunEvent,
     RunManifest,
     RunStage,
     RunStatus,
@@ -100,3 +101,22 @@ def test_manifest_phase_two_fields_round_trip_through_json() -> None:
     restored = RunManifest.model_validate_json(manifest.model_dump_json())
 
     assert restored == manifest
+
+
+def test_run_event_message_is_limited_to_4096_characters() -> None:
+    event = RunEvent(
+        run_id="run-123",
+        sequence=1,
+        kind="stage",
+        message="x" * 4096,
+    )
+
+    assert len(event.message) == 4096
+
+    with pytest.raises(ValidationError, match="String should have at most 4096 characters"):
+        RunEvent(
+            run_id="run-123",
+            sequence=1,
+            kind="stage",
+            message="x" * 4097,
+        )

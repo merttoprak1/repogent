@@ -5,8 +5,12 @@ import os
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import ValidationError
+
 from repogent.domain import RunEvent
 from repogent.sanitization import sanitize_data
+
+MAX_EVENT_BYTES = 65_536
 
 
 class EventSink(Protocol):
@@ -18,13 +22,13 @@ class JsonlEventStore:
     def __init__(self, path: Path, secrets: list[str] | None = None) -> None:
         self.path = path
         self.secrets = secrets or []
-        self._last_sequence = 0
+        self._last_sequence = self._load_last_sequence()
 
     def emit(self, event: RunEvent) -> None:
         if event.sequence <= self._last_sequence:
             raise ValueError("event sequence must increase monotonically")
+        line = self._serialize_event(event)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = sanitize_data(event.model_dump(mode="json"), self.secrets)
         descriptor = os.open(
             self.path,
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
@@ -32,9 +36,35 @@ class JsonlEventStore:
         )
         try:
             with os.fdopen(descriptor, "a", encoding="utf-8", closefd=False) as handle:
-                handle.write(json.dumps(payload) + "\n")
+                handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())
         finally:
             os.close(descriptor)
         self._last_sequence = event.sequence
+
+    def _load_last_sequence(self) -> int:
+        if not self.path.exists():
+            return 0
+
+        last_sequence = 0
+        try:
+            with self.path.open(encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    event = RunEvent.model_validate(json.loads(line))
+                    if event.sequence <= last_sequence:
+                        raise ValueError(
+                            "event sequence must increase monotonically "
+                            f"(line {line_number})"
+                        )
+                    last_sequence = event.sequence
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as error:
+            raise ValueError("invalid event log") from error
+        return last_sequence
+
+    def _serialize_event(self, event: RunEvent) -> str:
+        payload = sanitize_data(event.model_dump(mode="json"), self.secrets)
+        line = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        if len(line.encode()) > MAX_EVENT_BYTES:
+            raise ValueError(f"event exceeds maximum size of {MAX_EVENT_BYTES} bytes")
+        return line
