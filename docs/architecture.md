@@ -6,8 +6,8 @@ Repogent is a synchronous, artifact-first local workflow for conventional Python
 
 The detailed state machine is preserved in `RunStage`. The following are conceptual/user-facing phases, not literal emitted stage labels: **Understand → Localize → Propose → Validate → Decide**.
 
-1. **Understand:** preflight, bounded inventory, then typed requirements/specification generation and its approval gate.
-2. **Localize:** graph construction and localization after requirements are generated.
+1. **Understand:** preflight, bounded inventory, deterministic Python graph construction, then typed requirements/specification generation and its approval gate.
+2. **Localize:** consume the already-built graph after requirements and acceptance criteria are known.
 3. **Propose:** planning after localization, plan approval, and candidate generation.
 4. **Validate:** disposable-copy policy checks and deterministic candidate validation with retained evidence.
 5. **Decide:** evidence selection or ambiguity escalation; after patch approval, a single real-checkout apply, isolated final validation, QA, and finalization.

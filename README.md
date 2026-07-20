@@ -32,8 +32,8 @@ The static graph intentionally has limits: dynamic imports, reflection, generate
 
 Repogent describes five conceptual, user-facing phases — **Understand → Localize → Propose → Validate → Decide** — rather than claiming those labels are literal emitted `RunStage` event values:
 
-1. **Understand** — preflight, bounded repository inventory, and typed requirements/specification generation with its approval gate.
-2. **Localize** — build the deterministic Python symbol graph and localize after requirements are known.
+1. **Understand** — preflight, bounded repository inventory, deterministic Python symbol graph construction, and typed requirements/specification generation with its approval gate.
+2. **Localize** — consume the already-built graph to localize after requirements and acceptance criteria are known.
 3. **Propose** — generate the implementation plan after localization, obtain plan approval, then generate a candidate patch.
 4. **Validate** — policy-check and validate candidates only in disposable copies, retaining their evidence.
 5. **Decide** — select evidence or surface ambiguity for human review; after patch approval, apply once to the real checkout, run isolated final validation and QA, then finalize the run.
