@@ -80,10 +80,10 @@ def test_builder_preserves_import_aliases(tmp_path: Path) -> None:
     graph = PythonSymbolGraphBuilder().build(RepositoryInspector().inspect(tmp_path))
     imports = [edge for edge in graph.edges if edge.kind == "imports"]
 
-    assert [(edge.target, edge.alias, edge.binding) for edge in imports] == [
-        ("module.name", "name_alias", "name_alias"),
-        ("package", "package_alias", "package_alias"),
-        ("package.submodule", None, "package"),
+    assert [(edge.target, edge.alias, edge.binding, edge.binding_target) for edge in imports] == [
+        ("package.submodule", None, "package", "package"),
+        ("package", "package_alias", "package_alias", "package"),
+        ("module.name", "name_alias", "name_alias", "module.name"),
     ]
 
 
@@ -102,3 +102,24 @@ def test_builder_normalizes_relative_import_targets(tmp_path: Path) -> None:
     assert relative_import.target == "pkg.auth.login"
     assert relative_import.alias is None
     assert relative_import.binding == "login"
+
+
+def test_builder_records_reference_order_and_binding_targets(tmp_path: Path) -> None:
+    (tmp_path / "consumer.py").write_text(
+        "import pkg.auth\n"
+        "import pkg.auth as auth_alias\n"
+        "from pkg.auth import login as renamed_login\n"
+        "auth_alias.login()\n"
+    )
+
+    graph = PythonSymbolGraphBuilder().build(RepositoryInspector().inspect(tmp_path))
+    imports = [edge for edge in graph.edges if edge.kind == "imports"]
+    call = next(edge for edge in graph.edges if edge.kind == "calls")
+
+    assert [(edge.target, edge.binding, edge.binding_target) for edge in imports] == [
+        ("pkg.auth", "pkg", "pkg"),
+        ("pkg.auth", "auth_alias", "pkg.auth"),
+        ("pkg.auth.login", "renamed_login", "pkg.auth.login"),
+    ]
+    assert [(edge.line, edge.column) for edge in imports] == [(1, 0), (2, 0), (3, 0)]
+    assert (call.line, call.column) == (4, 0)

@@ -36,6 +36,9 @@ class SymbolEdge(VersionedModel):
     kind: Literal["contains", "imports", "calls"]
     alias: str | None = None
     binding: str | None = None
+    binding_target: str | None = None
+    line: int = Field(default=1, ge=1)
+    column: int = Field(default=0, ge=0)
 
 
 class PythonSymbolGraph(VersionedModel):
@@ -90,6 +93,13 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                     kind="imports",
                     alias=imported.asname,
                     binding=imported.asname or imported.name.split(".", maxsplit=1)[0],
+                    binding_target=(
+                        imported.name
+                        if imported.asname is not None
+                        else imported.name.split(".")[0]
+                    ),
+                    line=node.lineno,
+                    column=node.col_offset,
                 )
             )
 
@@ -104,13 +114,24 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                     kind="imports",
                     alias=imported.asname,
                     binding=imported.asname or imported.name,
+                    binding_target=target,
+                    line=node.lineno,
+                    column=node.col_offset,
                 )
             )
 
     def visit_Call(self, node: ast.Call) -> None:
         target = _expression_name(node.func)
         if target is not None:
-            self.edges.append(SymbolEdge(source=self._source, target=target, kind="calls"))
+            self.edges.append(
+                SymbolEdge(
+                    source=self._source,
+                    target=target,
+                    kind="calls",
+                    line=node.lineno,
+                    column=node.col_offset,
+                )
+            )
         self.generic_visit(node)
 
     def _visit_symbol(
@@ -137,7 +158,15 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                 ],
             )
         )
-        self.edges.append(SymbolEdge(source=parent_id, target=symbol_id, kind="contains"))
+        self.edges.append(
+            SymbolEdge(
+                source=parent_id,
+                target=symbol_id,
+                kind="contains",
+                line=node.lineno,
+                column=node.col_offset,
+            )
+        )
         self._qualified_names.append(node.name)
         self._symbol_ids.append(symbol_id)
         self._kinds.append(kind)
@@ -175,10 +204,13 @@ class PythonSymbolGraphBuilder:
                 edges,
                 key=lambda edge: (
                     edge.source,
+                    edge.line,
+                    edge.column,
                     edge.kind,
                     edge.target,
                     edge.alias or "",
                     edge.binding or "",
+                    edge.binding_target or "",
                 ),
             ),
             parse_errors=dict(sorted(parse_errors.items())),

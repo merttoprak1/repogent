@@ -205,17 +205,14 @@ def _incoming_edges(
     nodes_by_id = {node.symbol_id: node for node in nodes}
     qualified_nodes = _unique_qualified_nodes(nodes)
     children: dict[str, list[str]] = defaultdict(list)
-    imports_by_source: dict[str, list[SymbolEdge]] = defaultdict(list)
-    calls_by_source: dict[str, list[SymbolEdge]] = defaultdict(list)
+    events_by_source: dict[str, list[SymbolEdge]] = defaultdict(list)
     for edge in edges:
         if edge.kind == "contains":
             if edge.source in nodes_by_id and edge.target in nodes_by_id:
                 children[edge.source].append(edge.target)
                 counters.contains_edges += 1
-        elif edge.kind == "imports" and edge.source in nodes_by_id:
-            imports_by_source[edge.source].append(edge)
-        elif edge.kind == "calls" and edge.source in nodes_by_id:
-            calls_by_source[edge.source].append(edge)
+        elif edge.kind in {"imports", "calls"} and edge.source in nodes_by_id:
+            events_by_source[edge.source].append(edge)
 
     incoming: dict[str, list[SymbolEdge]] = defaultdict(list)
     binding_stacks: dict[str, list[str]] = defaultdict(list)
@@ -240,22 +237,23 @@ def _incoming_edges(
                 current_module = node.qualified_name
 
             pushed_bindings = []
-            for edge in imports_by_source.get(node_id, []):
-                counters.import_edges += 1
-                target = qualified_nodes.get(edge.target)
-                if target is None:
-                    continue
-                incoming[target.symbol_id].append(edge)
-                if edge.binding is not None:
-                    binding_stacks[edge.binding].append(target.qualified_name)
-                    pushed_bindings.append(edge.binding)
-            for edge in calls_by_source.get(node_id, []):
-                counters.call_edges += 1
-                target = _resolve_scoped_call(
-                    edge.target, binding_stacks, current_module, qualified_nodes
-                )
-                if target is not None:
+            for edge in events_by_source.get(node_id, []):
+                if edge.kind == "imports":
+                    counters.import_edges += 1
+                    target = qualified_nodes.get(edge.target)
+                    if target is None:
+                        continue
                     incoming[target.symbol_id].append(edge)
+                    if edge.binding is not None and edge.binding_target is not None:
+                        binding_stacks[edge.binding].append(edge.binding_target)
+                        pushed_bindings.append(edge.binding)
+                else:
+                    counters.call_edges += 1
+                    target = _resolve_scoped_call(
+                        edge.target, binding_stacks, current_module, qualified_nodes
+                    )
+                    if target is not None:
+                        incoming[target.symbol_id].append(edge)
 
             work.append((True, node_id, current_module, pushed_bindings))
             for child_id in reversed(children.get(node_id, [])):

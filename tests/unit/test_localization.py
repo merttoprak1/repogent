@@ -240,6 +240,7 @@ def test_localizer_processes_deep_scopes_and_edges_once() -> None:
             target=auth_login.qualified_name,
             kind="imports",
             binding="login",
+            binding_target=auth_login.qualified_name,
         )
     ]
     calls = [SymbolEdge(source=node.symbol_id, target="login", kind="calls") for node in nested[1:]]
@@ -254,3 +255,69 @@ def test_localizer_processes_deep_scopes_and_edges_once() -> None:
     assert counters.import_edges == len(imports)
     assert counters.call_edges == len(calls)
     assert len([edge for edge in incoming[auth_login.symbol_id] if edge.kind == "calls"]) == depth
+
+
+def test_localizer_resolves_calls_with_statement_ordered_rebinding(tmp_path: Path) -> None:
+    from repogent.localization import _incoming_edges
+
+    _inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "a.py": "def login():\n    return True\n",
+            "b.py": "def login():\n    return False\n",
+            "consumer.py": (
+                "from a import login\n"
+                "login()\n"
+                "from b import login\n"
+                "login()\n"
+            ),
+        },
+    )
+
+    incoming, _source_paths = _incoming_edges(graph.edges, graph.nodes)
+    calls_by_symbol = {
+        symbol_id: [edge.line for edge in edges if edge.kind == "calls"]
+        for symbol_id, edges in incoming.items()
+    }
+
+    assert calls_by_symbol["a.py:a.login"] == [2]
+    assert calls_by_symbol["b.py:b.login"] == [4]
+
+
+def test_localizer_does_not_resolve_calls_before_their_import(tmp_path: Path) -> None:
+    from repogent.localization import _incoming_edges
+
+    _inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "b.py": "def login():\n    return False\n",
+            "consumer.py": "login()\nfrom b import login\n",
+        },
+    )
+
+    incoming, _source_paths = _incoming_edges(graph.edges, graph.nodes)
+
+    assert not [edge for edge in incoming["b.py:b.login"] if edge.kind == "calls"]
+
+
+def test_localizer_resolves_unaliased_dotted_imports_from_package_binding(tmp_path: Path) -> None:
+    from repogent.localization import PythonLocalizer
+
+    inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/auth.py": "def login():\n    return True\n",
+            "billing.py": "def login():\n    return False\n",
+            "tests/test_consumer.py": "import pkg.auth\npkg.auth.login()\n",
+        },
+    )
+
+    report = PythonLocalizer().localize(inventory, graph, "change login")
+    signals = {
+        location.symbol_id: {signal.name for signal in location.signals}
+        for location in report.locations
+    }
+
+    assert {"call", "test"} <= signals["pkg/auth.py:pkg.auth.login"]
+    assert not {"call", "test"} & signals["billing.py:billing.login"]
