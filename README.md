@@ -6,6 +6,8 @@
 
 Repogent's MVP is a synchronous, approval-gated CLI for narrowly scoped changes to Python FastAPI repositories. Model roles propose typed requirements, plans, patches, repairs, and QA findings. Deterministic services alone inspect the repository, validate and apply diffs, select validation commands, execute checks, enforce limits, and update workflow state.
 
+Repogent is open-source software released under the [MIT License](LICENSE).
+
 ## Setup
 
 Repogent requires Python 3.11 or newer. From this repository, install the package and development tools:
@@ -29,15 +31,14 @@ repogent analyze ./examples/fastapi_demo --request "Add a health endpoint"
 Repogent modifies the approved target checkout after the requirements, plan, and patch are each approved. Copy the bundled demo before running it so the tracked example remains unchanged:
 
 ```bash
-rm -rf /tmp/repogent-demo
-mkdir -p /tmp/repogent-demo
-cp -R examples/fastapi_demo/. /tmp/repogent-demo/
-repogent run --repository /tmp/repogent-demo --request "Add a health endpoint" \
+REPOGENT_DEMO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repogent-demo.XXXXXX")"
+cp -R examples/fastapi_demo/. "$REPOGENT_DEMO_DIR"/
+repogent run --repository "$REPOGENT_DEMO_DIR" --request "Add a health endpoint" \
   --provider scripted --script ./examples/scripted_run.json \
   --executor local --output-dir ./.repogent/runs
 ```
 
-Review each displayed artifact and answer `y` at the three approval prompts. A successful run adds `GET /health` and its test to `/tmp/repogent-demo`, validates the checkout, performs independent scripted QA, and prints the external evidence directory. The local executor is selected explicitly here so the demo works without Docker; it is a weaker development fallback that runs allowlisted argument arrays on the host with a minimal environment and timeouts. It is not equivalent to container isolation.
+Review each displayed artifact and answer `y` at the three approval prompts. A successful run adds `GET /health` and its test to `$REPOGENT_DEMO_DIR`, validates the checkout, performs independent scripted QA, and prints the external evidence directory. The local executor is selected explicitly here so the demo works without Docker; it is a weaker development fallback that runs allowlisted argument arrays on the host with a minimal environment and timeouts. It is not equivalent to container isolation.
 
 ## Docker validator image
 
@@ -73,7 +74,7 @@ A rejection ends the run as `cancelled`. The checkout is unchanged before patch 
 
 ## Evidence
 
-`--output-dir` names the external base directory. Repogent creates a unique `run-<id>/` beneath it and refuses an evidence directory inside the target repository. Each run contains:
+`--output-dir` names the external base directory. If it is omitted, Repogent uses a safe `.repogent/runs` evidence root beside the target repository. Repogent creates a unique `run-<id>/` beneath the selected root and refuses an evidence directory inside the target repository. Each run contains:
 
 - atomic `run.json` state and a final `report.md`;
 - numbered inventories, retrieved context, and role inputs and outputs;
@@ -96,6 +97,8 @@ Only `completed` and `completed_with_findings` produce a successful CLI exit. A 
 ## Security and scope
 
 Repository content and tests are untrusted. Docker reduces their authority but cannot make execution risk-free. Use disposable checkouts, keep Docker and the host patched, inspect the validator image and every patch, never mount credentials, and read the [security model](docs/security.md). See [architecture](docs/architecture.md) for component boundaries and workflow states.
+
+The CLI intentionally uses conservative fixed workflow budgets and patch limits. Applications that need custom `Budget` or `PatchLimits` values can configure them through the Python API; the MVP does not expose limit flags.
 
 The MVP deliberately defers:
 
