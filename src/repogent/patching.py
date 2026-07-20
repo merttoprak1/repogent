@@ -68,8 +68,8 @@ class PatchPolicy:
                 raise PatchPolicyError(
                     "malformed unified diff: patch metadata and empty hunks are forbidden"
                 )
-            source = self._relative_path(patched_file.source_file)
-            target = self._relative_path(patched_file.target_file)
+            source = self._relative_path(patched_file.source_file, prefix="a/")
+            target = self._relative_path(patched_file.target_file, prefix="b/")
             for path in (source, target):
                 if path is not None and any(
                     component in {".git", ".repogent"} for component in path.parts
@@ -95,14 +95,17 @@ class PatchPolicy:
         )
 
     @staticmethod
-    def _relative_path(raw: str) -> PurePosixPath | None:
+    def _relative_path(raw: str, *, prefix: str) -> PurePosixPath | None:
         if raw == "/dev/null":
             return None
-        value = raw[2:] if raw.startswith(("a/", "b/")) else raw
+        if not raw.startswith(prefix):
+            raise PatchPolicyError(f"unsafe path: {raw}")
+        value = raw[len(prefix) :]
         components = value.split("/")
         if (
             not value
             or "\\" in value
+            or '"' in value
             or any(component in {"", ".", ".."} for component in components)
         ):
             raise PatchPolicyError(f"unsafe path: {raw}")

@@ -22,6 +22,8 @@ GOOD_DIFF = """--- a/app.py
         ("--- a/.git/config\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+y\n", "protected path"),
         ("--- a/app.py\n+++ b/other.py\n@@ -1 +1 @@\n-x\n+y\n", "renames"),
         ("hello\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+y\n", "malformed"),
+        ('--- "x/app.py"\n+++ "x/app.py"\n@@ -1 +1 @@\n-x\n+y\n', "unsafe path"),
+        ("--- x/app.py\n+++ x/app.py\n@@ -1 +1 @@\n-x\n+y\n", "unsafe path"),
     ],
 )
 def test_policy_rejects_unsafe_diffs(tmp_path: Path, diff: str, message: str) -> None:
