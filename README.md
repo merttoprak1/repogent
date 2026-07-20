@@ -4,7 +4,7 @@
 
 > Repogent is an auditable multi-agent software engineering platform that transforms feature requests into tested, reviewed, and traceable repository changes.
 
-Repogent's MVP is a synchronous, approval-gated CLI for narrowly scoped changes to Python FastAPI repositories. Model roles propose typed requirements, plans, patches, repairs, and QA findings. Deterministic services alone inspect the repository, validate and apply diffs, select validation commands, execute checks, enforce limits, and update workflow state.
+Repogent is an open-source, synchronous, approval-gated CLI for narrowly scoped Python changes. It covers conventional Python libraries, command-line packages, data transforms, and the bundled FastAPI web-service MVP. Model roles propose typed requirements, plans, patches, repairs, and QA findings. Deterministic services alone inspect the repository, validate and apply diffs, select validation commands, execute checks, enforce limits, and update workflow state.
 
 Repogent is open-source software released under the [MIT License](LICENSE).
 
@@ -20,10 +20,35 @@ Run the deterministic project gate with `make verify`. Docker is optional for de
 
 ## Analyze a repository
 
-`analyze` is read-only. It prints a JSON inventory and request-ranked lexical context:
+`analyze` is read-only. It prints a JSON inventory, deterministic Python symbol graph, and request-ranked localization. This command is covered by the local reliability integration fixtures:
 
 ```bash
-repogent analyze ./examples/fastapi_demo --request "Add a health endpoint"
+repogent analyze ./tests/fixtures/python_library --request "Reject inverted clamp bounds"
+```
+
+The static graph intentionally has limits: dynamic imports, reflection, generated code, runtime framework wiring, and non-Python code can reduce localization confidence. Repogent records ambiguity rather than pretending an uncertain location is decisive.
+
+## v0.2 local workflow
+
+Every run follows five user-visible stages:
+
+1. **Assess** — preflight, bounded repository inventory, symbol graph, and localization.
+2. **Specify** — typed requirements and implementation plan, each approval-gated.
+3. **Evaluate** — one candidate is applied and validated only in a disposable copy.
+4. **Decide** — evidence selects a candidate, or reports ambiguity for human review.
+5. **Apply and verify** — the approved candidate applies once to the real checkout, then receives an isolated final validation and independent QA pass.
+
+Repogent starts with `candidate-1`. It can generate `candidate-2` and then `candidate-3` only when validation fails, localization remains ambiguous, the patch is high risk or broad, or acceptance coverage is incomplete. It never exceeds three candidates. Equal eligible evidence is an ambiguity, not an arbitrary selection; no patch is applied and the terminal status is `human_intervention_required`.
+
+```text
+[stage] analyzed
+[approval] requirements approved
+[approval] plan approved
+[candidate] candidate-1 generated
+[validation] candidate validation completed (4 passed, 0 failed, 0 skipped)
+[approval] patch approved
+[validation] final validation completed (4 passed, 0 failed, 0 skipped)
+[terminal] workflow finished: completed
 ```
 
 ## Reproducible scripted demo
@@ -42,13 +67,13 @@ Review each displayed artifact and answer `y` at the three approval prompts. A s
 
 ## Docker validator image
 
-Docker is the default executor. Before using it, review and approve the pinned packages in `docker/validator.Dockerfile`, then build the fixed local image:
+Docker is the default executor. Preflight checks the repository and selected executor before a provider is constructed; a failed preflight writes evidence and stops without spending model budget. Before using Docker, review and approve the pinned packages in `docker/validator.Dockerfile`, then build the fixed local image:
 
 ```bash
 make validator-image
 ```
 
-The runtime uses `repogent-validator:py311` with `--pull=never`, no network, a read-only checkout mount and container filesystem, bounded CPU, memory, PIDs, output, and time. The image supports the bundled MVP dependency set, not arbitrary project dependencies. Repogent does not install target-repository dependencies automatically.
+The runtime uses `repogent-validator:py311` with `--pull=never`, no network, a read-only checkout mount and container filesystem, bounded CPU, memory, PIDs, output, and time. The image supports the bundled MVP dependency set, not arbitrary project dependencies. Repogent does not install target-repository dependencies automatically. If Docker or the image is unavailable, Repogent does not silently downgrade: choose `--executor local` explicitly when its weaker host boundary is acceptable.
 
 ## Live OpenAI run
 
@@ -70,19 +95,19 @@ A normal successful run pauses for approval of:
 2. the implementation plan;
 3. the exact policy-checked unified diff.
 
-A rejection ends the run as `cancelled`. The checkout is unchanged before patch approval. After approval, patch application is transactional: an application failure restores every touched path. A validation failure deliberately leaves the approved patch in place and records it as unvalidated so it can be inspected. If validation fails and a repair is proposed, each repair diff passes the same policy and requires another explicit approval; at most two repair attempts are permitted.
+A rejection ends the run as `cancelled`. The checkout is unchanged before patch approval. Candidate patches are policy-checked and evaluated in disposable copies, then fully restored before evidence selection. After approval, the selected patch applies once to the real checkout; an application failure restores every touched path. Final validation is isolated from that checkout. Required validation failure, changed evidence, or recovery uncertainty ends in `human_intervention_required` with the approved state and evidence retained for inspection.
 
 ## Evidence
 
 `--output-dir` names the external base directory. If it is omitted, Repogent uses a safe `.repogent/runs` evidence root beside the target repository. Repogent creates a unique `run-<id>/` beneath the selected root and refuses an evidence directory inside the target repository. Each run contains:
 
-- atomic `run.json` state and a final `report.md`;
-- numbered inventories, retrieved context, and role inputs and outputs;
-- provider usage, approvals, proposed/approved/applied diffs, and any repair history;
+- atomic `run.json` state, a monotonic `events.jsonl`, and a final `report.md`;
+- numbered `inventory-*.json`, `symbol-graph-*.json`, `localization-*.json`, and role inputs and outputs;
+- `candidate-*.json`, `candidate-evidence-*.json`, `candidate-selection-*.json`, approvals, proposed/applied diffs, and repair history;
 - raw validation status, fixed argument arrays, output, exit codes, durations, and reasons for skipped checks;
-- the independent QA result.
+- provider usage and the independent QA result.
 
-Stage artifacts are append-only, while `run.json` is atomically replaced as the state changes. Common credential forms and configured secrets are redacted before persistence, but evidence still deserves careful handling.
+All structured artifacts currently declare `schema_version: "1"`. Stage artifacts are append-only, while `run.json` is atomically replaced as the state changes. It records repository and configuration fingerprints, candidate IDs, the selected candidate (if any), the events filename, and the terminal reason. Common credential forms and configured secrets are redacted before persistence, but evidence still deserves careful handling.
 
 ## Terminal statuses
 
@@ -90,9 +115,9 @@ Stage artifacts are append-only, while `run.json` is atomically replaced as the 
 - `completed_with_findings`: validation passed and QA reported non-blocking findings.
 - `changes_requested`: validation passed but QA found blocking issues.
 - `cancelled`: a human rejected an approval gate.
-- `human_intervention_required`: policy, provider, timeout, budget, or repair limits stopped the run.
+- `human_intervention_required`: policy, provider, timeout, budget, ambiguous evidence, validation integrity, or candidate limits stopped the run.
 
-Only `completed` and `completed_with_findings` produce a successful CLI exit. A skipped optional validation tool is visibly recorded with its reason; it is never represented as having passed.
+Only `completed` and `completed_with_findings` produce a successful CLI exit. A skipped optional validation tool is visibly recorded with its reason; it is never represented as having passed. Candidate evaluation restores its disposable checkout before selection. If recovery cannot be proved, a required check fails, the real checkout drifts before application, or final isolated validation differs from candidate evidence, Repogent stops for human intervention and retains the partial evidence and recovery state in the report.
 
 ## Security and scope
 
@@ -102,11 +127,13 @@ The CLI intentionally uses conservative fixed workflow budgets and patch limits.
 
 The MVP deliberately defers:
 
+- a real-repository benchmark harness and published metrics;
+- headless CI policy, stable exit codes, and reusable workflows;
+- GitHub issue, status-check, notification, and pull-request integration;
 - semantic embeddings, Qdrant, or another vector database;
 - LangGraph;
 - PostgreSQL or resumable background workers;
 - a web dashboard or FastAPI control API;
-- GitHub issue ingestion or pull-request creation;
 - automated dependency installation;
 - arbitrary model-authored commands;
 - autonomous deployment;

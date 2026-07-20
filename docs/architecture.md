@@ -1,21 +1,30 @@
 # Architecture
 
-Repogent is a synchronous, artifact-first workflow. Model roles produce typed proposals; deterministic services alone inspect files, validate paths, apply patches, select commands, execute checks, enforce budgets, and change workflow state.
+Repogent is a synchronous, artifact-first local workflow for conventional Python libraries, command-line packages, data transforms, and the bundled FastAPI web-service MVP. Model roles produce typed proposals; deterministic services alone inspect files, validate paths, apply patches, select commands, execute checks, enforce budgets, and change workflow state.
 
 ## Runtime flow
 
-Request → inspect and retrieve → requirements approval → plan approval → patch policy → patch approval → transactional apply → deterministic validation → at most two approved repairs → independent QA → final report.
+The detailed state machine is preserved in `RunStage`; its five user-visible stages are:
+
+1. **Assess:** preflight, inventory, symbol graph, and localization.
+2. **Specify:** requirements and plan generation with two approval gates.
+3. **Evaluate:** create and validate a candidate only in a disposable repository copy.
+4. **Decide:** compare candidate evidence and require exact patch approval.
+5. **Apply and verify:** apply once to the real checkout, validate in a new isolated copy, run QA, and finalize evidence.
+
+`candidate-1` is the default low-risk path. Validation failure, incomplete acceptance coverage, high risk, a broad patch, or unresolved ambiguity may create a further candidate; the policy caps the sequence at `candidate-3`. Candidates with required failures cannot be selected. Equal evidence is explicitly ambiguous and ends in human intervention rather than a tie-break mutation.
 
 ## Boundaries
 
 - `domain.py`: versioned contracts and status enums.
-- `repository.py`: confined and aggregate-bounded traversal, sensitive-path exclusion, AST metadata, and lexical ranking.
+- `repository.py`, `symbols.py`, and `localization.py`: confined and aggregate-bounded traversal, sensitive-path exclusion, deterministic Python AST graph, and explainable hybrid localization.
 - `providers.py`, `agents.py`, and `sanitization.py`: deadline-bounded schema generation, final-boundary recursive redaction, and untrusted-content prompts.
 - `approvals.py`: requirements, plan, patch, and repair decisions.
 - `patching.py`: default-deny unified-diff validation and transactional application.
-- `execution.py` and `validation.py`: fixed commands through Docker or explicit local fallback.
-- `workflow.py`: legal transitions, budgets, repairs, and terminal outcomes.
-- `artifacts.py` and `reporting.py`: structurally sanitized JSON evidence and final reports.
+- `preflight.py`: repository/executor readiness and repository/configuration fingerprints before provider construction.
+- `execution.py` and `validation.py`: fixed commands through Docker by default or an explicit local fallback.
+- `candidates.py` and `workflow.py`: isolated candidate transactions, legal transitions, bounded expansion, evidence selection, budgets, recovery, and terminal outcomes.
+- `events.py`, `artifacts.py`, and `reporting.py`: monotonic event JSONL, structurally sanitized versioned evidence, and final reports.
 
 ## Terminal statuses
 
@@ -27,4 +36,8 @@ Request → inspect and retrieve → requirements approval → plan approval →
 
 ## Evidence
 
-Each external run directory contains `run.json`, `report.md`, versioned inventories and context, role outputs, approvals, diffs, validation output, provider usage, repairs, and QA results. `run.json` is replaced atomically; stage artifacts are append-only.
+Each external run directory contains `run.json`, `events.jsonl`, `report.md`, versioned inventory/graph/localization/context artifacts, role inputs and outputs, approvals, candidate records and evidence, selection, diffs, validation output, provider usage, repairs, and QA results. Structured models currently use `schema_version: "1"`; `run.json` atomically records fingerprints, candidate IDs, selected candidate, event linkage, and terminal state while stage artifacts remain append-only.
+
+Failed preflight writes its report and manifest without constructing a provider. Candidate workspaces must restore to the captured baseline; failed recovery, required validation failures, ambiguous selection, root drift, changed final evidence, provider/budget/timeout errors, or persistence trouble all preserve evidence and end in an explicit terminal status.
+
+Real-repository benchmarks, public packaging/release automation, headless CI policy, and GitHub issue/PR adapters intentionally follow this increment rather than introducing another workflow engine.
