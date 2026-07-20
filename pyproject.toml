@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "repogent"
+version = "0.1.0"
+description = "From issue to verified patch."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=2.37,<3",
+  "pydantic>=2.11,<3",
+  "typer>=0.16,<1",
+  "unidiff>=0.7.5,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "bandit>=1.8,<2",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "mypy>=1.16,<2",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+repogent = "repogent.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repogent"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers --cov=repogent --cov-report=term-missing --cov-fail-under=85"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["docker: requires a running Docker daemon and validator image"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["repogent"]
+
+[tool.bandit]
+exclude_dirs = ["tests", "examples"]
