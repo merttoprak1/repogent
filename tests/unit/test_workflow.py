@@ -389,6 +389,38 @@ def test_timeout_is_rechecked_immediately_before_successful_terminalization(
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
 
 
+def test_timeout_is_rechecked_before_changes_requested_terminalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = ManualClock()
+    outputs = [
+        *BASE_OUTPUTS[:3],
+        {**BASE_OUTPUTS[3], "merge_recommendation": "changes_requested"},
+    ]
+    workflow = make_workflow(
+        tmp_path,
+        outputs,
+        [Decision.APPROVED] * 3,
+        [CheckStatus.PASSED],
+        budget=Budget(timeout_seconds=1),
+    )
+    original_write_model = workflow.artifacts.write_model
+
+    def slow_qa_evidence(name: str, model: object) -> Path:
+        path = original_write_model(name, model)  # type: ignore[arg-type]
+        if name == "qa-review":
+            clock.advance(2)
+        return path
+
+    monkeypatch.setattr("repogent.workflow.time.monotonic", clock.monotonic)
+    monkeypatch.setattr(workflow.artifacts, "write_model", slow_qa_evidence)
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.stage is RunStage.FINISHED
+
+
 def test_initial_manifest_failure_is_terminalized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

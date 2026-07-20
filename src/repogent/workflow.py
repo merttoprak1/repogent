@@ -94,7 +94,11 @@ class Workflow:
             try:
                 self.artifacts.update_manifest(self.manifest)
                 status, reason = self._execute()
-                if status in {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FINDINGS}:
+                if status in {
+                    RunStatus.COMPLETED,
+                    RunStatus.COMPLETED_WITH_FINDINGS,
+                    RunStatus.CHANGES_REQUESTED,
+                }:
                     self.ensure_time()
             except Exception as error:
                 status = RunStatus.HUMAN_INTERVENTION_REQUIRED
