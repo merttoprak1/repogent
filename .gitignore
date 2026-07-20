@@ -1,2 +1,38 @@
+# Local agent and workflow state
 .superpowers/
+.codex/
+.agents/
 .worktrees/
+docs/superpowers/
+
+# Repogent runtime artifacts
+.repogent/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# OS and editor noise
+.DS_Store
+.idea/
+*.swp
