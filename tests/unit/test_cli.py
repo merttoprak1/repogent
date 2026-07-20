@@ -250,3 +250,64 @@ def test_run_reports_openai_provider_load_error_without_traceback(
     assert result.exit_code == 2
     assert "could not load OpenAI provider" in result.output
     assert "Traceback" not in result.output
+
+
+def test_run_reports_file_output_directory_error_without_traceback(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    output_file = tmp_path / "output-file"
+    output_file.write_text("not a directory")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--provider",
+            "scripted",
+            "--script",
+            str(script),
+            "--output-dir",
+            str(output_file),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "could not create evidence directory" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_run_rejects_filesystem_root_before_creating_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+
+    def artifact_creation_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("artifact creation must not run for filesystem root")
+
+    monkeypatch.setattr(cli.ArtifactStore, "create", artifact_creation_must_not_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            "/",
+            "--request",
+            "change",
+            "--provider",
+            "scripted",
+            "--script",
+            str(script),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "filesystem root" in result.output
+    assert "Traceback" not in result.output

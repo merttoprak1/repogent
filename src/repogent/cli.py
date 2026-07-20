@@ -65,12 +65,15 @@ def run_command(
         raise typer.Exit(2)
     if executor not in {"docker", "local"}:
         raise typer.BadParameter("executor must be docker or local", param_hint="--executor")
+    if repository.parent == repository:
+        typer.echo("filesystem root repositories are unsupported")
+        raise typer.Exit(2)
 
     evidence_dir = output_dir or repository.parent / ".repogent" / "runs"
     try:
         store = ArtifactStore.create(evidence_dir, repository, request)
-    except ArtifactStoreError as error:
-        typer.echo(str(error))
+    except (ArtifactStoreError, OSError) as error:
+        typer.echo(f"could not create evidence directory: {error}")
         raise typer.Exit(2) from error
 
     model_provider: ModelProvider
