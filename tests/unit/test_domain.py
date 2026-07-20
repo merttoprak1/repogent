@@ -10,7 +10,6 @@ from repogent.domain import (
     ImplementationPlan,
     PlanStep,
     RequirementsSpec,
-    RiskLevel,
     RunManifest,
     RunStage,
     RunStatus,

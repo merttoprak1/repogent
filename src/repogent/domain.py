@@ -144,7 +144,7 @@ class CheckResult(VersionedModel):
 class ValidationReport(VersionedModel):
     checks: list[CheckResult]
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def passed(self) -> bool:
         return bool(self.checks) and all(
