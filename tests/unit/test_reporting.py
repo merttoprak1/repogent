@@ -2,6 +2,7 @@ from repogent.domain import (
     CandidateEvidence,
     CandidateRecord,
     CandidateSelection,
+    CheckoutState,
     CheckResult,
     CheckStatus,
     FinalValidationStatus,
@@ -185,6 +186,7 @@ def test_report_distinguishes_disposable_recovery_from_applied_real_patch() -> N
             "Review src/app.py, run required validation, and revert the approved patch manually "
             "if it should not remain."
         ),
+        checkout_state=CheckoutState.APPLIED,
     )
 
     report = render_report(manifest, None, None, None, None)
@@ -193,3 +195,21 @@ def test_report_distinguishes_disposable_recovery_from_applied_real_patch() -> N
     assert "src/app.py" in report
     assert "Final validation: failed" in report
     assert "revert the approved patch manually" in report
+
+
+def test_report_never_claims_not_applied_when_checkout_recovery_is_unknown() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="change",
+        status=RunStatus.HUMAN_INTERVENTION_REQUIRED,
+        checkout_state=CheckoutState.RECOVERY_UNKNOWN,
+        selected_patch_applied=False,
+        applied_paths=["src/app.py"],
+        recovery_guidance="Inspect and manually restore src/app.py before continuing.",
+    )
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Real checkout patch: recovery unknown" in report
+    assert "Real checkout patch: not applied" not in report
+    assert "Inspect and manually restore src/app.py" in report

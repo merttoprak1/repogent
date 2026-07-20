@@ -17,6 +17,17 @@ class PatchPolicyError(ValueError):
     pass
 
 
+class CheckoutRecoveryError(RuntimeError):
+    def __init__(self, touched_paths: tuple[Path, ...], restore_error: BaseException) -> None:
+        self.touched_paths = touched_paths
+        self.restore_error = restore_error
+        paths = ", ".join(path.as_posix() for path in touched_paths)
+        super().__init__(
+            "checkout recovery could not be proved for "
+            f"{paths}: {type(restore_error).__name__}: {restore_error}"
+        )
+
+
 class _MissingParentError(Exception):
     pass
 
@@ -151,11 +162,13 @@ class PatchApplier:
         try:
             self._git_apply(repository, validated.proposal.diff, check=True)
             self._git_apply(repository, validated.proposal.diff, check=False)
-        except Exception as apply_error:
+        except (Exception, KeyboardInterrupt, SystemExit) as apply_error:
             try:
                 self.restore(repository, snapshots, missing_directories)
-            except RuntimeError as restore_error:
-                raise restore_error from apply_error
+            except (Exception, KeyboardInterrupt, SystemExit) as restore_error:
+                raise CheckoutRecoveryError(
+                    validated.touched_paths, restore_error
+                ) from apply_error
             raise
 
     def transaction(self, root: Path, patch: ValidatedPatch) -> PatchTransaction:
@@ -375,14 +388,7 @@ class PatchTransaction:
 
     def __enter__(self) -> PatchTransaction:
         self._snapshots, self._missing_directories = self.applier.snapshot(self.root, self.patch)
-        try:
-            self.applier.apply(self.root, self.patch)
-        except BaseException as apply_error:
-            try:
-                self.applier.restore(self.root, self._snapshots, self._missing_directories)
-            except RuntimeError as restore_error:
-                raise restore_error from apply_error
-            raise
+        self.applier.apply(self.root, self.patch)
         return self
 
     def commit(self) -> None:

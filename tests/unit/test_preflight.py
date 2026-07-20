@@ -1,8 +1,11 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from repogent import execution as execution_module
 from repogent.domain import CheckResult
-from repogent.execution import CommandSpec, ValidationPolicy
+from repogent.execution import CommandSpec, DockerExecutor, ValidationPolicy
 from repogent.preflight import (
     Preflight,
     ReadinessStatus,
@@ -93,6 +96,30 @@ def test_preflight_warns_when_optional_validation_command_is_unavailable(tmp_pat
     ruff_check = next(check for check in report.checks if check.name == "command:ruff")
     assert report.passed is True
     assert ruff_check.required is False
+    assert ruff_check.status is ReadinessStatus.WARNING
+    assert ruff_check.reason == "optional validation command unavailable"
+
+
+def test_docker_preflight_warns_when_optional_module_is_missing_inside_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = initialize_git_repository(tmp_path)
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+
+    def fake_bounded_run(argv: list[str], **_kwargs: object) -> object:
+        if argv[1:3] == ["image", "inspect"]:
+            return execution_module._ProcessResult(0, "", "", False)
+        module = argv[-1]
+        return execution_module._ProcessResult(
+            1 if module == "ruff" else 0, "", "", False
+        )
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
+
+    report = Preflight(DockerExecutor(), ValidationPolicy()).run(repository)
+
+    ruff_check = next(check for check in report.checks if check.name == "command:ruff")
+    assert report.passed is True
     assert ruff_check.status is ReadinessStatus.WARNING
     assert ruff_check.reason == "optional validation command unavailable"
 

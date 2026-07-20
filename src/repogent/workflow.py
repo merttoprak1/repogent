@@ -26,6 +26,7 @@ from repogent.domain import (
     CandidateEvidence,
     CandidateRecord,
     CandidateSelection,
+    CheckoutState,
     CheckResult,
     CheckStatus,
     Decision,
@@ -45,7 +46,7 @@ from repogent.domain import (
 )
 from repogent.events import EventSink
 from repogent.localization import LocalizationReport, PythonLocalizer
-from repogent.patching import PatchApplier, PatchPolicy
+from repogent.patching import CheckoutRecoveryError, PatchApplier, PatchPolicy
 from repogent.provider_context import ProviderContextBuilder
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
@@ -284,7 +285,14 @@ class Workflow:
 
         self.ensure_time()
         validated = self.patch_policy.validate(self.root, selected.proposal)
-        self.patch_applier.apply(self.root, validated)
+        try:
+            self.patch_applier.apply(self.root, validated)
+        except CheckoutRecoveryError as error:
+            self._mark_checkout_recovery_unknown(
+                [path.as_posix() for path in error.touched_paths]
+            )
+            self.artifacts.update_manifest(self.manifest)
+            raise
         self._mark_patch_applied([path.as_posix() for path in validated.touched_paths])
         self.artifacts.update_manifest(self.manifest)
         self.write("patch-applied", selected.proposal)
@@ -557,11 +565,28 @@ class Workflow:
         self.manifest = self.manifest.model_copy(
             update={
                 "selected_patch_applied": True,
+                "checkout_state": CheckoutState.APPLIED,
                 "applied_paths": paths,
                 "final_validation_status": FinalValidationStatus.NOT_STARTED,
                 "recovery_guidance": (
                     f"Review {joined}, run the required validation commands, and revert the "
                     "approved patch manually if it should not remain."
+                ),
+                "updated_at": utc_now(),
+            }
+        )
+
+    def _mark_checkout_recovery_unknown(self, paths: list[str]) -> None:
+        joined = ", ".join(paths) or "the affected paths"
+        self.manifest = self.manifest.model_copy(
+            update={
+                "selected_patch_applied": False,
+                "checkout_state": CheckoutState.RECOVERY_UNKNOWN,
+                "applied_paths": paths,
+                "final_validation_status": FinalValidationStatus.INTERRUPTED,
+                "recovery_guidance": (
+                    f"Stop and manually inspect and restore {joined} before continuing; "
+                    "Repogent could not prove whether the attempted patch was rolled back."
                 ),
                 "updated_at": utc_now(),
             }

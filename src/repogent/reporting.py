@@ -5,6 +5,7 @@ from repogent.domain import (
     CandidateEvidence,
     CandidateRecord,
     CandidateSelection,
+    CheckoutState,
     ImplementationPlan,
     QAReview,
     RequirementsSpec,
@@ -202,7 +203,23 @@ def _render_recovery(
             lines.append(f"- Disposable {_markdown_text(candidate.candidate_id)}: {state}")
     else:
         lines.append("- No disposable candidate evaluation recovery was required.")
-    if manifest.selected_patch_applied:
+    if manifest.checkout_state is CheckoutState.RECOVERY_UNKNOWN:
+        paths = ", ".join(manifest.applied_paths) or "affected paths unavailable"
+        lines.extend(
+            [
+                "- Real checkout patch: recovery unknown",
+                f"- Paths requiring inspection: {_markdown_text(paths)}",
+                "- Next action: "
+                + _markdown_text(
+                    manifest.recovery_guidance
+                    or "Inspect the affected paths and manually restore them before continuing."
+                ),
+            ]
+        )
+    elif (
+        manifest.checkout_state is CheckoutState.APPLIED
+        or manifest.selected_patch_applied
+    ):
         paths = ", ".join(manifest.applied_paths) or "affected paths unavailable"
         lines.extend(
             [

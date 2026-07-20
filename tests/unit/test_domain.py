@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from repogent.domain import (
     Budget,
     CandidateEvidence,
+    CheckoutState,
     CheckResult,
     CheckStatus,
     FinalValidationStatus,
@@ -102,6 +103,7 @@ def test_manifest_phase_two_fields_round_trip_through_json() -> None:
         final_validation_status=FinalValidationStatus.FAILED,
         recovery_guidance="Review app.py and revert the approved patch if unwanted.",
         generated_but_not_consumed=["qa-review"],
+        checkout_state=CheckoutState.APPLIED,
     )
 
     restored = RunManifest.model_validate_json(manifest.model_dump_json())
@@ -117,6 +119,12 @@ def test_manifest_recovery_fields_default_for_existing_evidence() -> None:
     assert manifest.final_validation_status is FinalValidationStatus.NOT_STARTED
     assert manifest.recovery_guidance is None
     assert manifest.generated_but_not_consumed == []
+    assert manifest.checkout_state is CheckoutState.NOT_APPLIED
+
+    legacy_applied = RunManifest.model_validate(
+        {"run_id": "old-applied", "request": "change", "selected_patch_applied": True}
+    )
+    assert legacy_applied.checkout_state is CheckoutState.APPLIED
 
 
 def test_run_event_message_is_limited_to_4096_characters() -> None:

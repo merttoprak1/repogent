@@ -91,6 +91,12 @@ class FinalValidationStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class CheckoutState(StrEnum):
+    NOT_APPLIED = "not_applied"
+    APPLIED = "applied"
+    RECOVERY_UNKNOWN = "recovery_unknown"
+
+
 class RequirementsSpec(VersionedModel):
     objective: str = Field(min_length=1)
     functional_requirements: list[str]
@@ -278,7 +284,19 @@ class RunManifest(VersionedModel):
     selected_candidate_id: str | None = None
     events_file: str | None = None
     selected_patch_applied: bool = False
+    checkout_state: CheckoutState = CheckoutState.NOT_APPLIED
     applied_paths: list[str] = Field(default_factory=list)
     final_validation_status: FinalValidationStatus = FinalValidationStatus.NOT_STARTED
     recovery_guidance: str | None = None
     generated_but_not_consumed: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_checkout_state(cls, value: object) -> object:
+        if (
+            isinstance(value, dict)
+            and "checkout_state" not in value
+            and value.get("selected_patch_applied") is True
+        ):
+            return {**value, "checkout_state": CheckoutState.APPLIED}
+        return value

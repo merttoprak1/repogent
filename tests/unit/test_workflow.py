@@ -15,6 +15,7 @@ from repogent.domain import (
     Budget,
     CandidateEvidence,
     CandidateRecord,
+    CheckoutState,
     CheckResult,
     CheckStatus,
     Decision,
@@ -946,3 +947,73 @@ def test_terminal_event_keyboard_interrupt_is_durably_recorded_without_recursion
     persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
     assert persisted["status"] == RunStatus.CANCELLED.value
     assert (workflow.artifacts.root / "report.md").exists()
+
+
+def test_real_apply_interrupt_restores_checkout_and_cancels_as_not_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    original_apply = PatchApplier._git_apply
+
+    def interrupt_real_apply(root: Path, diff: str, *, check: bool) -> None:
+        original_apply(root, diff, check=check)
+        if root.resolve() == workflow.root.resolve() and not check:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(PatchApplier, "_git_apply", staticmethod(interrupt_real_apply))
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.CANCELLED
+    assert manifest.checkout_state is CheckoutState.NOT_APPLIED
+    assert manifest.selected_patch_applied is False
+    assert manifest.applied_paths == []
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+    assert "Real checkout patch: not applied" in (
+        workflow.artifacts.root / "report.md"
+    ).read_text()
+
+
+def test_real_apply_interrupt_with_failed_restore_reports_recovery_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    original_apply = PatchApplier._git_apply
+    original_restore = workflow.patch_applier.restore
+
+    def interrupt_real_apply(root: Path, diff: str, *, check: bool) -> None:
+        original_apply(root, diff, check=check)
+        if root.resolve() == workflow.root.resolve() and not check:
+            raise KeyboardInterrupt
+
+    def fail_real_restore(
+        root: Path, snapshots: object, missing_directories: object
+    ) -> None:
+        if root.resolve() == workflow.root.resolve():
+            raise RuntimeError("real checkout restore failed")
+        original_restore(root, snapshots, missing_directories)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(PatchApplier, "_git_apply", staticmethod(interrupt_real_apply))
+    monkeypatch.setattr(workflow.patch_applier, "restore", fail_real_restore)
+
+    manifest = workflow.run()
+    report = (workflow.artifacts.root / "report.md").read_text()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.checkout_state is CheckoutState.RECOVERY_UNKNOWN
+    assert manifest.selected_patch_applied is False
+    assert manifest.applied_paths == ["app.py"]
+    assert manifest.final_validation_status is FinalValidationStatus.INTERRUPTED
+    assert manifest.recovery_guidance is not None
+    assert "manually inspect and restore app.py" in manifest.recovery_guidance
+    assert "Real checkout patch: recovery unknown" in report
+    assert "Real checkout patch: not applied" not in report
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"

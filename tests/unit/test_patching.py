@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 
 from repogent.domain import PatchProposal
-from repogent.patching import PatchApplier, PatchPolicy, PatchPolicyError
+from repogent.patching import (
+    CheckoutRecoveryError,
+    PatchApplier,
+    PatchPolicy,
+    PatchPolicyError,
+)
 
 GOOD_DIFF = """--- a/app.py
 +++ b/app.py
@@ -114,6 +119,81 @@ def test_applier_restores_all_touched_files_after_post_apply_failure(
         PatchApplier().apply(tmp_path, patch)
     assert first.read_text() == "first = 1\n"
     assert second.read_text() == "second = 1\n"
+
+
+def test_applier_restores_after_keyboard_interrupt_during_mutating_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "app.py"
+    target.write_text("value = 1\n")
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="change", diff=GOOD_DIFF))
+    original_apply = PatchApplier._git_apply
+
+    def interrupt_after_apply(root: Path, content: str, *, check: bool) -> None:
+        original_apply(root, content, check=check)
+        if not check:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(PatchApplier, "_git_apply", staticmethod(interrupt_after_apply))
+
+    with pytest.raises(KeyboardInterrupt):
+        PatchApplier().apply(tmp_path, patch)
+
+    assert target.read_text() == "value = 1\n"
+
+
+def test_applier_reports_unknown_recovery_when_interrupt_restore_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "app.py"
+    target.write_text("value = 1\n")
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="change", diff=GOOD_DIFF))
+    applier = PatchApplier()
+    original_apply = PatchApplier._git_apply
+
+    def interrupt_after_apply(root: Path, content: str, *, check: bool) -> None:
+        original_apply(root, content, check=check)
+        if not check:
+            raise KeyboardInterrupt
+
+    def fail_restore(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("disk denied restoration")
+
+    monkeypatch.setattr(PatchApplier, "_git_apply", staticmethod(interrupt_after_apply))
+    monkeypatch.setattr(applier, "restore", fail_restore)
+
+    with pytest.raises(CheckoutRecoveryError, match="recovery could not be proved") as caught:
+        applier.apply(tmp_path, patch)
+
+    assert caught.value.touched_paths == (Path("app.py"),)
+    assert isinstance(caught.value.__cause__, KeyboardInterrupt)
+    assert target.read_text() == "value = 2\n"
+
+
+def test_applier_reports_unknown_recovery_when_ordinary_failure_restore_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "app.py"
+    target.write_text("value = 1\n")
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="change", diff=GOOD_DIFF))
+    applier = PatchApplier()
+    original_apply = PatchApplier._git_apply
+
+    def fail_after_apply(root: Path, content: str, *, check: bool) -> None:
+        original_apply(root, content, check=check)
+        if not check:
+            raise RuntimeError("post-apply evidence failed")
+
+    def fail_restore(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("disk denied restoration")
+
+    monkeypatch.setattr(PatchApplier, "_git_apply", staticmethod(fail_after_apply))
+    monkeypatch.setattr(applier, "restore", fail_restore)
+
+    with pytest.raises(CheckoutRecoveryError, match="app.py"):
+        applier.apply(tmp_path, patch)
+
+    assert target.read_text() == "value = 2\n"
 
 
 def test_applier_removes_new_parent_directories_after_post_apply_failure(

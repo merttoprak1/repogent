@@ -33,6 +33,10 @@ _DOCKER_CONTROL_TIMEOUT_SECONDS = 5
 _DISCOVERY_MAX_ENTRIES = 20_000
 _DISCOVERY_MAX_DEPTH = 16
 _PYTEST_CONFIG_MAX_BYTES = 256_000
+_DOCKER_MODULE_PROBE = (
+    "import importlib.util,sys;"
+    "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)"
+)
 _DISCOVERY_IGNORED_DIRECTORIES = {
     ".git",
     ".hg",
@@ -182,17 +186,19 @@ def _has_pytest_suite(root: Path) -> bool:
         return True
     pending: list[tuple[Path, int]] = [(root, 0)]
     entries_seen = 0
-    while pending and entries_seen < _DISCOVERY_MAX_ENTRIES:
+    while pending:
         directory, depth = pending.pop()
         try:
-            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+            entries = []
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    entries_seen += 1
+                    if entries_seen > _DISCOVERY_MAX_ENTRIES:
+                        return True
+                    entries.append(entry)
         except OSError:
-            continue
-        for entry in entries:
-            entries_seen += 1
-            if entries_seen > _DISCOVERY_MAX_ENTRIES:
-                # Discovery uncertainty must not silently downgrade regression evidence.
-                return True
+            return True
+        for entry in sorted(entries, key=lambda item: item.name):
             name = entry.name
             try:
                 if entry.is_dir(follow_symlinks=False):
@@ -200,26 +206,35 @@ def _has_pytest_suite(root: Path) -> bool:
                         continue
                     if name in {"test", "tests"}:
                         return True
-                    if depth < _DISCOVERY_MAX_DEPTH:
-                        pending.append((Path(entry.path), depth + 1))
+                    if depth >= _DISCOVERY_MAX_DEPTH:
+                        return True
+                    pending.append((Path(entry.path), depth + 1))
                 elif entry.is_file(follow_symlinks=False) and name.endswith(".py"):
                     if name.startswith("test_") or name.endswith("_test.py"):
                         return True
             except OSError:
-                continue
+                return True
     return False
 
 
 def _has_pytest_configuration(root: Path) -> bool:
     pyproject = root / "pyproject.toml"
     try:
-        if pyproject.stat().st_size <= _PYTEST_CONFIG_MAX_BYTES:
-            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-            tool = data.get("tool", {})
-            if isinstance(tool, dict) and isinstance(tool.get("pytest"), dict):
-                return True
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        metadata = pyproject.stat()
+    except FileNotFoundError:
         pass
+    except OSError:
+        return True
+    else:
+        if metadata.st_size > _PYTEST_CONFIG_MAX_BYTES:
+            return True
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            return True
+        tool = data.get("tool", {})
+        if isinstance(tool, dict) and isinstance(tool.get("pytest"), dict):
+            return True
     for name, sections in (
         ("pytest.ini", {"pytest"}),
         ("setup.cfg", {"tool:pytest"}),
@@ -227,12 +242,18 @@ def _has_pytest_configuration(root: Path) -> bool:
     ):
         path = root / name
         try:
-            if path.stat().st_size > _PYTEST_CONFIG_MAX_BYTES:
-                continue
+            metadata = path.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if metadata.st_size > _PYTEST_CONFIG_MAX_BYTES:
+            return True
+        try:
             parser = configparser.ConfigParser(interpolation=None)
             parser.read_string(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, configparser.Error):
-            continue
+            return True
         if sections & set(parser.sections()):
             return True
     return False
@@ -352,6 +373,7 @@ class DockerExecutor(_RestrictedExecutor):
     ) -> None:
         self.image = image
         self.docker = shutil.which("docker")
+        self._availability_cache: dict[tuple[str, str], bool] = {}
         super().__init__(
             allowed=allowed,
             max_output_chars=max_output_chars,
@@ -370,18 +392,49 @@ class DockerExecutor(_RestrictedExecutor):
         return (True, None)
 
     def available(self, command: CommandSpec) -> bool:
-        if not self._is_allowed(command):
+        docker = self.docker
+        if docker is None or not self._is_allowed(command):
             return False
-        inspection = self._inspect_image(
-            timeout_seconds=min(
-                _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
+        tool = command.module or f"executable:{command.argv[0]}"
+        cache_key = (self.image, tool)
+        if cache_key in self._availability_cache:
+            return self._availability_cache[cache_key]
+        probe_command = (
+            ["python", "-c", _DOCKER_MODULE_PROBE, command.module]
+            if command.module is not None
+            else [command.argv[0], "--version"]
+        )
+        argv = [
+            docker,
+            "run",
+            "--rm",
+            "--pull=never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cpus",
+            "0.25",
+            "--memory",
+            "128m",
+            "--pids-limit",
+            "64",
+            self.image,
+            *probe_command,
+        ]
+        try:
+            result = _run_with_bounded_output(
+                argv,
+                timeout_seconds=min(
+                    _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
+                ),
+                max_output_chars=self.max_output_chars,
             )
-        )
-        return (
-            inspection is not None
-            and not inspection.timed_out
-            and inspection.exit_code == 0
-        )
+        except OSError:
+            available = False
+        else:
+            available = not result.timed_out and result.exit_code == 0
+        self._availability_cache[cache_key] = available
+        return available
 
     def _inspect_image(
         self, *, timeout_seconds: int = _DOCKER_CONTROL_TIMEOUT_SECONDS

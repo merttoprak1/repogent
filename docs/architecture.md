@@ -18,11 +18,11 @@ The detailed state machine is preserved in `RunStage`. The following are concept
 
 - `domain.py`: versioned contracts and status enums.
 - `repository.py`, `symbols.py`, and `localization.py`: confined and aggregate-bounded traversal, sensitive-path exclusion, source-root-aware deterministic Python AST graph, and explainable hybrid localization.
-- `provider_context.py`, `providers.py`, `agents.py`, and `sanitization.py`: metadata-only inventory DTOs, top-ranked bounded snippets, capped failure summaries, deadline-bounded schema generation, final-boundary recursive redaction, and untrusted-content prompts.
+- `provider_context.py`, `providers.py`, `agents.py`, and `sanitization.py`: metadata-only inventory DTOs, top-ranked complete-line snippets, globally allocated structured context, capped failure summaries, deadline-bounded schema generation, final-boundary recursive redaction, and untrusted-content prompts.
 - `approvals.py`: requirements, plan, patch, and repair decisions.
 - `patching.py`: default-deny unified-diff validation and transactional application.
-- `preflight.py`: repository/executor and per-command readiness plus repository/configuration fingerprints before provider construction.
-- `execution.py` and `validation.py`: fixed commands through Docker by default or an explicit local fallback.
+- `preflight.py`: repository/executor and per-command readiness plus repository/configuration fingerprints before provider construction, with fail-closed pytest discovery.
+- `execution.py` and `validation.py`: fixed commands through Docker by default or an explicit local fallback; Docker readiness probes the actual tool inside the configured image and caches the result.
 - `candidates.py` and `workflow.py`: isolated candidate transactions, legal transitions, bounded expansion, evidence selection, budgets, recovery, and terminal outcomes.
 - `events.py`, `artifacts.py`, and `reporting.py`: monotonic event JSONL, structurally sanitized versioned evidence, and final reports.
 
@@ -36,7 +36,7 @@ The detailed state machine is preserved in `RunStage`. The following are concept
 
 ## Evidence
 
-Each external run directory contains `run.json`, `events.jsonl`, `report.md`, inventory/graph/localization/context artifacts, role inputs and outputs, approvals, candidate records and evidence, selection, diffs, validation output, provider usage, repairs, and QA results. Versioned domain/model artifacts use `schema_version: "1"`; raw role-input JSON/text payloads are retained but are not versioned model envelopes. `run.json` atomically records fingerprints, candidate IDs, selected candidate, whether its patch remains applied to the real checkout, applied paths, final-validation state, recovery guidance, generated-but-not-consumed artifacts, event linkage, and terminal state while stage artifacts remain append-only.
+Each external run directory contains `run.json`, `events.jsonl`, `report.md`, inventory/graph/localization/context artifacts, role inputs and outputs, approvals, candidate records and evidence, selection, diffs, validation output, provider usage, repairs, and QA results. Versioned domain/model artifacts use `schema_version: "1"`; raw role-input JSON/text payloads are retained but are not versioned model envelopes. `run.json` atomically records fingerprints, candidate IDs, selected candidate, typed checkout state (`not_applied`, `applied`, or `recovery_unknown`), applied paths, final-validation state, recovery guidance, generated-but-not-consumed artifacts, event linkage, and terminal state while stage artifacts remain append-only.
 
 Failed preflight writes its report, manifest, and terminal event without constructing a provider. Candidate workspaces must restore to the captured baseline; that disposable recovery state is distinct from the approved real patch. Failed recovery, required validation failures, ambiguous selection, root drift, changed final evidence, provider/budget/timeout errors, interruption, or persistence trouble all preserve evidence and end in an explicit terminal status. Typed provider output and usage are persisted before budget enforcement; budget-crossing output is retained without starting the next stage.
 

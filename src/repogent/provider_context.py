@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -27,6 +28,21 @@ MAX_PROVIDER_STDIO_CHARS = 2_000
 MAX_PROVIDER_DIFF_CHARS = 20_000
 _MAX_CONTEXT_STRING_CHARS = 1_000
 _MAX_CONTEXT_LIST_ITEMS = 32
+_MIN_COMPACTED_STRING_CHARS = 64
+_PRESERVED_CONTEXT_FIELDS = {
+    "candidate_id",
+    "exit_code",
+    "generation_reason",
+    "passed",
+    "reason",
+    "required",
+    "restored_to_baseline",
+    "risk_level",
+    "selection_reason",
+    "status",
+}
+_MISSING = object()
+ContextPath = tuple[str | int, ...]
 
 
 class ProviderInventoryFile(VersionedModel):
@@ -55,7 +71,7 @@ class ProviderContextBuilder:
             "request": _truncate(request, _MAX_CONTEXT_STRING_CHARS * 4),
             "repository_inventory": self._inventory(inventory).model_dump(mode="json"),
         }
-        return _check_payload(payload)
+        return _fit_payload(payload)
 
     def planning(
         self, requirements: RequirementsSpec, localization: LocalizationReport
@@ -64,7 +80,7 @@ class ProviderContextBuilder:
             "requirements": _bounded_model(requirements),
             "localization": self._localization(localization),
         }
-        return _check_payload(payload)
+        return _fit_payload(payload)
 
     def candidate(
         self,
@@ -81,11 +97,11 @@ class ProviderContextBuilder:
             "requirements": _bounded_model(requirements),
             "plan": _bounded_model(plan),
             "localization": self._localization(localization),
-            "candidate_id": candidate_id,
+            "candidate_id": _truncate(candidate_id, 256),
         }
         if previous is not None:
             payload["previous_candidate"] = {
-                "candidate_id": previous.candidate_id,
+                "candidate_id": _truncate(previous.candidate_id, 256),
                 "summary": _truncate(previous.proposal.summary, _MAX_CONTEXT_STRING_CHARS),
                 "diff": _truncate(previous.proposal.diff, MAX_PROVIDER_DIFF_CHARS),
                 "acceptance_criteria_addressed": _bounded_data(
@@ -100,7 +116,7 @@ class ProviderContextBuilder:
             payload["generation_reason"] = _truncate(
                 generation_reason, _MAX_CONTEXT_STRING_CHARS
             )
-        return _check_payload(payload)
+        return _fit_payload(payload)
 
     def qa(
         self,
@@ -115,7 +131,7 @@ class ProviderContextBuilder:
             "plan": _bounded_model(plan),
             "acceptance_criteria": _bounded_data(requirements.acceptance_criteria),
             "selected_candidate": {
-                "candidate_id": selected.candidate_id,
+                "candidate_id": _truncate(selected.candidate_id, 256),
                 "summary": _truncate(selected.proposal.summary, _MAX_CONTEXT_STRING_CHARS),
                 "diff": _truncate(selected.proposal.diff, MAX_PROVIDER_DIFF_CHARS),
                 "acceptance_criteria_addressed": _bounded_data(
@@ -126,7 +142,7 @@ class ProviderContextBuilder:
             "selection_reason": _truncate(selection_reason, _MAX_CONTEXT_STRING_CHARS),
             "final_validation": _validation_summary(validation),
         }
-        return _check_payload(payload)
+        return _fit_payload(payload)
 
     def _inventory(self, inventory: RepositoryInventory) -> ProviderInventory:
         files: list[ProviderInventoryFile] = []
@@ -170,15 +186,18 @@ class ProviderContextBuilder:
         snippets: list[dict[str, object]] = []
         remaining = MAX_PROVIDER_SNIPPET_CHARS
         for snippet in localization.snippets[:MAX_PROVIDER_SNIPPETS]:
-            text = _truncate(snippet.text, remaining)
+            text, included_line_count = _complete_lines(snippet.text, remaining)
             if not text:
                 break
+            original_line_count = _line_count(snippet.text)
             snippets.append(
                 {
                     "path": _truncate(snippet.path, 512),
                     "start_line": snippet.start_line,
-                    "end_line": snippet.end_line,
+                    "end_line": snippet.start_line + included_line_count - 1,
                     "text": text,
+                    "text_truncated": included_line_count < original_line_count,
+                    "omitted_line_count": original_line_count - included_line_count,
                     "score": snippet.score,
                     "reason": _truncate(snippet.reason, 512),
                 }
@@ -190,6 +209,9 @@ class ProviderContextBuilder:
             "total_locations": len(localization.locations),
             "locations_truncated": len(locations) < len(localization.locations),
             "locations": locations,
+            "total_snippets": len(localization.snippets),
+            "snippets_truncated": len(snippets) < len(localization.snippets),
+            "omitted_snippet_count": len(localization.snippets) - len(snippets),
             "snippets": snippets,
         }
 
@@ -208,7 +230,7 @@ def _inventory_file(record: FileRecord) -> ProviderInventoryFile:
 
 def _failure_summary(evidence: CandidateEvidence) -> dict[str, object]:
     return {
-        "candidate_id": evidence.candidate_id,
+        "candidate_id": _truncate(evidence.candidate_id, 256),
         "acceptance_criteria_coverage": evidence.acceptance_criteria_coverage,
         "risk_level": evidence.risk_level.value,
         "changed_files": evidence.changed_files,
@@ -277,10 +299,245 @@ def _truncate(value: str, limit: int) -> str:
     return value[: limit - len(marker)] + marker
 
 
-def _check_payload(payload: dict[str, object]) -> dict[str, object]:
-    size = len(json.dumps(payload, sort_keys=True, default=str))
-    if size > MAX_PROVIDER_PAYLOAD_CHARS:
-        raise ValueError(
-            f"provider context exceeds {MAX_PROVIDER_PAYLOAD_CHARS} characters: {size}"
-        )
-    return payload
+def _complete_lines(value: str, limit: int) -> tuple[str, int]:
+    if limit <= 0 or not value:
+        return ("", 0)
+    included: list[str] = []
+    size = 0
+    for line in value.splitlines():
+        separator_size = 1 if included else 0
+        if size + separator_size + len(line) > limit:
+            break
+        included.append(line)
+        size += separator_size + len(line)
+    return ("\n".join(included), len(included))
+
+
+def _line_count(value: str) -> int:
+    return len(value.splitlines()) if value else 0
+
+
+def _serialized_size(value: object) -> int:
+    return len(json.dumps(value, sort_keys=True, default=str))
+
+
+def _fit_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Fit a provider payload by shortening values, never serialized JSON."""
+
+    fitted = copy.deepcopy(payload)
+    original_size = _serialized_size(fitted)
+    local_marker_count = _truncation_marker_count(fitted)
+    if original_size <= MAX_PROVIDER_PAYLOAD_CHARS and local_marker_count == 0:
+        return fitted
+    truncation: dict[str, Any] = {
+        "truncated": True,
+        "max_chars": MAX_PROVIDER_PAYLOAD_CHARS,
+        "original_chars": original_size,
+        "local_marker_count": local_marker_count,
+        "strings_shortened": 0,
+        "characters_omitted": 0,
+        "items_omitted": _reported_omission_count(fitted),
+        "fallback_projection": False,
+    }
+    fitted["context_truncation"] = truncation
+
+    while _serialized_size(fitted) > MAX_PROVIDER_PAYLOAD_CHARS:
+        strings = _shrinkable_strings(fitted)
+        if strings:
+            path, string_value = max(strings, key=lambda item: len(item[1]))
+            target = max(_MIN_COMPACTED_STRING_CHARS, len(string_value) // 2)
+            omitted = _shorten_string(fitted, path, string_value, target)
+            truncation["strings_shortened"] = int(truncation["strings_shortened"]) + 1
+            truncation["characters_omitted"] = (
+                int(truncation["characters_omitted"]) + omitted
+            )
+            continue
+        lists = _shrinkable_lists(fitted)
+        if lists:
+            path, items = max(lists, key=lambda item: _serialized_size(item[1]))
+            omitted_item = items.pop()
+            truncation["items_omitted"] = int(truncation["items_omitted"]) + 1
+            truncation["characters_omitted"] = int(
+                truncation["characters_omitted"]
+            ) + _serialized_size(omitted_item)
+            _mark_list_truncated(fitted, path)
+            continue
+        fitted = _critical_projection_payload(fitted, truncation)
+        break
+
+    if _serialized_size(fitted) > MAX_PROVIDER_PAYLOAD_CHARS:
+        fitted = {
+            "context_truncation": {
+                **truncation,
+                "fallback_projection": True,
+                "critical_context_omitted": True,
+            }
+        }
+    return fitted
+
+
+def _truncation_marker_count(value: object) -> int:
+    if isinstance(value, str):
+        return int("[truncated]" in value)
+    if isinstance(value, list):
+        return sum(_truncation_marker_count(item) for item in value)
+    if isinstance(value, Mapping):
+        count = 0
+        for key, item in value.items():
+            if (str(key) == "truncated" or str(key).endswith("_truncated")) and item is True:
+                count += 1
+            count += _truncation_marker_count(item)
+        return count
+    return 0
+
+
+def _reported_omission_count(value: object) -> int:
+    if isinstance(value, list):
+        return sum(_reported_omission_count(item) for item in value)
+    if isinstance(value, Mapping):
+        count = 0
+        for key, item in value.items():
+            if (str(key).startswith("omitted_") or str(key).endswith("_omitted")) and isinstance(
+                item, int
+            ):
+                count += item
+            count += _reported_omission_count(item)
+        return count
+    return 0
+
+
+def _shrinkable_strings(
+    value: object, path: ContextPath = ()
+) -> list[tuple[ContextPath, str]]:
+    candidates: list[tuple[ContextPath, str]] = []
+    if isinstance(value, dict):
+        for key in sorted(value):
+            if key == "context_truncation":
+                continue
+            item = value[key]
+            child_path = (*path, key)
+            if isinstance(item, str):
+                if key not in _PRESERVED_CONTEXT_FIELDS and len(item) > _MIN_COMPACTED_STRING_CHARS:
+                    candidates.append((child_path, item))
+            else:
+                candidates.extend(_shrinkable_strings(item, child_path))
+    elif isinstance(value, list):
+        preserved = _path_field(path) in _PRESERVED_CONTEXT_FIELDS
+        for index, item in enumerate(value):
+            child_path = (*path, index)
+            if isinstance(item, str):
+                if not preserved and len(item) > _MIN_COMPACTED_STRING_CHARS:
+                    candidates.append((child_path, item))
+            else:
+                candidates.extend(_shrinkable_strings(item, child_path))
+    return candidates
+
+
+def _shrinkable_lists(
+    value: object, path: ContextPath = ()
+) -> list[tuple[ContextPath, list[object]]]:
+    candidates: list[tuple[ContextPath, list[object]]] = []
+    if isinstance(value, dict):
+        for key in sorted(value):
+            if key == "context_truncation":
+                continue
+            item = value[key]
+            child_path = (*path, key)
+            if isinstance(item, list):
+                if item and key != "checks":
+                    candidates.append((child_path, item))
+                candidates.extend(_shrinkable_lists(item, child_path))
+            elif isinstance(item, dict):
+                candidates.extend(_shrinkable_lists(item, child_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            if isinstance(item, (dict, list)):
+                candidates.extend(_shrinkable_lists(item, (*path, index)))
+    return candidates
+
+
+def _path_field(path: ContextPath) -> str | None:
+    return next((item for item in reversed(path) if isinstance(item, str)), None)
+
+
+def _resolve_path(root: object, path: ContextPath) -> object:
+    current = root
+    for item in path:
+        if isinstance(item, int) and isinstance(current, list):  # noqa: SIM114
+            current = current[item]
+        elif isinstance(item, str) and isinstance(current, dict):
+            current = current[item]
+        else:
+            raise TypeError(f"invalid provider context path: {path}")
+    return current
+
+
+def _shorten_string(
+    payload: dict[str, object], path: ContextPath, current: str, target: int
+) -> int:
+    parent = _resolve_path(payload, path[:-1])
+    key = path[-1]
+    if key == "text" and "snippets" in path and isinstance(parent, dict):
+        text, line_count = _complete_lines(current, target)
+        if text:
+            omitted_lines = _line_count(current) - line_count
+            parent["text"] = text
+            parent["end_line"] = int(parent["start_line"]) + line_count - 1
+            parent["text_truncated"] = True
+            parent["omitted_line_count"] = int(
+                parent.get("omitted_line_count", 0)
+            ) + omitted_lines
+            return len(current) - len(text)
+    replacement = _truncate(current, target)
+    if isinstance(key, int) and isinstance(parent, list):  # noqa: SIM114
+        parent[key] = replacement
+    elif isinstance(key, str) and isinstance(parent, dict):
+        parent[key] = replacement
+    else:
+        raise TypeError(f"invalid provider context string path: {path}")
+    return len(current) - len(replacement)
+
+
+def _mark_list_truncated(payload: dict[str, object], path: ContextPath) -> None:
+    parent = _resolve_path(payload, path[:-1])
+    field = path[-1]
+    if isinstance(parent, dict) and isinstance(field, str):
+        parent[f"{field}_truncated"] = True
+        omitted_key = f"omitted_{field}_count"
+        parent[omitted_key] = int(parent.get(omitted_key, 0)) + 1
+
+
+def _critical_projection_payload(
+    payload: dict[str, object], truncation: dict[str, Any]
+) -> dict[str, object]:
+    projected = _critical_projection(payload)
+    result = projected if isinstance(projected, dict) else {}
+    result["context_truncation"] = {
+        **truncation,
+        "fallback_projection": True,
+    }
+    return result
+
+
+def _critical_projection(value: object, field: str | None = None) -> object:
+    if isinstance(value, dict):
+        projected: dict[str, object] = {}
+        for key in sorted(value):
+            if key == "context_truncation":
+                continue
+            item = value[key]
+            if key in _PRESERVED_CONTEXT_FIELDS:
+                projected[key] = copy.deepcopy(item)
+                continue
+            nested = _critical_projection(item, key)
+            if nested is not _MISSING:
+                projected[key] = nested
+        return projected if projected else _MISSING
+    if isinstance(value, list):
+        projected_items: list[object] = []
+        for item in value:
+            projected_item = _critical_projection(item, field)
+            if projected_item is not _MISSING:
+                projected_items.append(projected_item)
+        return projected_items if projected_items else _MISSING
+    return copy.deepcopy(value) if field in _PRESERVED_CONTEXT_FIELDS else _MISSING
