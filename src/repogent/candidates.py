@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import hashlib
+import os
+import stat
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -18,10 +20,93 @@ from repogent.domain import (
 )
 from repogent.localization import LocalizationReport
 from repogent.patching import PatchApplier, PatchPolicy, PatchPolicyError, Snapshot, ValidatedPatch
+from repogent.repository import IGNORED_DIRECTORIES
 
 
 class Validator(Protocol):
     def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport: ...
+
+
+@dataclass(frozen=True)
+class RepositoryBaseline:
+    """A complete regular-file baseline outside VCS metadata."""
+
+    files: dict[Path, Snapshot]
+    directories: frozenset[Path]
+
+    @classmethod
+    def capture(cls, root: Path, applier: PatchApplier) -> RepositoryBaseline:
+        files, directories = _repository_paths(root)
+        return cls(
+            files={path: applier._snapshot(root, path) for path in files},
+            directories=frozenset(directories),
+        )
+
+    def restore(self, root: Path, applier: PatchApplier) -> None:
+        current_files, current_directories = _repository_paths(root)
+        errors: list[Exception] = []
+        for path in sorted(
+            current_files - set(self.files), key=lambda item: len(item.parts), reverse=True
+        ):
+            try:
+                applier._restore_one(root, path, Snapshot(existed=False, content=b"", mode=None))
+            except Exception as error:
+                errors.append(error)
+        for path, snapshot in self.files.items():
+            try:
+                applier._restore_one(root, path, snapshot)
+            except Exception as error:
+                errors.append(error)
+        for path in sorted(
+            current_directories - set(self.directories),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            try:
+                applier._remove_empty_directory(root, path)
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise RuntimeError(
+                "repository baseline restoration failed: " + "; ".join(map(str, errors))
+            )
+
+    def matches(self, root: Path, applier: PatchApplier) -> bool:
+        try:
+            current = self.capture(root, applier)
+        except Exception:
+            return False
+        return current.files == self.files and current.directories == self.directories
+
+
+def _repository_paths(root: Path) -> tuple[set[Path], set[Path]]:
+    repository = root.resolve(strict=True)
+    files: set[Path] = set()
+    directories: set[Path] = set()
+
+    def walk(descriptor: int, relative: Path) -> None:
+        try:
+            with os.scandir(descriptor) as entries:
+                names = sorted(entry.name for entry in entries)
+            for name in names:
+                if name in IGNORED_DIRECTORIES:
+                    continue
+                path = relative / name
+                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(metadata.st_mode):
+                    directories.add(path)
+                    child = os.open(name, PatchApplier._directory_flags(), dir_fd=descriptor)
+                    walk(child, path)
+                elif stat.S_ISREG(metadata.st_mode):
+                    files.add(path)
+                else:
+                    raise PatchPolicyError(f"cannot establish repository baseline for {path}")
+        finally:
+            os.close(descriptor)
+
+    descriptor = os.open(repository, PatchApplier._directory_flags())
+    walk(descriptor, Path())
+    return files, directories
 
 
 class ExpansionReason(StrEnum):
@@ -259,6 +344,9 @@ class CandidateEvaluator:
             started,
         )
 
+    def capture_baseline(self, root: Path) -> RepositoryBaseline:
+        return RepositoryBaseline.capture(root, self.patch_applier)
+
     def _evaluate_validated(
         self,
         root: Path,
@@ -269,12 +357,13 @@ class CandidateEvaluator:
         started: float,
     ) -> CandidateEvidence:
         validation = ValidationReport(checks=[])
-        before: dict[Path, _PathFingerprint] = {}
+        baseline: RepositoryBaseline | None = None
         evaluation_error: Exception | None = None
         validator_error: Exception | None = None
+        unexpected_mutation = False
 
         try:
-            before = self._fingerprints(root, validated)
+            baseline = self.capture_baseline(root)
             try:
                 with self.patch_applier.transaction(root, validated):
                     try:
@@ -286,22 +375,22 @@ class CandidateEvaluator:
         except Exception as error:
             evaluation_error = error
 
+        if baseline is not None:
+            unexpected_mutation = not baseline.matches(root, self.patch_applier)
+            try:
+                baseline.restore(root, self.patch_applier)
+            except Exception as error:
+                evaluation_error = error
+
         if validator_error is not None:
             validation = _with_failure(validation, "validation", str(validator_error))
         if evaluation_error is not None:
             name = "restoration" if _is_restoration_error(evaluation_error) else "patch-apply"
             validation = _with_failure(validation, name, str(evaluation_error))
 
-        restored_to_baseline = False
-        if before:
-            try:
-                restored_to_baseline = before == self._fingerprints(root, validated)
-            except Exception as error:
-                validation = _with_failure(validation, "restoration", str(error))
-        elif evaluation_error is None:
-            # An empty touched-path set cannot arise from PatchPolicy, but keep evidence safe
-            # if a future implementation supplies one.
-            restored_to_baseline = True
+        restored_to_baseline = (
+            baseline is not None and baseline.matches(root, self.patch_applier)
+        )
 
         if not restored_to_baseline and not any(
             check.name == "restoration" for check in validation.checks
@@ -310,6 +399,12 @@ class CandidateEvaluator:
                 validation,
                 "restoration",
                 "repository state did not match the recorded baseline after evaluation",
+            )
+        if unexpected_mutation:
+            validation = _with_failure(
+                validation,
+                "repository-mutation",
+                "candidate validation modified repository state outside the proposed patch",
             )
 
         required_failures = [
@@ -336,14 +431,6 @@ class CandidateEvaluator:
             restored_to_baseline=restored_to_baseline,
         )
 
-    def _fingerprints(
-        self, root: Path, validated: ValidatedPatch
-    ) -> dict[Path, _PathFingerprint]:
-        snapshots, _ = self.patch_applier.snapshot(root, validated)
-        return {
-            path: _PathFingerprint.from_snapshot(snapshot) for path, snapshot in snapshots.items()
-        }
-
     @staticmethod
     def _failure_evidence(
         candidate_id: str,
@@ -364,13 +451,6 @@ class CandidateEvaluator:
             skipped_checks=[],
             restored_to_baseline=True,
         )
-
-
-class _PathFingerprint(tuple[bool, str | None, int | None]):
-    @classmethod
-    def from_snapshot(cls, snapshot: Snapshot) -> _PathFingerprint:
-        digest = hashlib.sha256(snapshot.content).hexdigest() if snapshot.existed else None
-        return cls((snapshot.existed, digest, snapshot.mode))
 
 
 def _with_failure(validation: ValidationReport, name: str, reason: str) -> ValidationReport:

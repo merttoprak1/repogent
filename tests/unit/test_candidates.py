@@ -319,7 +319,36 @@ def test_candidate_evaluator_restores_after_validator_exception(tmp_path: Path) 
     assert (root / "app.py").read_text() == "value = 1\n"
 
 
-def test_candidate_evaluator_marks_restoration_mismatch_ineligible(
+def test_candidate_evaluator_restores_and_rejects_validator_changes_outside_patch(
+    tmp_path: Path,
+) -> None:
+    class MutatingValidator:
+        def run(
+            self, root: Path, *, timeout_seconds: float | None = None
+        ) -> ValidationReport:
+            del timeout_seconds
+            (root / "other.py").write_text("value = 99\n")
+            (root / "created.py").write_text("created = True\n")
+            return ValidationReport(
+                checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
+            )
+
+    root = repository_with_value(tmp_path, 1)
+    (root / "other.py").write_text("value = 1\n")
+
+    evidence = CandidateEvaluator(PatchPolicy(), PatchApplier(), MutatingValidator()).evaluate(
+        root, candidate("candidate-1", 1, 2), ["value changes"], 30
+    )
+
+    assert evidence.eligible is False
+    assert "repository-mutation" in evidence.required_failures
+    assert evidence.restored_to_baseline is True
+    assert (root / "app.py").read_text() == "value = 1\n"
+    assert (root / "other.py").read_text() == "value = 1\n"
+    assert not (root / "created.py").exists()
+
+
+def test_candidate_evaluator_recovers_a_failed_patch_transaction_before_marking_ineligible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = repository_with_value(tmp_path, 1)
@@ -331,9 +360,9 @@ def test_candidate_evaluator_marks_restoration_mismatch_ineligible(
     )
 
     assert evidence.eligible is False
-    assert evidence.restored_to_baseline is False
-    assert evidence.required_failures == ["restoration"]
-    assert (root / "app.py").read_text() == "value = 2\n"
+    assert evidence.restored_to_baseline is True
+    assert evidence.required_failures == ["repository-mutation"]
+    assert (root / "app.py").read_text() == "value = 1\n"
 
 
 def test_candidate_evaluator_rejects_unmapped_acceptance_without_mutation(tmp_path: Path) -> None:

@@ -13,11 +13,13 @@ from repogent.candidates import CandidateEvaluator, CandidatePolicy, CandidateSe
 from repogent.domain import (
     ApprovalKind,
     Budget,
+    CandidateEvidence,
     CheckResult,
     CheckStatus,
     Decision,
     EventKind,
     ProviderUsage,
+    RiskLevel,
     RunManifest,
     RunStage,
     RunStatus,
@@ -233,6 +235,122 @@ def test_candidate_evaluations_restore_baseline_before_approval(tmp_path: Path) 
     assert manifest.status is RunStatus.COMPLETED
 
 
+def test_failed_candidate_restoration_stops_before_another_provider_or_approval(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[],
+    )
+
+    def unrecovered_evaluation(*_args: object, **_kwargs: object) -> CandidateEvidence:
+        return CandidateEvidence(
+            candidate_id="candidate-1",
+            validation=ValidationReport(
+                checks=[CheckResult(name="restoration", argv=[], status=CheckStatus.FAILED)]
+            ),
+            acceptance_criteria_coverage=0,
+            risk_level=RiskLevel.LOW,
+            changed_files=1,
+            changed_lines=2,
+            duration_seconds=0,
+            required_failures=["restoration"],
+            restored_to_baseline=False,
+        )
+
+    evaluator = workflow.candidate_evaluator
+    assert evaluator is not None
+    evaluator.evaluate = unrecovered_evaluation  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    provider = workflow.roles.implementation.provider
+    assert isinstance(provider, ScriptedProvider)
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "candidate evaluation did not restore repository baseline"
+    assert len(provider.calls) == 3
+    assert [record.kind for record in workflow.approver.records] == [
+        ApprovalKind.REQUIREMENTS,
+        ApprovalKind.PLAN,
+    ]
+
+
+def test_workflow_rechecks_complete_baseline_before_patch_approval(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    evaluator = workflow.candidate_evaluator
+    assert evaluator is not None
+    original_evaluate = evaluator.evaluate
+
+    def evaluate_then_mutate(*args: object, **kwargs: object) -> CandidateEvidence:
+        evidence = original_evaluate(*args, **kwargs)  # type: ignore[arg-type]
+        (workflow.root / "unapproved.py").write_text("side_effect = True\n")
+        return evidence
+
+    evaluator.evaluate = evaluate_then_mutate  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "repository baseline changed before approval"
+    assert not (workflow.root / "unapproved.py").exists()
+    assert [record.kind for record in workflow.approver.records] == [
+        ApprovalKind.REQUIREMENTS,
+        ApprovalKind.PLAN,
+    ]
+
+
+def test_patch_approval_contains_all_candidate_proposals_and_evidence(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[
+            REQUIREMENTS_OUTPUT,
+            PLAN_OUTPUT,
+            INVALID_PATCH_OUTPUT,
+            VALID_PATCH_OUTPUT,
+            QA_OUTPUT,
+        ],
+        validation_statuses=[CheckStatus.FAILED, CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    original_decide = workflow.approver.decide
+    approval_payload: dict[str, object] = {}
+
+    def decide(kind: ApprovalKind, artifact: object) -> object:
+        if kind is ApprovalKind.PATCH:
+            assert isinstance(artifact, str)
+            approval_payload.update(json.loads(artifact))
+        return original_decide(kind, artifact)  # type: ignore[arg-type]
+
+    workflow.approver.decide = decide  # type: ignore[method-assign]
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.COMPLETED
+    comparisons = approval_payload["candidates"]
+    assert isinstance(comparisons, list)
+    assert [item["candidate"]["candidate_id"] for item in comparisons] == [  # type: ignore[index]
+        "candidate-1",
+        "candidate-2",
+    ]
+    assert all("evidence" in item for item in comparisons if isinstance(item, dict))
+
+
+def test_workflow_sets_default_events_filename(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+    )
+    workflow.manifest = workflow.manifest.model_copy(update={"events_file": None})
+
+    workflow.__post_init__()
+
+    assert workflow.manifest.events_file == "events.jsonl"
+
+
 def test_event_store_failure_is_terminalized_without_recursive_emit(tmp_path: Path) -> None:
     events = FailingEventStore()
     workflow = make_phase2_workflow(
@@ -295,3 +413,32 @@ def test_terminal_event_is_written_for_completed_run(tmp_path: Path) -> None:
     )
     workflow.run()
     assert _events(workflow)[-1]["kind"] == EventKind.TERMINAL.value
+    assert _events(workflow)[-1]["stage"] == RunStage.FINISHED.value
+
+
+def test_final_manifest_persistence_failure_downgrades_and_persists_human_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    original_update = workflow.artifacts.update_manifest
+    failed = False
+
+    def fail_once_for_finished(manifest: RunManifest) -> Path:
+        nonlocal failed
+        if manifest.stage is RunStage.FINISHED and not failed:
+            failed = True
+            raise OSError("final manifest write failed")
+        return original_update(manifest)
+
+    monkeypatch.setattr(workflow.artifacts, "update_manifest", fail_once_for_finished)
+
+    manifest = workflow.run()
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "final manifest write failed"
+    assert persisted["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value

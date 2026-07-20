@@ -124,6 +124,8 @@ class Workflow:
         self.candidate_policy = self.candidate_policy or CandidatePolicy()
         self.candidate_selector = self.candidate_selector or CandidateSelector()
         self.events = self.events or self.artifacts.event_store()
+        if self.manifest.events_file is None:
+            self.manifest = self.manifest.model_copy(update={"events_file": "events.jsonl"})
 
     def run(self) -> RunManifest:
         self.started_at = time.monotonic()
@@ -194,7 +196,17 @@ class Workflow:
             return RunStatus.CANCELLED, "implementation plan rejected"
         self.advance(RunStage.PLAN_APPROVED)
 
+        candidate_evaluator = cast(CandidateEvaluator, self.candidate_evaluator)
+        approval_baseline = candidate_evaluator.capture_baseline(self.root)
         candidates, evidence = self._evaluate_candidates(localization)
+        if not approval_baseline.matches(self.root, self.patch_applier):
+            try:
+                approval_baseline.restore(self.root, self.patch_applier)
+            except Exception as error:
+                raise RuntimeError(
+                    "repository baseline changed before approval and could not be restored"
+                ) from error
+            raise RuntimeError("repository baseline changed before approval")
         candidate_selector = cast(CandidateSelector, self.candidate_selector)
         selection = candidate_selector.select(candidates, evidence)
         self.write("candidate-selection", selection)
@@ -229,7 +241,14 @@ class Workflow:
             {
                 "selected_candidate": selected.model_dump(mode="json"),
                 "selection": selection.model_dump(mode="json"),
-                "all_evidence": [item.model_dump(mode="json") for item in evidence],
+                "candidates": [
+                    {
+                        "candidate": candidate.model_dump(mode="json"),
+                        "evidence": item.model_dump(mode="json"),
+                        "selected": candidate.candidate_id == selected.candidate_id,
+                    }
+                    for candidate, item in zip(candidates, evidence, strict=True)
+                ],
             },
             indent=2,
         )
@@ -379,6 +398,8 @@ class Workflow:
                 passed=candidate_evidence.validation.passed,
                 restored_to_baseline=candidate_evidence.restored_to_baseline,
             )
+            if not candidate_evidence.restored_to_baseline:
+                raise RuntimeError("candidate evaluation did not restore repository baseline")
             candidate_policy = cast(CandidatePolicy, self.candidate_policy)
             expansion = candidate_policy.should_expand(
                 localization, candidate_evidence, len(candidates)
@@ -471,19 +492,50 @@ class Workflow:
             raise BudgetExceeded("estimated cost budget exceeded")
 
     def finish(self, status: RunStatus, reason: str | None) -> RunManifest:
+        self._set_final_manifest(status, reason)
+        persistence_error = self._persist_final_manifest()
+        if persistence_error is not None:
+            self._set_final_manifest(RunStatus.HUMAN_INTERVENTION_REQUIRED, str(persistence_error))
+            retry_error = self._persist_final_manifest()
+            if retry_error is not None:
+                self.manifest = self.manifest.model_copy(
+                    update={
+                        "reason": f"{persistence_error}; final downgrade persistence failed: "
+                        f"{retry_error}",
+                        "updated_at": utc_now(),
+                    }
+                )
+            self._write_final_report()
+            return self.manifest
         if not self._event_failed:
             try:
                 self.emit(
                     EventKind.TERMINAL,
                     "workflow finished",
-                    status=status.value,
-                    reason=reason,
+                    status=self.manifest.status.value,
+                    reason=self.manifest.reason,
                 )
             except Exception as error:
-                self._event_failed = True
-                status = RunStatus.HUMAN_INTERVENTION_REQUIRED
-                reason = str(error)
-        final_stage = transition(self.manifest.stage, RunStage.FINISHED)
+                if self.manifest.status is not RunStatus.HUMAN_INTERVENTION_REQUIRED:
+                    self._set_final_manifest(RunStatus.HUMAN_INTERVENTION_REQUIRED, str(error))
+                    downgrade_error = self._persist_final_manifest()
+                    if downgrade_error is not None:
+                        self.manifest = self.manifest.model_copy(
+                            update={
+                                "reason": f"{error}; final downgrade persistence failed: "
+                                f"{downgrade_error}",
+                                "updated_at": utc_now(),
+                            }
+                        )
+        self._write_final_report()
+        return self.manifest
+
+    def _set_final_manifest(self, status: RunStatus, reason: str | None) -> None:
+        final_stage = (
+            self.manifest.stage
+            if self.manifest.stage is RunStage.FINISHED
+            else transition(self.manifest.stage, RunStage.FINISHED)
+        )
         self.manifest = self.manifest.model_copy(
             update={
                 "status": status,
@@ -492,7 +544,8 @@ class Workflow:
                 "updated_at": utc_now(),
             }
         )
-        self._update_final_manifest()
+
+    def _write_final_report(self) -> None:
         self.artifacts.write_final(
             "report.md",
             render_report(
@@ -503,15 +556,12 @@ class Workflow:
                 self.review,
             ),
         )
-        return self.manifest
-
-    def _update_final_manifest(self) -> bool:
+    def _persist_final_manifest(self) -> Exception | None:
         try:
             self.artifacts.update_manifest(self.manifest)
-        except Exception:
-            # The final report is still the best available durable evidence.
-            return False
-        return True
+        except Exception as error:
+            return error
+        return None
 
 
 def _same_required_results(expected: ValidationReport, actual: ValidationReport) -> bool:
