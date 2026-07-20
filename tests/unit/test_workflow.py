@@ -1017,3 +1017,120 @@ def test_real_apply_interrupt_with_failed_restore_reports_recovery_unknown(
     assert "Real checkout patch: recovery unknown" in report
     assert "Real checkout patch: not applied" not in report
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
+
+
+def test_interrupt_after_real_apply_keeps_durable_write_ahead_recovery_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    original_apply = workflow.patch_applier.apply
+
+    def apply_then_interrupt(root: Path, patch: object) -> None:
+        original_apply(root, patch)  # type: ignore[arg-type]
+        if root.resolve() == workflow.root.resolve():
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(workflow.patch_applier, "apply", apply_then_interrupt)
+
+    manifest = workflow.run()
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+    report = (workflow.artifacts.root / "report.md").read_text()
+
+    assert manifest.status is RunStatus.CANCELLED
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
+    assert manifest.checkout_state is CheckoutState.RECOVERY_UNKNOWN
+    assert manifest.applied_paths == ["app.py"]
+    assert manifest.recovery_guidance is not None
+    assert persisted["checkout_state"] == CheckoutState.RECOVERY_UNKNOWN.value
+    assert persisted["applied_paths"] == ["app.py"]
+    assert "Real checkout patch: recovery unknown" in report
+    assert "Real checkout patch: not applied" not in report
+
+
+def test_failed_write_ahead_intent_persistence_prevents_real_checkout_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    original_apply = workflow.patch_applier.apply
+    original_update = workflow.artifacts.update_manifest
+    real_apply_called = False
+
+    def record_real_apply(root: Path, patch: object) -> None:
+        nonlocal real_apply_called
+        if root.resolve() == workflow.root.resolve():
+            real_apply_called = True
+        original_apply(root, patch)  # type: ignore[arg-type]
+
+    def fail_write_ahead_intent(manifest: object) -> Path:
+        if getattr(manifest, "checkout_state", None) is CheckoutState.RECOVERY_UNKNOWN:
+            raise OSError("write-ahead intent unavailable")
+        return original_update(manifest)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workflow.patch_applier, "apply", record_real_apply)
+    monkeypatch.setattr(workflow.artifacts, "update_manifest", fail_write_ahead_intent)
+
+    manifest = workflow.run()
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "write-ahead intent unavailable"
+    assert real_apply_called is False
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+    assert manifest.checkout_state is CheckoutState.NOT_APPLIED
+    assert persisted["checkout_state"] == CheckoutState.NOT_APPLIED.value
+
+
+def test_failed_applied_state_persistence_retains_durable_recovery_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    original_update = workflow.artifacts.update_manifest
+    failed = False
+
+    def fail_applied_state_once(manifest: RunManifest) -> Path:
+        nonlocal failed
+        if manifest.checkout_state is CheckoutState.APPLIED and not failed:
+            failed = True
+            raise OSError("applied state unavailable")
+        return original_update(manifest)
+
+    monkeypatch.setattr(workflow.artifacts, "update_manifest", fail_applied_state_once)
+
+    manifest = workflow.run()
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "applied state unavailable"
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
+    assert manifest.checkout_state is CheckoutState.RECOVERY_UNKNOWN
+    assert persisted["checkout_state"] == CheckoutState.RECOVERY_UNKNOWN.value
+    assert persisted["applied_paths"] == ["app.py"]
+
+
+def test_successful_real_apply_persists_applied_checkout_state(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+
+    manifest = workflow.run()
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+
+    assert manifest.status is RunStatus.COMPLETED
+    assert manifest.checkout_state is CheckoutState.APPLIED
+    assert manifest.applied_paths == ["app.py"]
+    assert persisted["checkout_state"] == CheckoutState.APPLIED.value
+    assert persisted["applied_paths"] == ["app.py"]

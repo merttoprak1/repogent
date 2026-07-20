@@ -124,16 +124,80 @@ def test_policy_requires_pytest_when_config_cannot_be_read(
 ) -> None:
     config = tmp_path / "pytest.ini"
     config.write_text("[pytest]\n")
-    original_read_text = Path.read_text
+    original_open = execution_module.os.open
 
-    def fail_config_read(path: Path, *args: object, **kwargs: object) -> str:
-        if path == config:
+    def fail_config_open(path: object, *args: object, **kwargs: object) -> int:
+        if Path(str(path)).name == config.name:
             raise PermissionError("config unreadable")
-        return original_read_text(path, *args, **kwargs)  # type: ignore[arg-type]
+        return original_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "read_text", fail_config_read)
+    monkeypatch.setattr(execution_module.os, "open", fail_config_open)
 
     assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+@pytest.mark.parametrize(
+    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
+)
+def test_policy_requires_pytest_without_following_recognized_config_symlinks(
+    tmp_path: Path, config_name: str
+) -> None:
+    if not Path("/dev/null").exists():
+        pytest.skip("requires a POSIX device target")
+    (tmp_path / config_name).symlink_to("/dev/null")
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+@pytest.mark.parametrize(
+    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
+)
+def test_policy_requires_pytest_without_opening_recognized_config_fifos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_name: str
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFOs are unavailable on this platform")
+    config = tmp_path / config_name
+    os.mkfifo(config)
+    original_read_text = Path.read_text
+    read_attempted = False
+
+    def nonblocking_read(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal read_attempted
+        if path == config:
+            read_attempted = True
+            return ""
+        return original_read_text(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", nonblocking_read)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+    assert read_attempted is False
+
+
+def test_policy_requires_pytest_when_config_is_swapped_after_metadata_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not Path("/dev/null").exists():
+        pytest.skip("requires a POSIX device target")
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
+    original_stat = execution_module.os.stat
+    swapped = False
+
+    def swap_after_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal swapped
+        metadata = original_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+        if not swapped and str(path) in {str(config), config.name}:
+            swapped = True
+            config.unlink()
+            config.symlink_to("/dev/null")
+        return metadata
+
+    monkeypatch.setattr(execution_module.os, "stat", swap_after_stat)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+    assert swapped is True
 
 
 def test_policy_requires_pytest_when_repository_scan_is_inaccessible(

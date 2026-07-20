@@ -307,3 +307,58 @@ def test_truncated_snippet_end_line_matches_complete_included_lines() -> None:
     assert snippet["text_truncated"] is True
     assert snippet["end_line"] == snippet["start_line"] + snippet["text"].count("\n")
     assert snippet["omitted_line_count"] > 0
+
+
+def test_global_compaction_never_fakes_a_partial_single_line_snippet_range() -> None:
+    huge = "x" * 20_000
+    single_line = "source-" + ("z" * 14_000)
+    localization = LocalizationReport(
+        locations=[],
+        snippets=[
+            ContextSnippet(
+                path="src/large.py",
+                start_line=42,
+                end_line=42,
+                text=single_line,
+                score=1,
+                reason="ranked evidence",
+            )
+        ],
+        ambiguous=False,
+    )
+    previous = CandidateRecord(
+        candidate_id="candidate-1",
+        proposal=PatchProposal(
+            summary="large repair context",
+            diff="--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-" + huge + "\n+" + huge,
+            acceptance_criteria_addressed=[huge for _ in range(64)],
+            assumptions=[huge for _ in range(64)],
+            risks=[huge for _ in range(64)],
+        ),
+        generation_reason="initial",
+        diff_sha256="a" * 64,
+        usage=ProviderUsage(model="test"),
+    )
+
+    payload = ProviderContextBuilder().candidate(
+        _requirements(),
+        _plan(),
+        localization,
+        "candidate-2",
+        previous=previous,
+        generation_reason="validation_failure",
+    )
+    localization_payload = payload["localization"]
+    assert isinstance(localization_payload, dict)
+    snippets = localization_payload["snippets"]
+    assert isinstance(snippets, list)
+
+    if snippets:
+        snippet = snippets[0]
+        assert snippet["text"] == single_line
+        assert snippet["text_truncated"] is False
+        assert snippet["omitted_line_count"] == 0
+        assert snippet["end_line"] == 42
+    else:
+        assert localization_payload["snippets_truncated"] is True
+        assert localization_payload["omitted_snippet_count"] >= 1

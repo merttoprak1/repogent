@@ -5,6 +5,7 @@ import inspect
 import json
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, cast
@@ -46,7 +47,7 @@ from repogent.domain import (
 )
 from repogent.events import EventSink
 from repogent.localization import LocalizationReport, PythonLocalizer
-from repogent.patching import CheckoutRecoveryError, PatchApplier, PatchPolicy
+from repogent.patching import PatchApplier, PatchPolicy
 from repogent.provider_context import ProviderContextBuilder
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
@@ -285,16 +286,33 @@ class Workflow:
 
         self.ensure_time()
         validated = self.patch_policy.validate(self.root, selected.proposal)
+        paths = [path.as_posix() for path in validated.touched_paths]
+        pre_apply_baseline = candidate_evaluator.capture_baseline(
+            self.root, deadline=self.deadline
+        )
+        self._mark_checkout_recovery_unknown(paths)
+        try:
+            self.artifacts.update_manifest(self.manifest)
+        except (Exception, KeyboardInterrupt, SystemExit):
+            self._mark_patch_not_applied()
+            raise
+        applied_state_durable = False
         try:
             self.patch_applier.apply(self.root, validated)
-        except CheckoutRecoveryError as error:
-            self._mark_checkout_recovery_unknown(
-                [path.as_posix() for path in error.touched_paths]
-            )
+            self._mark_patch_applied(paths)
             self.artifacts.update_manifest(self.manifest)
+            applied_state_durable = True
+        except (Exception, KeyboardInterrupt, SystemExit):
+            if not applied_state_durable:
+                if pre_apply_baseline.matches(self.root, deadline=self.deadline):
+                    self._mark_patch_not_applied()
+                else:
+                    self._mark_checkout_recovery_unknown(paths)
+                # The durable write-ahead state remains conservative when this
+                # best-effort refinement cannot be persisted.
+                with suppress(Exception, KeyboardInterrupt, SystemExit):
+                    self.artifacts.update_manifest(self.manifest)
             raise
-        self._mark_patch_applied([path.as_posix() for path in validated.touched_paths])
-        self.artifacts.update_manifest(self.manifest)
         self.write("patch-applied", selected.proposal)
         self.advance(RunStage.PATCH_APPLIED)
         self._set_final_validation_status(FinalValidationStatus.RUNNING)
@@ -588,6 +606,18 @@ class Workflow:
                     f"Stop and manually inspect and restore {joined} before continuing; "
                     "Repogent could not prove whether the attempted patch was rolled back."
                 ),
+                "updated_at": utc_now(),
+            }
+        )
+
+    def _mark_patch_not_applied(self) -> None:
+        self.manifest = self.manifest.model_copy(
+            update={
+                "selected_patch_applied": False,
+                "checkout_state": CheckoutState.NOT_APPLIED,
+                "applied_paths": [],
+                "final_validation_status": FinalValidationStatus.NOT_STARTED,
+                "recovery_guidance": None,
                 "updated_at": utc_now(),
             }
         )

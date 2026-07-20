@@ -346,8 +346,16 @@ def _fit_payload(payload: dict[str, object]) -> dict[str, object]:
         if strings:
             path, string_value = max(strings, key=lambda item: len(item[1]))
             target = max(_MIN_COMPACTED_STRING_CHARS, len(string_value) // 2)
-            omitted = _shorten_string(fitted, path, string_value, target)
-            truncation["strings_shortened"] = int(truncation["strings_shortened"]) + 1
+            omitted, omitted_items = _shorten_string(
+                fitted, path, string_value, target
+            )
+            if omitted_items == 0:
+                truncation["strings_shortened"] = (
+                    int(truncation["strings_shortened"]) + 1
+                )
+            truncation["items_omitted"] = (
+                int(truncation["items_omitted"]) + omitted_items
+            )
             truncation["characters_omitted"] = (
                 int(truncation["characters_omitted"]) + omitted
             )
@@ -474,7 +482,7 @@ def _resolve_path(root: object, path: ContextPath) -> object:
 
 def _shorten_string(
     payload: dict[str, object], path: ContextPath, current: str, target: int
-) -> int:
+) -> tuple[int, int]:
     parent = _resolve_path(payload, path[:-1])
     key = path[-1]
     if key == "text" and "snippets" in path and isinstance(parent, dict):
@@ -487,7 +495,21 @@ def _shorten_string(
             parent["omitted_line_count"] = int(
                 parent.get("omitted_line_count", 0)
             ) + omitted_lines
-            return len(current) - len(text)
+            return (len(current) - len(text), 0)
+        snippets = _resolve_path(payload, path[:-2])
+        snippet_index = path[-2]
+        localization = _resolve_path(payload, path[:-3])
+        if (
+            isinstance(snippets, list)
+            and isinstance(snippet_index, int)
+            and isinstance(localization, dict)
+        ):
+            snippets.pop(snippet_index)
+            localization["snippets_truncated"] = True
+            localization["omitted_snippet_count"] = int(
+                localization.get("omitted_snippet_count", 0)
+            ) + 1
+            return (len(current), 1)
     replacement = _truncate(current, target)
     if isinstance(key, int) and isinstance(parent, list):  # noqa: SIM114
         parent[key] = replacement
@@ -495,7 +517,7 @@ def _shorten_string(
         parent[key] = replacement
     else:
         raise TypeError(f"invalid provider context string path: {path}")
-    return len(current) - len(replacement)
+    return (len(current) - len(replacement), 0)
 
 
 def _mark_list_truncated(payload: dict[str, object], path: ContextPath) -> None:
