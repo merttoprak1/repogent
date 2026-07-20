@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+from pytest import MonkeyPatch
 
 from repogent.repository import LexicalRetriever, RepositoryInspector
 
@@ -28,6 +31,34 @@ def test_inspector_skips_ignored_large_and_symlinked_files(tmp_path: Path) -> No
     inventory = RepositoryInspector(max_file_bytes=1_000_000).inspect(tmp_path)
     assert inventory.files == []
     assert sorted(inventory.skipped) == [".git", "escape.py", "large.py"]
+
+
+def test_inspector_skips_linked_worktree_git_file(tmp_path: Path) -> None:
+    (tmp_path / ".git").write_text("gitdir: /private/metadata")
+    inventory = RepositoryInspector().inspect(tmp_path)
+    assert inventory.files == []
+    assert inventory.skipped == [".git"]
+
+
+def test_inspector_does_not_read_file_replaced_by_symlink_during_open(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    candidate = tmp_path / "candidate.py"
+    candidate.write_text("safe = True")
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("password = 'secret'")
+    original_open = os.open
+
+    def swap_before_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        if path == "candidate.py":
+            candidate.unlink()
+            candidate.symlink_to(outside)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    inventory = RepositoryInspector().inspect(tmp_path)
+    assert inventory.files == []
+    assert inventory.skipped == ["candidate.py"]
 
 
 def test_lexical_retrieval_ranks_matching_route_first(tmp_path: Path) -> None:
