@@ -25,7 +25,9 @@ from repogent.domain import (
     Budget,
     CandidateEvidence,
     CandidateRecord,
+    CandidateSelection,
     CheckResult,
+    CheckStatus,
     Decision,
     EventKind,
     ImplementationPlan,
@@ -109,6 +111,10 @@ class Workflow:
     plan: ImplementationPlan | None = field(default=None, init=False)
     validation: ValidationReport | None = field(default=None, init=False)
     review: QAReview | None = field(default=None, init=False)
+    localization: LocalizationReport | None = field(default=None, init=False)
+    candidates: list[CandidateRecord] = field(default_factory=list, init=False)
+    candidate_evidence: list[CandidateEvidence] = field(default_factory=list, init=False)
+    selection: CandidateSelection | None = field(default=None, init=False)
     started_at: float = field(default=0, init=False)
     deadline: float = field(default=0, init=False)
     elapsed_seconds: float = field(default=0, init=False)
@@ -176,14 +182,14 @@ class Workflow:
             return RunStatus.CANCELLED, "requirements rejected"
         self.advance(RunStage.REQUIREMENTS_APPROVED)
 
-        localization = self._localize(inventory, graph)
-        if not localization.locations:
+        self.localization = self._localize(inventory, graph)
+        if not self.localization.locations:
             return RunStatus.HUMAN_INTERVENTION_REQUIRED, "no relevant localization found"
 
         plan_payload = {
             "requirements": self.requirements.model_dump(),
-            "localization": localization.model_dump(),
-            "localized_snippets": [snippet.model_dump() for snippet in localization.snippets],
+            "localization": self.localization.model_dump(),
+            "localized_snippets": [snippet.model_dump() for snippet in self.localization.snippets],
         }
         self._write_json("planning-input", plan_payload)
         plan_result = self.roles.planning.run(plan_payload, timeout_seconds=self.remaining_time())
@@ -200,34 +206,38 @@ class Workflow:
         approval_baseline = candidate_evaluator.capture_baseline(
             self.root, deadline=self.deadline
         )
-        candidates, evidence = self._evaluate_candidates(localization)
+        self.candidates, self.candidate_evidence = self._evaluate_candidates(self.localization)
         if not approval_baseline.matches(self.root, deadline=self.deadline):
             raise RuntimeError("repository baseline changed before approval")
         candidate_selector = cast(CandidateSelector, self.candidate_selector)
-        selection = candidate_selector.select(candidates, evidence)
-        self.write("candidate-selection", selection)
+        self.selection = candidate_selector.select(self.candidates, self.candidate_evidence)
+        self.write("candidate-selection", self.selection)
         self.emit(
             EventKind.CANDIDATE,
             "candidate selection completed",
-            selected_candidate_id=selection.selected_candidate_id,
-            ambiguous=selection.ambiguous,
+            selected_candidate_id=self.selection.selected_candidate_id,
+            ambiguous=self.selection.ambiguous,
         )
-        if selection.selected_candidate_id is None:
-            reason = "candidate evidence is ambiguous" if selection.ambiguous else selection.reason
+        if self.selection.selected_candidate_id is None:
+            reason = (
+                "candidate evidence is ambiguous"
+                if self.selection.ambiguous
+                else self.selection.reason
+            )
             return RunStatus.HUMAN_INTERVENTION_REQUIRED, reason
 
         selected = next(
             candidate
-            for candidate in candidates
-            if candidate.candidate_id == selection.selected_candidate_id
+            for candidate in self.candidates
+            if candidate.candidate_id == self.selection.selected_candidate_id
         )
         selected_evidence = next(
-            item for item in evidence if item.candidate_id == selected.candidate_id
+            item for item in self.candidate_evidence if item.candidate_id == selected.candidate_id
         )
         self.manifest = self.manifest.model_copy(
             update={
                 "selected_candidate_id": selected.candidate_id,
-                "repair_attempts": len(candidates) - 1,
+                "repair_attempts": len(self.candidates) - 1,
                 "updated_at": utc_now(),
             }
         )
@@ -236,14 +246,16 @@ class Workflow:
         approval_artifact = json.dumps(
             {
                 "selected_candidate": selected.model_dump(mode="json"),
-                "selection": selection.model_dump(mode="json"),
+                "selection": self.selection.model_dump(mode="json"),
                 "candidates": [
                     {
                         "candidate": candidate.model_dump(mode="json"),
                         "evidence": item.model_dump(mode="json"),
                         "selected": candidate.candidate_id == selected.candidate_id,
                     }
-                    for candidate, item in zip(candidates, evidence, strict=True)
+                    for candidate, item in zip(
+                        self.candidates, self.candidate_evidence, strict=True
+                    )
                 ],
             },
             indent=2,
@@ -271,7 +283,11 @@ class Workflow:
             baseline=post_patch_baseline,
         )
         self.write("validation", self.validation)
-        self.emit(EventKind.VALIDATION, "final validation completed", passed=self.validation.passed)
+        self.emit(
+            EventKind.VALIDATION,
+            "final validation completed",
+            **_validation_summary(self.validation),
+        )
         self.advance(RunStage.VALIDATED)
         if not final_root_stable:
             return RunStatus.HUMAN_INTERVENTION_REQUIRED, "repository drift during final validation"
@@ -288,7 +304,7 @@ class Workflow:
             "plan": self.plan.model_dump(),
             "acceptance_criteria": self.requirements.acceptance_criteria,
             "selected_candidate": selected.model_dump(mode="json"),
-            "selection_reason": selection.reason,
+            "selection_reason": self.selection.reason,
             "final_validation": self.validation.model_dump(mode="json"),
             "diff": selected.proposal.diff,
         }
@@ -405,7 +421,7 @@ class Workflow:
                 EventKind.VALIDATION,
                 "candidate validation completed",
                 candidate_id=candidate_id,
-                passed=candidate_evidence.validation.passed,
+                **_validation_summary(candidate_evidence.validation, candidate.usage),
                 restored_to_baseline=candidate_evidence.restored_to_baseline,
             )
             if not candidate_evidence.restored_to_baseline:
@@ -574,6 +590,9 @@ class Workflow:
                     self.plan,
                     self.validation,
                     self.review,
+                    localization=self.localization,
+                    candidates=tuple(zip(self.candidates, self.candidate_evidence, strict=True)),
+                    selection=self.selection,
                 ),
             )
         except Exception as error:
@@ -591,6 +610,22 @@ def _same_required_results(expected: ValidationReport, actual: ValidationReport)
     return [_check_payload(item) for item in expected.checks if item.required] == [
         _check_payload(item) for item in actual.checks if item.required
     ]
+
+
+def _validation_summary(
+    validation: ValidationReport, usage: ProviderUsage | None = None
+) -> dict[str, object]:
+    summary: dict[str, object] = {
+        "passed": sum(check.status is CheckStatus.PASSED for check in validation.checks),
+        "failed": sum(
+            check.status in {CheckStatus.FAILED, CheckStatus.TIMED_OUT}
+            for check in validation.checks
+        ),
+        "skipped": sum(check.status is CheckStatus.SKIPPED for check in validation.checks),
+    }
+    if usage is not None:
+        summary["cost_usd"] = str(usage.estimated_cost_usd)
+    return summary
 
 
 def _check_payload(check: CheckResult) -> dict[str, object]:

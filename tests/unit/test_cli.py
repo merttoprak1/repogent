@@ -177,9 +177,13 @@ def test_run_uses_external_default_evidence_directory(
 
     class FakeStore:
         root = tmp_path / "evidence" / "run-test"
+        secrets: list[str] = []
 
         def write_model(self, _name: str, _model: object) -> Path:
             return self.root / "preflight.json"
+
+        def event_store(self) -> object:
+            return type("Store", (), {"emit": lambda _self, _event: None})()
 
     def fake_create(base_dir: Path, *_args: object, **_kwargs: object) -> FakeStore:
         captured["base_dir"] = base_dir

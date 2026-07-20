@@ -11,6 +11,7 @@ from repogent.agents import RoleSet
 from repogent.approvals import CliApprover
 from repogent.artifacts import ArtifactStore, ArtifactStoreError
 from repogent.domain import Budget, RunManifest, RunStage, RunStatus
+from repogent.events import CompositeEventSink, ConsoleEventSink
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
 from repogent.localization import PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
@@ -142,6 +143,9 @@ def run_command(
         inspector=RepositoryInspector(),
         retriever=LexicalRetriever(),
         budget=Budget(),
+        events=CompositeEventSink(
+            (store.event_store(), ConsoleEventSink(typer.echo, store.secrets))
+        ),
     )
     result = workflow.run()
     typer.echo(f"Run {result.run_id}: {result.status.value}")

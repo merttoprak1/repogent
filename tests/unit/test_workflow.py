@@ -214,6 +214,11 @@ def test_ambiguous_selection_requires_human_without_applying(tmp_path: Path) -> 
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
     assert manifest.reason == "candidate evidence is ambiguous"
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+    report = (workflow.artifacts.root / "report.md").read_text()
+    assert "## Candidate comparison" in report
+    assert "candidate-1" in report
+    assert "candidate-2" in report
+    assert "## Selection" in report
 
 
 def test_candidate_evaluations_restore_baseline_before_approval(tmp_path: Path) -> None:
@@ -517,6 +522,27 @@ def test_terminal_event_is_written_for_completed_run(tmp_path: Path) -> None:
     workflow.run()
     assert _events(workflow)[-1]["kind"] == EventKind.TERMINAL.value
     assert _events(workflow)[-1]["stage"] == RunStage.FINISHED.value
+
+
+def test_validation_events_include_concise_check_counts(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+
+    workflow.run()
+
+    validation_events = [event for event in _events(workflow) if event["kind"] == "validation"]
+    assert validation_events[0]["data"] == {
+        "candidate_id": "candidate-1",
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "cost_usd": "0",
+        "restored_to_baseline": True,
+    }
+    assert validation_events[1]["data"] == {"passed": 1, "failed": 0, "skipped": 0}
 
 
 def test_final_manifest_persistence_failure_downgrades_and_persists_human_state(

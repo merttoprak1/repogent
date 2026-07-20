@@ -3,13 +3,15 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from collections.abc import Callable, Sequence
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import ValidationError
 
 from repogent.domain import RunEvent
-from repogent.sanitization import sanitize_data
+from repogent.sanitization import redact_text, sanitize_data
 
 MAX_EVENT_BYTES = 65_536
 
@@ -17,6 +19,57 @@ MAX_EVENT_BYTES = 65_536
 class EventSink(Protocol):
     def emit(self, event: RunEvent) -> None:
         raise NotImplementedError
+
+
+class CompositeEventSink:
+    """Fan an event to ordered sinks, preserving failures for the workflow."""
+
+    def __init__(self, sinks: Sequence[EventSink]) -> None:
+        self.sinks = tuple(sinks)
+
+    def emit(self, event: RunEvent) -> None:
+        for sink in self.sinks:
+            sink.emit(event)
+
+
+class ConsoleEventSink:
+    """Render a small, sanitized progress line without command output."""
+
+    def __init__(
+        self, write: Callable[[str], object], secrets: Sequence[str] = ()
+    ) -> None:
+        self.write = write
+        self.secrets = tuple(secrets)
+
+    def emit(self, event: RunEvent) -> None:
+        message = " ".join(redact_text(event.message, self.secrets).split())
+        suffix = self._validation_suffix(event) if event.kind.value == "validation" else ""
+        self.write(f"[{event.kind.value}] {message}{suffix}")
+
+    @staticmethod
+    def _validation_suffix(event: RunEvent) -> str:
+        passed = _nonnegative_int(event.data.get("passed"))
+        failed = _nonnegative_int(event.data.get("failed"))
+        skipped = _nonnegative_int(event.data.get("skipped"))
+        values = [f"{passed} passed", f"{failed} failed", f"{skipped} skipped"]
+        cost = _cost(event.data.get("cost_usd"))
+        if cost is not None:
+            values.append(f"${cost}")
+        return f" ({', '.join(values)})"
+
+
+def _nonnegative_int(value: object) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _cost(value: object) -> str | None:
+    if not isinstance(value, (str, int, float, Decimal)) or isinstance(value, bool):
+        return None
+    try:
+        cost = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return str(cost) if cost >= 0 else None
 
 
 class JsonlEventStore:

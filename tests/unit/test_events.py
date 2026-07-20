@@ -5,7 +5,12 @@ import pytest
 
 from repogent.artifacts import ArtifactStore
 from repogent.domain import EventKind, RunEvent
-from repogent.events import MAX_EVENT_BYTES, JsonlEventStore
+from repogent.events import (
+    MAX_EVENT_BYTES,
+    CompositeEventSink,
+    ConsoleEventSink,
+    JsonlEventStore,
+)
 
 
 def _event(sequence: int, *, data: dict[str, object] | None = None) -> RunEvent:
@@ -130,3 +135,65 @@ def test_jsonl_event_store_rejects_event_over_byte_limit_before_creating_file(
         JsonlEventStore(path).emit(event)
 
     assert not path.exists()
+
+
+def test_console_sink_renders_concise_timeline_without_command_output() -> None:
+    output: list[str] = []
+    sink = ConsoleEventSink(output.append)
+
+    sink.emit(RunEvent(run_id="r", sequence=1, kind=EventKind.STAGE, message="Localizing"))
+    sink.emit(
+        RunEvent(
+            run_id="r",
+            sequence=2,
+            kind=EventKind.VALIDATION,
+            message="candidate-1 passed",
+            data={
+                "passed": 4,
+                "failed": 0,
+                "skipped": 1,
+                "cost_usd": "0.18",
+                "stdout": "password=very-secret",
+                "stderr": "raw command output",
+            },
+        )
+    )
+
+    assert output == [
+        "[stage] Localizing",
+        "[validation] candidate-1 passed (4 passed, 0 failed, 1 skipped, $0.18)",
+    ]
+
+
+def test_composite_sink_stops_after_durable_sink_failure() -> None:
+    calls: list[str] = []
+
+    class FailingSink:
+        def emit(self, event: RunEvent) -> None:
+            del event
+            calls.append("durable")
+            raise OSError("durable evidence unavailable")
+
+    console = ConsoleEventSink(lambda _: calls.append("console"))
+    composite = CompositeEventSink((FailingSink(), console))
+
+    with pytest.raises(OSError, match="durable evidence unavailable"):
+        composite.emit(_event(1))
+
+    assert calls == ["durable"]
+
+
+def test_console_sink_redacts_event_message_secrets() -> None:
+    output: list[str] = []
+    sink = ConsoleEventSink(output.append, secrets=("private-value",))
+
+    sink.emit(
+        RunEvent(
+            run_id="r",
+            sequence=1,
+            kind=EventKind.WARNING,
+            message="provider returned private-value",
+        )
+    )
+
+    assert output == ["[warning] provider returned [REDACTED]"]
