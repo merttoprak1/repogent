@@ -66,6 +66,10 @@ class PythonLocalizer:
             return self._report([], inventory)
 
         records = {record.path: record for record in inventory.files}
+        file_lexical_tokens = {
+            record.path: _file_lexical_tokens(record.path, record.text)
+            for record in inventory.files
+        }
         incoming, source_paths = _incoming_edges(graph.edges, graph.nodes)
         test_paths = {record.path for record in inventory.files if record.kind == "test"}
         failure_tokens = _failure_tokens(failure_evidence)
@@ -77,6 +81,7 @@ class PythonLocalizer:
             signals = self._signals(
                 node,
                 record,
+                file_lexical_tokens[record.path],
                 query_tokens,
                 failure_tokens,
                 incoming.get(node.symbol_id, []),
@@ -101,6 +106,7 @@ class PythonLocalizer:
         self,
         node: SymbolNode,
         record: FileRecord,
+        file_lexical_tokens: set[str],
         query_tokens: list[str],
         failure_tokens: set[str],
         incoming: list[SymbolEdge],
@@ -108,7 +114,7 @@ class PythonLocalizer:
         source_paths: dict[str, str],
     ) -> list[LocalizationSignal]:
         signals: list[LocalizationSignal] = []
-        lexical_matches = _matches(query_tokens, _tokens(" ".join((record.path, record.text))))
+        lexical_matches = _matches(query_tokens, file_lexical_tokens)
         if lexical_matches:
             signals.append(_signal("lexical", lexical_matches))
         symbol_matches = _matches(query_tokens, _tokens(" ".join((node.name, node.qualified_name))))
@@ -192,7 +198,13 @@ def _tokens(value: str) -> list[str]:
     return [part.lower() for token in TOKEN.findall(value) for part in token.split("_") if part]
 
 
-def _matches(query_tokens: list[str], document_tokens: list[str]) -> list[str]:
+def _file_lexical_tokens(path: str, text: str) -> set[str]:
+    return set(_tokens(" ".join((path, text))))
+
+
+def _matches(
+    query_tokens: Sequence[str], document_tokens: Sequence[str] | set[str]
+) -> list[str]:
     return sorted(set(query_tokens) & set(document_tokens))
 
 

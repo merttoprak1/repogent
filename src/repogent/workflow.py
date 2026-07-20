@@ -30,6 +30,7 @@ from repogent.domain import (
     CheckStatus,
     Decision,
     EventKind,
+    FinalValidationStatus,
     ImplementationPlan,
     MergeRecommendation,
     ProviderUsage,
@@ -45,6 +46,7 @@ from repogent.domain import (
 from repogent.events import EventSink
 from repogent.localization import LocalizationReport, PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
+from repogent.provider_context import ProviderContextBuilder
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
 from repogent.symbols import PythonSymbolGraph, PythonSymbolGraphBuilder
@@ -107,6 +109,7 @@ class Workflow:
     candidate_policy: CandidatePolicy | None = None
     candidate_selector: CandidateSelector | None = None
     events: EventSink | None = None
+    context_builder: ProviderContextBuilder | None = None
     requirements: RequirementsSpec | None = field(default=None, init=False)
     plan: ImplementationPlan | None = field(default=None, init=False)
     validation: ValidationReport | None = field(default=None, init=False)
@@ -130,6 +133,7 @@ class Workflow:
         self.candidate_policy = self.candidate_policy or CandidatePolicy()
         self.candidate_selector = self.candidate_selector or CandidateSelector()
         self.events = self.events or self.artifacts.event_store()
+        self.context_builder = self.context_builder or ProviderContextBuilder()
         if self.manifest.events_file is None:
             self.manifest = self.manifest.model_copy(update={"events_file": "events.jsonl"})
 
@@ -148,11 +152,26 @@ class Workflow:
                 RunStatus.CHANGES_REQUESTED,
             }:
                 self.ensure_time()
+        except (KeyboardInterrupt, SystemExit):
+            self._mark_post_apply_interrupted()
+            status = RunStatus.CANCELLED
+            reason = "workflow interrupted by user"
         except Exception as error:
+            self._mark_post_apply_interrupted()
             status = RunStatus.HUMAN_INTERVENTION_REQUIRED
             reason = str(error)
         try:
             return self.finish(status, reason)
+        except (KeyboardInterrupt, SystemExit):
+            self._mark_post_apply_interrupted()
+            return self._terminalize_without_event(
+                RunStatus.CANCELLED, "workflow interrupted during terminalization"
+            )
+        except Exception as error:
+            self._mark_post_apply_interrupted()
+            return self._terminalize_without_event(
+                RunStatus.HUMAN_INTERVENTION_REQUIRED, str(error)
+            )
         finally:
             self.elapsed_seconds = time.monotonic() - self.started_at
 
@@ -165,17 +184,15 @@ class Workflow:
         self.write("symbol-graph", graph)
         self.emit(EventKind.MODEL, "repository graph built", node_count=len(graph.nodes))
 
-        requirements_payload = {
-            "request": self.request,
-            "repository_inventory": inventory.model_dump(),
-        }
+        context_builder = cast(ProviderContextBuilder, self.context_builder)
+        requirements_payload = context_builder.requirements(self.request, inventory)
         self._write_json("requirements-input", requirements_payload)
         requirements_result = self.roles.requirements.run(
             requirements_payload, timeout_seconds=self.remaining_time()
         )
-        self.account(requirements_result.usage)
         self.requirements = requirements_result.output
         self.write("requirements", self.requirements)
+        self.account(requirements_result.usage, generated_artifact="requirements")
         self.emit(EventKind.MODEL, "requirements generation completed", role="requirements")
         self.advance(RunStage.REQUIREMENTS)
         if not self.approve(ApprovalKind.REQUIREMENTS, self.requirements):
@@ -186,16 +203,12 @@ class Workflow:
         if not self.localization.locations:
             return RunStatus.HUMAN_INTERVENTION_REQUIRED, "no relevant localization found"
 
-        plan_payload = {
-            "requirements": self.requirements.model_dump(),
-            "localization": self.localization.model_dump(),
-            "localized_snippets": [snippet.model_dump() for snippet in self.localization.snippets],
-        }
+        plan_payload = context_builder.planning(self.requirements, self.localization)
         self._write_json("planning-input", plan_payload)
         plan_result = self.roles.planning.run(plan_payload, timeout_seconds=self.remaining_time())
-        self.account(plan_result.usage)
         self.plan = plan_result.output
         self.write("plan", self.plan)
+        self.account(plan_result.usage, generated_artifact="plan")
         self.emit(EventKind.MODEL, "planning generation completed", role="planning")
         self.advance(RunStage.PLANNED)
         if not self.approve(ApprovalKind.PLAN, self.plan):
@@ -272,8 +285,12 @@ class Workflow:
         self.ensure_time()
         validated = self.patch_policy.validate(self.root, selected.proposal)
         self.patch_applier.apply(self.root, validated)
+        self._mark_patch_applied([path.as_posix() for path in validated.touched_paths])
+        self.artifacts.update_manifest(self.manifest)
         self.write("patch-applied", selected.proposal)
         self.advance(RunStage.PATCH_APPLIED)
+        self._set_final_validation_status(FinalValidationStatus.RUNNING)
+        self.artifacts.update_manifest(self.manifest)
         post_patch_baseline = candidate_evaluator.capture_baseline(
             self.root, deadline=self.deadline
         )
@@ -282,6 +299,15 @@ class Workflow:
             timeout_seconds=self.remaining_time(),
             baseline=post_patch_baseline,
         )
+        final_validation_status = (
+            FinalValidationStatus.PASSED
+            if final_root_stable
+            and _same_required_results(selected_evidence.validation, self.validation)
+            and self.validation.passed
+            else FinalValidationStatus.FAILED
+        )
+        self._set_final_validation_status(final_validation_status)
+        self.artifacts.update_manifest(self.manifest)
         self.write("validation", self.validation)
         self.emit(
             EventKind.VALIDATION,
@@ -299,20 +325,18 @@ class Workflow:
                 "selected candidate failed final validation",
             )
 
-        qa_payload = {
-            "requirements": self.requirements.model_dump(),
-            "plan": self.plan.model_dump(),
-            "acceptance_criteria": self.requirements.acceptance_criteria,
-            "selected_candidate": selected.model_dump(mode="json"),
-            "selection_reason": self.selection.reason,
-            "final_validation": self.validation.model_dump(mode="json"),
-            "diff": selected.proposal.diff,
-        }
+        qa_payload = context_builder.qa(
+            self.requirements,
+            self.plan,
+            selected,
+            self.selection.reason,
+            self.validation,
+        )
         self._write_json("qa-input", qa_payload)
         review_result = self.roles.qa.run(qa_payload, timeout_seconds=self.remaining_time())
-        self.account(review_result.usage)
         self.review = review_result.output
         self.write("qa-review", self.review)
+        self.account(review_result.usage, generated_artifact="qa-review")
         self.emit(EventKind.MODEL, "QA generation completed", role="qa")
         self.advance(RunStage.REVIEWED)
         status = {
@@ -369,24 +393,22 @@ class Workflow:
             candidate_id = f"candidate-{len(self.candidates) + 1}"
             previous = self.candidates[-1] if self.candidates else None
             previous_evidence = self.candidate_evidence[-1] if self.candidate_evidence else None
-            payload: dict[str, object] = {
-                "requirements": self.requirements.model_dump(),
-                "plan": self.plan.model_dump(),
-                "localization": localization.model_dump(),
-                "localized_snippets": [snippet.model_dump() for snippet in localization.snippets],
-                "candidate_id": candidate_id,
-            }
             role = self.roles.implementation if previous is None else self.roles.repair
             generation_reason = (
                 "initial implementation" if previous is None else expansion_reason or "alternative"
             )
-            if previous is not None and previous_evidence is not None:
-                payload["previous_candidate"] = previous.model_dump(mode="json")
-                payload["previous_failure"] = previous_evidence.model_dump(mode="json")
-                payload["generation_reason"] = generation_reason
+            context_builder = cast(ProviderContextBuilder, self.context_builder)
+            payload = context_builder.candidate(
+                self.requirements,
+                self.plan,
+                localization,
+                candidate_id,
+                previous=previous,
+                previous_evidence=previous_evidence,
+                generation_reason=generation_reason if previous is not None else None,
+            )
             self._write_json("candidate-input", payload)
             result = role.run(payload, timeout_seconds=self.remaining_time())
-            self.account(result.usage)
             candidate = CandidateRecord(
                 candidate_id=candidate_id,
                 proposal=result.output,
@@ -405,6 +427,7 @@ class Workflow:
             )
             self.artifacts.update_manifest(self.manifest)
             self.write("candidate", candidate)
+            self.account(result.usage, generated_artifact="candidate")
             self.emit(EventKind.CANDIDATE, "candidate generated", candidate_id=candidate_id)
             candidate_evaluator = cast(CandidateEvaluator, self.candidate_evaluator)
             candidate_evidence = candidate_evaluator.evaluate(
@@ -501,7 +524,9 @@ class Workflow:
         )
         return record.decision is Decision.APPROVED
 
-    def account(self, usage: ProviderUsage) -> None:
+    def account(
+        self, usage: ProviderUsage, *, generated_artifact: str | None = None
+    ) -> None:
         tokens = self.manifest.token_usage + usage.input_tokens + usage.output_tokens
         cost = self.manifest.estimated_cost_usd + usage.estimated_cost_usd
         self.manifest = self.manifest.model_copy(
@@ -509,10 +534,74 @@ class Workflow:
         )
         self.artifacts.write_model("provider-usage", usage)
         self.artifacts.update_manifest(self.manifest)
+        exceeded_reason: str | None = None
         if tokens > self.budget.max_tokens:
+            exceeded_reason = "token budget exceeded"
+        elif cost > self.budget.max_cost_usd:
+            exceeded_reason = "estimated cost budget exceeded"
+        if exceeded_reason is not None and generated_artifact is not None:
+            generated = list(self.manifest.generated_but_not_consumed)
+            if generated_artifact not in generated:
+                generated.append(generated_artifact)
+            self.manifest = self.manifest.model_copy(
+                update={"generated_but_not_consumed": generated, "updated_at": utc_now()}
+            )
+            self.artifacts.update_manifest(self.manifest)
+        if exceeded_reason == "token budget exceeded":
             raise BudgetExceeded("token budget exceeded")
-        if cost > self.budget.max_cost_usd:
+        if exceeded_reason is not None:
             raise BudgetExceeded("estimated cost budget exceeded")
+
+    def _mark_patch_applied(self, paths: list[str]) -> None:
+        joined = ", ".join(paths) or "the affected paths"
+        self.manifest = self.manifest.model_copy(
+            update={
+                "selected_patch_applied": True,
+                "applied_paths": paths,
+                "final_validation_status": FinalValidationStatus.NOT_STARTED,
+                "recovery_guidance": (
+                    f"Review {joined}, run the required validation commands, and revert the "
+                    "approved patch manually if it should not remain."
+                ),
+                "updated_at": utc_now(),
+            }
+        )
+
+    def _set_final_validation_status(self, status: FinalValidationStatus) -> None:
+        paths = ", ".join(self.manifest.applied_paths) or "the affected paths"
+        guidance = self.manifest.recovery_guidance
+        if self.manifest.selected_patch_applied:
+            if status is FinalValidationStatus.PASSED:
+                guidance = (
+                    f"Review the terminal reason and evidence for {paths}; deterministic final "
+                    "validation passed. Revert the approved patch manually if it should not remain."
+                )
+            elif status is FinalValidationStatus.FAILED:
+                guidance = (
+                    f"Review {paths}, fix the reported validation failure, and run the required "
+                    "validation commands again; revert the approved patch manually if it should "
+                    "not remain."
+                )
+            elif status is FinalValidationStatus.INTERRUPTED:
+                guidance = (
+                    f"Review {paths} and run every required validation command because final "
+                    "validation was interrupted; revert the approved patch manually if it should "
+                    "not remain."
+                )
+        self.manifest = self.manifest.model_copy(
+            update={
+                "final_validation_status": status,
+                "recovery_guidance": guidance,
+                "updated_at": utc_now(),
+            }
+        )
+
+    def _mark_post_apply_interrupted(self) -> None:
+        if self.manifest.selected_patch_applied and self.manifest.final_validation_status in {
+            FinalValidationStatus.NOT_STARTED,
+            FinalValidationStatus.RUNNING,
+        }:
+            self._set_final_validation_status(FinalValidationStatus.INTERRUPTED)
 
     def finish(self, status: RunStatus, reason: str | None) -> RunManifest:
         self._set_final_manifest(status, reason)
@@ -614,6 +703,21 @@ class Workflow:
         except Exception as error:
             return error
         return None
+
+    def _terminalize_without_event(
+        self, status: RunStatus, reason: str
+    ) -> RunManifest:
+        """Last-resort, non-recursive durability path after terminalization itself fails."""
+        self._set_final_manifest(status, reason)
+        try:
+            self.artifacts.update_manifest(self.manifest)
+        except (Exception, KeyboardInterrupt, SystemExit):
+            return self.manifest
+        try:
+            self._write_final_report()
+        except (KeyboardInterrupt, SystemExit):
+            return self.manifest
+        return self.manifest
 
 
 def _same_required_results(expected: ValidationReport, actual: ValidationReport) -> bool:

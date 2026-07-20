@@ -4,6 +4,7 @@ from repogent.domain import (
     CandidateSelection,
     CheckResult,
     CheckStatus,
+    FinalValidationStatus,
     ImplementationPlan,
     MergeRecommendation,
     PlanStep,
@@ -170,3 +171,25 @@ def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
     assert "candidate-2" in interrupted_report
     assert "not evaluated" in interrupted_report
     assert "evaluation interrupted; recovery unknown" in interrupted_report
+
+
+def test_report_distinguishes_disposable_recovery_from_applied_real_patch() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="change",
+        status=RunStatus.HUMAN_INTERVENTION_REQUIRED,
+        selected_patch_applied=True,
+        applied_paths=["src/app.py"],
+        final_validation_status=FinalValidationStatus.FAILED,
+        recovery_guidance=(
+            "Review src/app.py, run required validation, and revert the approved patch manually "
+            "if it should not remain."
+        ),
+    )
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Real checkout patch: remains applied" in report
+    assert "src/app.py" in report
+    assert "Final validation: failed" in report
+    assert "revert the approved patch manually" in report

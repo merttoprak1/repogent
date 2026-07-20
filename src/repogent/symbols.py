@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import tomllib
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -48,10 +49,10 @@ class PythonSymbolGraph(VersionedModel):
 
 
 class _PythonSymbolVisitor(ast.NodeVisitor):
-    def __init__(self, path: str, text: str) -> None:
+    def __init__(self, path: str, text: str, source_roots: tuple[str, ...]) -> None:
         self.path = path
-        self.module_name = _module_name(path)
-        self.package_name = _package_name(path)
+        self.module_name = _module_name(path, source_roots)
+        self.package_name = _package_name(path, source_roots)
         module_id = f"{path}:{self.module_name}"
         self.nodes = [
             SymbolNode(
@@ -186,6 +187,7 @@ class PythonSymbolGraphBuilder:
         nodes: list[SymbolNode] = []
         edges: list[SymbolEdge] = []
         parse_errors: dict[str, str] = {}
+        source_roots = _source_roots(inventory)
         for record in inventory.files:
             if not record.path.endswith(".py"):
                 continue
@@ -194,7 +196,7 @@ class PythonSymbolGraphBuilder:
             except SyntaxError as error:
                 parse_errors[record.path] = error.msg
                 continue
-            visitor = _PythonSymbolVisitor(record.path, record.text)
+            visitor = _PythonSymbolVisitor(record.path, record.text, source_roots)
             visitor.visit(tree)
             nodes.extend(visitor.nodes)
             edges.extend(visitor.edges)
@@ -226,16 +228,52 @@ def _expression_name(node: ast.expr) -> str | None:
     return None
 
 
-def _module_name(path: str) -> str:
-    parts = list(Path(path).with_suffix("").parts)
+def _module_name(path: str, source_roots: tuple[str, ...] = ()) -> str:
+    parts = list(Path(_strip_source_root(path, source_roots)).with_suffix("").parts)
     if parts[-1] == "__init__" and len(parts) > 1:
         parts.pop()
     return ".".join(parts)
 
 
-def _package_name(path: str) -> str:
-    parts = list(Path(path).with_suffix("").parts)
+def _package_name(path: str, source_roots: tuple[str, ...] = ()) -> str:
+    parts = list(Path(_strip_source_root(path, source_roots)).with_suffix("").parts)
     return ".".join(parts[:-1])
+
+
+def _strip_source_root(path: str, source_roots: tuple[str, ...]) -> str:
+    for root in sorted(source_roots, key=lambda value: (-len(Path(value).parts), value)):
+        prefix = f"{root.rstrip('/')}/"
+        if path.startswith(prefix):
+            return path[len(prefix) :]
+    return path
+
+
+def _source_roots(inventory: RepositoryInventory) -> tuple[str, ...]:
+    roots = {
+        "src"
+        for record in inventory.files
+        if record.path.startswith("src/") and record.path.endswith(".py")
+    }
+    pyproject = next(
+        (record for record in inventory.files if record.path == "pyproject.toml"), None
+    )
+    if pyproject is not None:
+        try:
+            payload = tomllib.loads(pyproject.text)
+        except tomllib.TOMLDecodeError:
+            payload = {}
+        tool = payload.get("tool", {}) if isinstance(payload, dict) else {}
+        setuptools = tool.get("setuptools", {}) if isinstance(tool, dict) else {}
+        package_dir = (
+            setuptools.get("package-dir", {}) if isinstance(setuptools, dict) else {}
+        )
+        if isinstance(package_dir, dict):
+            roots.update(
+                value.strip("/")
+                for value in package_dir.values()
+                if isinstance(value, str) and value.strip("/")
+            )
+    return tuple(sorted(roots))
 
 
 def _imported_module(package: str, level: int, module: str | None) -> str:

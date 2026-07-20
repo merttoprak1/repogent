@@ -11,15 +11,15 @@ from repogent.preflight import (
 
 
 class FakeExecutor:
-    def __init__(self, *, ready: bool) -> None:
+    def __init__(self, *, ready: bool, unavailable: set[str] | None = None) -> None:
         self.ready = ready
+        self.unavailable = unavailable or set()
 
     def readiness(self) -> tuple[bool, str | None]:
         return (self.ready, None if self.ready else "validator image unavailable")
 
     def available(self, command: CommandSpec) -> bool:
-        del command
-        return True
+        return command.name not in self.unavailable
 
     def run(self, command: CommandSpec, root: Path) -> CheckResult:
         raise AssertionError(f"preflight must not run {command.name} in {root}")
@@ -64,6 +64,37 @@ def test_preflight_blocks_unavailable_docker_before_provider_creation(tmp_path: 
     assert report.checks[-1].name == "executor"
     assert report.checks[-1].required is True
     assert report.checks[-1].reason == "validator image unavailable"
+
+
+def test_preflight_blocks_when_required_validation_command_is_unavailable(tmp_path: Path) -> None:
+    repository = initialize_git_repository(tmp_path)
+    nested_test = repository / "quality" / "regression" / "test_value.py"
+    nested_test.parent.mkdir(parents=True)
+    nested_test.write_text("def test_value(): pass\n")
+
+    report = Preflight(
+        FakeExecutor(ready=True, unavailable={"pytest"}), ValidationPolicy()
+    ).run(repository)
+
+    pytest_check = next(check for check in report.checks if check.name == "command:pytest")
+    assert report.passed is False
+    assert pytest_check.required is True
+    assert pytest_check.status is ReadinessStatus.FAILED
+    assert pytest_check.reason == "required validation command unavailable"
+
+
+def test_preflight_warns_when_optional_validation_command_is_unavailable(tmp_path: Path) -> None:
+    repository = initialize_git_repository(tmp_path)
+
+    report = Preflight(
+        FakeExecutor(ready=True, unavailable={"ruff"}), ValidationPolicy()
+    ).run(repository)
+
+    ruff_check = next(check for check in report.checks if check.name == "command:ruff")
+    assert report.passed is True
+    assert ruff_check.required is False
+    assert ruff_check.status is ReadinessStatus.WARNING
+    assert ruff_check.reason == "optional validation command unavailable"
 
 
 def test_preflight_treats_non_git_directories_as_a_warning(tmp_path: Path) -> None:

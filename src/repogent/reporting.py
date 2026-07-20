@@ -35,6 +35,14 @@ def render_report(
         f"Reason: {_markdown_text(manifest.reason or 'none')}",
         "",
     ]
+    if manifest.generated_but_not_consumed:
+        lines.extend(
+            [
+                "Generated but not consumed: "
+                + _markdown_text(", ".join(manifest.generated_but_not_consumed)),
+                "",
+            ]
+        )
     if requirements:
         lines.extend(["## Requirements", "", requirements.model_dump_json(indent=2), ""])
     if plan:
@@ -55,7 +63,7 @@ def render_report(
     lines.extend(["", "## Model-generated QA review", ""])
     lines.append(review.model_dump_json(indent=2) if review else "Not run")
     lines.extend(_render_cost_and_duration(manifest, candidates))
-    lines.extend(_render_recovery(candidates))
+    lines.extend(_render_recovery(manifest, candidates))
     return "\n".join(lines)
 
 
@@ -178,20 +186,39 @@ def _render_cost_and_duration(
 
 
 def _render_recovery(
+    manifest: RunManifest,
     candidates: Sequence[tuple[CandidateRecord, CandidateEvidence | None]],
 ) -> list[str]:
     lines = ["## Recovery", ""]
-    if not candidates:
-        return [*lines, "No candidate evaluation recovery was required.", ""]
-    for candidate, evidence in sorted(candidates, key=lambda item: item[0].candidate_id):
-        state = (
-            "evaluation interrupted; recovery unknown"
-            if evidence is None
-            else "restored"
-            if evidence.restored_to_baseline
-            else "not restored"
+    if candidates:
+        for candidate, evidence in sorted(candidates, key=lambda item: item[0].candidate_id):
+            state = (
+                "evaluation interrupted; recovery unknown"
+                if evidence is None
+                else "restored"
+                if evidence.restored_to_baseline
+                else "not restored"
+            )
+            lines.append(f"- Disposable {_markdown_text(candidate.candidate_id)}: {state}")
+    else:
+        lines.append("- No disposable candidate evaluation recovery was required.")
+    if manifest.selected_patch_applied:
+        paths = ", ".join(manifest.applied_paths) or "affected paths unavailable"
+        lines.extend(
+            [
+                "- Real checkout patch: remains applied",
+                f"- Applied paths: {_markdown_text(paths)}",
+                f"- Final validation: {manifest.final_validation_status.value}",
+                "- Next action: "
+                + _markdown_text(
+                    manifest.recovery_guidance
+                    or "Review the applied diff, run required validation, and revert the "
+                    "approved patch manually if it should not remain."
+                ),
+            ]
         )
-        lines.append(f"- {_markdown_text(candidate.candidate_id)}: {state}")
+    else:
+        lines.append("- Real checkout patch: not applied")
     lines.append("")
     return lines
 

@@ -83,6 +83,14 @@ class MergeRecommendation(StrEnum):
     CHANGES_REQUESTED = "changes_requested"
 
 
+class FinalValidationStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    PASSED = "passed"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
 class RequirementsSpec(VersionedModel):
     objective: str = Field(min_length=1)
     functional_requirements: list[str]
@@ -269,3 +277,8 @@ class RunManifest(VersionedModel):
     candidate_ids: list[str] = Field(default_factory=list)
     selected_candidate_id: str | None = None
     events_file: str | None = None
+    selected_patch_applied: bool = False
+    applied_paths: list[str] = Field(default_factory=list)
+    final_validation_status: FinalValidationStatus = FinalValidationStatus.NOT_STARTED
+    recovery_guidance: str | None = None
+    generated_but_not_consumed: list[str] = Field(default_factory=list)

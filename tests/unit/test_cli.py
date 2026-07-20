@@ -165,6 +165,13 @@ def test_run_reports_invalid_scripted_provider_input_without_traceback(
     assert result.exit_code == 2
     assert "could not load scripted provider" in result.output
     assert "Traceback" not in result.output
+    run_directory = next((tmp_path / "runs").iterdir())
+    manifest = json.loads((run_directory / "run.json").read_text())
+    assert manifest["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
+    assert "could not load scripted provider" in manifest["reason"]
+    assert (run_directory / "report.md").exists()
+    terminal = json.loads((run_directory / "events.jsonl").read_text().splitlines()[-1])
+    assert terminal["kind"] == "terminal"
 
 
 def test_run_uses_external_default_evidence_directory(
@@ -245,7 +252,12 @@ def test_run_stores_failed_preflight_before_constructing_provider(
         cli,
         "DockerExecutor",
         lambda: type(
-            "Unavailable", (), {"readiness": lambda _self: (False, "image unavailable")}
+            "Unavailable",
+            (),
+            {
+                "readiness": lambda _self: (False, "image unavailable"),
+                "available": lambda _self, _command: False,
+            },
         )(),
     )
 
@@ -260,6 +272,119 @@ def test_run_stores_failed_preflight_before_constructing_provider(
     assert (run_directory / "preflight-001.json").exists()
     assert (run_directory / "run.json").exists()
     assert (run_directory / "report.md").exists()
+    assert (run_directory / "events.jsonl").exists()
+
+
+def test_run_blocks_required_missing_pytest_before_provider_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    nested = target / "quality" / "regression" / "value_test.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("def test_value(): pass\n")
+    evidence = tmp_path / "runs"
+
+    class MissingPytestExecutor:
+        def readiness(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def available(self, command: object) -> bool:
+            return getattr(command, "name", "") != "pytest"
+
+    def provider_must_not_be_constructed(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("provider construction must be blocked by preflight")
+
+    monkeypatch.setattr(cli, "LocalExecutor", lambda **_kwargs: MissingPytestExecutor())
+    monkeypatch.setattr(cli, "OpenAIProvider", provider_must_not_be_constructed)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "command:pytest: required validation command unavailable" in result.output
+    manifest = json.loads((next(evidence.iterdir()) / "run.json").read_text())
+    assert manifest["reason"] == "repository preflight failed"
+
+
+def test_run_terminalizes_keyboard_interrupt_after_store_initialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+
+    def interrupt_policy(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.ValidationPolicy, "commands", interrupt_policy)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 2
+    run_directory = next(evidence.iterdir())
+    manifest = json.loads((run_directory / "run.json").read_text())
+    assert manifest["status"] == RunStatus.CANCELLED.value
+    assert manifest["reason"] == "workflow interrupted by user"
+    assert (run_directory / "report.md").exists()
+    assert json.loads((run_directory / "events.jsonl").read_text())["kind"] == "terminal"
+
+
+def test_run_terminalizes_unexpected_openai_initialization_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+
+    def fail_provider(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("provider configuration invalid")
+
+    monkeypatch.setattr(cli, "OpenAIProvider", fail_provider)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 2
+    manifest = json.loads((next(evidence.iterdir()) / "run.json").read_text())
+    assert manifest["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
+    assert "provider configuration invalid" in manifest["reason"]
 
 
 def test_run_rejects_explicit_default_path_inside_target(
@@ -292,26 +417,33 @@ def test_run_reports_openai_provider_load_error_without_traceback(
     target = tmp_path / "target"
     target.mkdir()
 
-    class FakeStore:
-        root = tmp_path / "evidence" / "run-test"
-
-        def write_model(self, _name: str, _model: object) -> Path:
-            return self.root / "preflight.json"
-
     def fail_to_load_openai_provider(*_args: object, **_kwargs: object) -> object:
         raise OpenAIError("missing credentials")
 
-    monkeypatch.setattr(cli.ArtifactStore, "create", lambda *_args: FakeStore())
     monkeypatch.setattr(cli, "OpenAIProvider", fail_to_load_openai_provider)
 
     result = runner.invoke(
         app,
-        ["run", "--repository", str(target), "--request", "change", "--executor", "local"],
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(tmp_path / "runs"),
+        ],
     )
 
     assert result.exit_code == 2
     assert "could not load OpenAI provider" in result.output
     assert "Traceback" not in result.output
+    run_directory = next((tmp_path / "runs").iterdir())
+    assert (run_directory / "run.json").exists()
+    assert (run_directory / "report.md").exists()
+    assert (run_directory / "events.jsonl").exists()
 
 
 def test_run_reports_file_output_directory_error_without_traceback(tmp_path: Path) -> None:

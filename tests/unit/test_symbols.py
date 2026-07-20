@@ -123,3 +123,39 @@ def test_builder_records_reference_order_and_binding_targets(tmp_path: Path) -> 
     ]
     assert [(edge.line, edge.column) for edge in imports] == [(1, 0), (2, 0), (3, 0)]
     assert (call.line, call.column) == (4, 0)
+
+
+def test_builder_maps_src_layout_paths_to_importable_module_ids(tmp_path: Path) -> None:
+    package = tmp_path / "src" / "example_math"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("from .core import clamp as limit\n")
+    (package / "core.py").write_text("def clamp(value: int) -> int:\n    return value\n")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_math.py").write_text(
+        "from example_math import limit\n"
+        "from example_math.core import clamp as bound\n"
+        "limit(1)\n"
+        "bound(1)\n"
+    )
+
+    graph = PythonSymbolGraphBuilder().build(RepositoryInspector().inspect(tmp_path))
+    qualified = {node.qualified_name for node in graph.nodes}
+
+    assert "example_math" in qualified
+    assert "example_math.core.clamp" in qualified
+    assert "src.example_math" not in qualified
+    imports = [edge for edge in graph.edges if edge.kind == "imports"]
+    assert any(edge.target == "example_math.core.clamp" for edge in imports)
+    assert any(
+        edge.target == "example_math.core.clamp"
+        and edge.alias == "bound"
+        and edge.binding == "bound"
+        for edge in imports
+    )
+    assert any(
+        edge.target == "example_math.core.clamp"
+        and edge.alias == "limit"
+        and edge.binding == "limit"
+        for edge in imports
+    )

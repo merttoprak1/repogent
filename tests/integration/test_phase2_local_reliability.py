@@ -454,3 +454,51 @@ def test_all_failed_candidates_leave_the_real_repository_unchanged(tmp_path: Pat
     report = (workflow.artifacts.root / "report.md").read_text()
     assert all(candidate_id in report for candidate_id in manifest.candidate_ids)
     assert "rejected" in report
+
+
+def test_nested_suffix_test_failure_makes_candidates_ineligible_and_unselected(
+    tmp_path: Path,
+) -> None:
+    case = _fixture_case("python_library")
+    target = tmp_path / "nested-tests"
+    shutil.copytree(FIXTURES / case.name, target)
+    nested_test = target / "quality" / "regression" / "math_test.py"
+    nested_test.parent.mkdir(parents=True)
+    (target / case.test_path).replace(nested_test)
+    pyproject = target / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text().replace(
+            'testpaths = ["tests"]', 'testpaths = ["quality/regression"]'
+        )
+    )
+    baseline = _tree_bytes(target)
+    policy = ValidationPolicy()
+    assert policy.commands(target)[0].required is True
+    executor = LocalExecutor(
+        allowed={command.name: command.argv for command in policy.commands(target)}
+    )
+    validator = RecordingValidator(ValidationPipeline(executor, policy))
+    patch_applier = CountingPatchApplier(target)
+    workflow = _workflow_for(
+        target,
+        tmp_path / "runs",
+        case,
+        outputs=[
+            *_scripted_outputs(case)[:2],
+            _wrong_patch_output(case, "return lower", "First failed candidate"),
+            _wrong_patch_output(case, "return value", "Second failed candidate"),
+            _wrong_patch_output(case, "return upper - 1", "Third failed candidate"),
+        ],
+        approver=FakeApprover([Decision.APPROVED, Decision.APPROVED]),
+        validator=validator,
+        patch_applier=patch_applier,
+    )
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.selected_candidate_id is None
+    assert len(workflow.candidate_evidence) == 3
+    assert all(not evidence.eligible for evidence in workflow.candidate_evidence)
+    assert all("pytest" in evidence.required_failures for evidence in workflow.candidate_evidence)
+    assert _tree_bytes(target) == baseline

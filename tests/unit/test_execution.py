@@ -28,6 +28,52 @@ def test_policy_returns_only_fixed_module_commands(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "contents"),
+    [
+        ("quality/regression/test_nested.py", "def test_value(): pass\n"),
+        ("checks/unit/value_test.py", "def test_value(): pass\n"),
+        ("specs/test_behavior.py", "def test_value(): pass\n"),
+    ],
+)
+def test_policy_requires_pytest_for_bounded_nested_test_discovery(
+    tmp_path: Path, relative_path: str, contents: str
+) -> None:
+    path = tmp_path / relative_path
+    path.parent.mkdir(parents=True)
+    path.write_text(contents)
+
+    pytest_command = ValidationPolicy().commands(tmp_path)[0]
+
+    assert pytest_command.required is True
+
+
+@pytest.mark.parametrize(
+    ("config_name", "contents"),
+    [
+        ("pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["specs"]\n'),
+        ("pytest.ini", "[pytest]\ntestpaths = specs\n"),
+        ("setup.cfg", "[tool:pytest]\ntestpaths = specs\n"),
+        ("tox.ini", "[pytest]\ntestpaths = specs\n"),
+    ],
+)
+def test_policy_requires_pytest_when_configuration_declares_testpaths(
+    tmp_path: Path, config_name: str, contents: str
+) -> None:
+    (tmp_path / config_name).write_text(contents)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+def test_policy_discovery_ignores_generated_and_vcs_trees(tmp_path: Path) -> None:
+    for relative in (".git/test_hidden.py", ".venv/test_dependency.py", "build/test_output.py"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_hidden(): pass\n")
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is False
+
+
 def test_local_executor_runs_allowlisted_command_without_shell(tmp_path: Path) -> None:
     command = CommandSpec(
         name="python",

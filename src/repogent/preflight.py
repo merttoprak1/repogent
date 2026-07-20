@@ -53,20 +53,43 @@ class Preflight:
             raise ValueError("filesystem root repositories are unsupported")
         git_commit, dirty_output, git_check = _git_state(repository)
         ready, reason = self.executor.readiness()
-        checks = [
-            git_check,
+        commands = self.policy.commands(repository)
+        checks = [git_check]
+        for command in commands:
+            available = self.executor.available(command)
+            checks.append(
+                PreflightCheck(
+                    name=f"command:{command.name}",
+                    status=(
+                        ReadinessStatus.PASSED
+                        if available
+                        else ReadinessStatus.FAILED
+                        if command.required
+                        else ReadinessStatus.WARNING
+                    ),
+                    required=command.required,
+                    reason=(
+                        None
+                        if available
+                        else "required validation command unavailable"
+                        if command.required
+                        else "optional validation command unavailable"
+                    ),
+                )
+            )
+        checks.append(
             PreflightCheck(
                 name="executor",
                 status=ReadinessStatus.PASSED if ready else ReadinessStatus.FAILED,
                 required=True,
                 reason=reason,
-            ),
-        ]
+            )
+        )
         payload = {
             "root": str(repository),
             "commit": git_commit or "no-commit",
             "dirty": dirty_output,
-            "commands": sorted(command.name for command in self.policy.commands(repository)),
+            "commands": sorted(command.name for command in commands),
         }
         fingerprint = _sha256(payload)
         return PreflightReport(

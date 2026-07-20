@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import importlib.util
 import os
 import secrets
@@ -8,6 +9,7 @@ import signal
 import subprocess  # nosec B404
 import sys
 import time
+import tomllib
 from collections import deque
 from collections.abc import Sequence
 from contextlib import suppress
@@ -28,6 +30,24 @@ _OUTPUT_READ_BYTES = 8_192
 _OUTPUT_DRAIN_TIMEOUT_SECONDS = 0.5
 _PROCESS_TERMINATION_TIMEOUT_SECONDS = 1
 _DOCKER_CONTROL_TIMEOUT_SECONDS = 5
+_DISCOVERY_MAX_ENTRIES = 20_000
+_DISCOVERY_MAX_DEPTH = 16
+_PYTEST_CONFIG_MAX_BYTES = 256_000
+_DISCOVERY_IGNORED_DIRECTORIES = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "site-packages",
+}
 
 
 class _BoundedOutput:
@@ -144,7 +164,7 @@ class CommandSpec:
 
 class ValidationPolicy:
     def commands(self, root: Path) -> list[CommandSpec]:
-        pytest_required = (root / "tests").is_dir() or any(root.glob("test_*.py"))
+        pytest_required = _has_pytest_suite(root)
         return [
             CommandSpec(
                 "pytest", ("python", "-m", "pytest", "-q"), pytest_required, module="pytest"
@@ -155,6 +175,67 @@ class ValidationPolicy:
                 "bandit", ("python", "-m", "bandit", "-q", "-r", "."), False, module="bandit"
             ),
         ]
+
+
+def _has_pytest_suite(root: Path) -> bool:
+    if _has_pytest_configuration(root):
+        return True
+    pending: list[tuple[Path, int]] = [(root, 0)]
+    entries_seen = 0
+    while pending and entries_seen < _DISCOVERY_MAX_ENTRIES:
+        directory, depth = pending.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            entries_seen += 1
+            if entries_seen > _DISCOVERY_MAX_ENTRIES:
+                # Discovery uncertainty must not silently downgrade regression evidence.
+                return True
+            name = entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if name in _DISCOVERY_IGNORED_DIRECTORIES:
+                        continue
+                    if name in {"test", "tests"}:
+                        return True
+                    if depth < _DISCOVERY_MAX_DEPTH:
+                        pending.append((Path(entry.path), depth + 1))
+                elif entry.is_file(follow_symlinks=False) and name.endswith(".py"):
+                    if name.startswith("test_") or name.endswith("_test.py"):
+                        return True
+            except OSError:
+                continue
+    return False
+
+
+def _has_pytest_configuration(root: Path) -> bool:
+    pyproject = root / "pyproject.toml"
+    try:
+        if pyproject.stat().st_size <= _PYTEST_CONFIG_MAX_BYTES:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            tool = data.get("tool", {})
+            if isinstance(tool, dict) and isinstance(tool.get("pytest"), dict):
+                return True
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        pass
+    for name, sections in (
+        ("pytest.ini", {"pytest"}),
+        ("setup.cfg", {"tool:pytest"}),
+        ("tox.ini", {"pytest"}),
+    ):
+        path = root / name
+        try:
+            if path.stat().st_size > _PYTEST_CONFIG_MAX_BYTES:
+                continue
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, configparser.Error):
+            continue
+        if sections & set(parser.sections()):
+            return True
+    return False
 
 
 class Executor(Protocol):

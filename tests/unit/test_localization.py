@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from repogent.domain import CheckResult, CheckStatus, ValidationReport
 from repogent.repository import RepositoryInspector, RepositoryInventory
 from repogent.symbols import (
@@ -352,3 +354,63 @@ def test_localizer_excludes_class_bindings_from_methods_but_keeps_function_bindi
     ]
 
     assert call_lines == [9]
+
+
+def test_localizer_connects_src_layout_source_to_importing_tests(tmp_path: Path) -> None:
+    from repogent.localization import PythonLocalizer
+
+    inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "src/example_math/__init__.py": "from .core import clamp as limit\n",
+            "src/example_math/core.py": (
+                "def clamp(value: int) -> int:\n    return value\n"
+            ),
+            "tests/test_math.py": (
+                "from example_math import limit\n"
+                "from example_math.core import clamp as bound\n"
+                "def test_clamp():\n"
+                "    assert limit(1) == 1\n"
+                "    assert bound(1) == 1\n"
+            ),
+        },
+    )
+
+    report = PythonLocalizer().localize(inventory, graph, "change clamp")
+    source = next(
+        location
+        for location in report.locations
+        if location.symbol_id.endswith(":example_math.core.clamp")
+    )
+
+    assert source.path == "src/example_math/core.py"
+    assert {signal.name for signal in source.signals} >= {"import", "call", "test"}
+
+
+def test_localizer_tokenizes_each_file_lexical_document_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import localization as localization_module
+
+    inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "service.py": (
+                "class Service:\n"
+                "    def first(self): return 1\n"
+                "    def second(self): return 2\n"
+            )
+        },
+    )
+    original = localization_module._file_lexical_tokens
+    calls: list[str] = []
+
+    def record_tokens(path: str, text: str) -> set[str]:
+        calls.append(path)
+        return original(path, text)
+
+    monkeypatch.setattr(localization_module, "_file_lexical_tokens", record_tokens)
+
+    localization_module.PythonLocalizer().localize(inventory, graph, "change service")
+
+    assert calls == ["service.py"]

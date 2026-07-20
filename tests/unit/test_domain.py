@@ -8,6 +8,7 @@ from repogent.domain import (
     CandidateEvidence,
     CheckResult,
     CheckStatus,
+    FinalValidationStatus,
     ImplementationPlan,
     PlanStep,
     RequirementsSpec,
@@ -96,11 +97,26 @@ def test_manifest_phase_two_fields_round_trip_through_json() -> None:
         candidate_ids=["candidate-1", "candidate-2"],
         selected_candidate_id="candidate-1",
         events_file="events.jsonl",
+        selected_patch_applied=True,
+        applied_paths=["app.py"],
+        final_validation_status=FinalValidationStatus.FAILED,
+        recovery_guidance="Review app.py and revert the approved patch if unwanted.",
+        generated_but_not_consumed=["qa-review"],
     )
 
     restored = RunManifest.model_validate_json(manifest.model_dump_json())
 
     assert restored == manifest
+
+
+def test_manifest_recovery_fields_default_for_existing_evidence() -> None:
+    manifest = RunManifest.model_validate({"run_id": "old-run", "request": "change"})
+
+    assert manifest.selected_patch_applied is False
+    assert manifest.applied_paths == []
+    assert manifest.final_validation_status is FinalValidationStatus.NOT_STARTED
+    assert manifest.recovery_guidance is None
+    assert manifest.generated_but_not_consumed == []
 
 
 def test_run_event_message_is_limited_to_4096_characters() -> None:

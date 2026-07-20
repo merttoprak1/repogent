@@ -19,6 +19,7 @@ from repogent.domain import (
     CheckStatus,
     Decision,
     EventKind,
+    FinalValidationStatus,
     ProviderUsage,
     RiskLevel,
     RunManifest,
@@ -29,7 +30,8 @@ from repogent.domain import (
 from repogent.events import EventSink
 from repogent.localization import PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
-from repogent.providers import ScriptedProvider
+from repogent.provider_context import MAX_PROVIDER_PAYLOAD_CHARS
+from repogent.providers import ProviderError, ProviderResult, ScriptedProvider
 from repogent.repository import RepositoryInspector
 from repogent.symbols import PythonSymbolGraphBuilder
 from repogent.workflow import BudgetExceeded, IllegalTransition, Workflow, transition
@@ -708,3 +710,239 @@ def test_report_persistence_failure_downgrades_before_terminal_event(
     assert (workflow.artifacts.root / "report.md").exists()
     assert len(terminal_events) == 1
     assert terminal_events[0]["data"]["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
+
+
+@pytest.mark.parametrize(
+    ("cross_at", "artifact_name"),
+    [(1, "requirements"), (2, "plan"), (3, "candidate"), (4, "qa-review")],
+)
+def test_generated_role_output_is_persisted_before_budget_enforcement(
+    tmp_path: Path, cross_at: int, artifact_name: str
+) -> None:
+    class MeteredProvider(ScriptedProvider):
+        def generate(self, **kwargs: object) -> ProviderResult[object]:  # type: ignore[override,type-var]
+            result = super().generate(**kwargs)  # type: ignore[arg-type]
+            usage = ProviderUsage(
+                model="metered",
+                output_tokens=10 if len(self.calls) == cross_at else 0,
+            )
+            return ProviderResult(output=result.output, usage=usage)
+
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+        budget=Budget(max_tokens=5),
+    )
+    provider = MeteredProvider(
+        [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT]
+    )
+    workflow.roles = RoleSet.from_provider(provider)
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "token budget exceeded"
+    assert artifact_name in manifest.generated_but_not_consumed
+    assert list(workflow.artifacts.root.glob(f"{artifact_name}-*.json"))
+    assert f"Generated but not consumed: {artifact_name}" in (
+        workflow.artifacts.root / "report.md"
+    ).read_text()
+    assert len(provider.calls) == cross_at
+    if cross_at == 3:
+        assert manifest.candidate_ids == ["candidate-1"]
+        assert workflow.candidate_evidence == []
+        assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+    if cross_at == 4:
+        assert manifest.selected_patch_applied is True
+        assert manifest.final_validation_status is FinalValidationStatus.PASSED
+        assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
+
+
+def test_workflow_provider_payloads_are_bounded_and_requirements_exclude_contents(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+
+    workflow.run()
+
+    provider = workflow.roles.requirements.provider
+    assert isinstance(provider, ScriptedProvider)
+    assert all(
+        len(json.dumps(call["payload"], sort_keys=True)) <= MAX_PROVIDER_PAYLOAD_CHARS
+        for call in provider.calls
+    )
+    inventory = provider.calls[0]["payload"]["repository_inventory"]
+    assert isinstance(inventory, dict)
+    assert all("text" not in file for file in inventory["files"])
+
+
+def test_keyboard_interrupt_is_durably_terminalized_as_cancellation(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(tmp_path, outputs=[], validation_statuses=[])
+
+    def interrupt(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    workflow.roles.requirements.run = interrupt  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.CANCELLED
+    assert manifest.reason == "workflow interrupted by user"
+    assert json.loads((workflow.artifacts.root / "run.json").read_text())["status"] == "cancelled"
+    assert (workflow.artifacts.root / "report.md").exists()
+    assert _events(workflow)[-1]["kind"] == EventKind.TERMINAL.value
+
+
+def test_final_validation_failure_reports_real_patch_as_applied(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.FAILED],
+    )
+
+    manifest = workflow.run()
+    report = (workflow.artifacts.root / "report.md").read_text()
+
+    assert manifest.selected_patch_applied is True
+    assert manifest.applied_paths == ["app.py"]
+    assert manifest.final_validation_status is FinalValidationStatus.FAILED
+    assert "Real checkout patch: remains applied" in report
+    assert "run the required validation commands" in report
+
+
+def test_post_apply_artifact_failure_preserves_truthful_recovery_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    original_write = workflow.artifacts.write_model
+
+    def fail_patch_artifact(name: str, model: object) -> Path:
+        if name == "patch-applied":
+            raise OSError("patch artifact unavailable")
+        return original_write(name, model)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workflow.artifacts, "write_model", fail_patch_artifact)
+
+    manifest = workflow.run()
+
+    assert manifest.reason == "patch artifact unavailable"
+    assert manifest.selected_patch_applied is True
+    assert manifest.applied_paths == ["app.py"]
+    assert manifest.final_validation_status is FinalValidationStatus.INTERRUPTED
+    assert "Real checkout patch: remains applied" in (
+        workflow.artifacts.root / "report.md"
+    ).read_text()
+
+
+def test_post_apply_qa_interrupt_keeps_applied_patch_and_final_validation_state(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+
+    def interrupt(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    workflow.roles.qa.run = interrupt  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.CANCELLED
+    assert manifest.selected_patch_applied is True
+    assert manifest.final_validation_status is FinalValidationStatus.PASSED
+    assert manifest.recovery_guidance is not None
+
+
+def test_post_apply_qa_provider_failure_keeps_applied_patch_and_guidance(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+
+    def fail_qa(*_args: object, **_kwargs: object) -> object:
+        raise ProviderError("QA provider unavailable")
+
+    workflow.roles.qa.run = fail_qa  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "QA provider unavailable"
+    assert manifest.selected_patch_applied is True
+    assert manifest.final_validation_status is FinalValidationStatus.PASSED
+    assert "Real checkout patch: remains applied" in (
+        workflow.artifacts.root / "report.md"
+    ).read_text()
+
+
+def test_post_apply_event_failure_keeps_real_checkout_state_in_manifest_and_report(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    delegate = workflow.artifacts.event_store()
+
+    class FailFinalValidationEvent:
+        def emit(self, event: object) -> None:
+            if getattr(event, "message", "") == "final validation completed":
+                raise OSError("final validation event unavailable")
+            delegate.emit(event)  # type: ignore[arg-type]
+
+    workflow.events = FailFinalValidationEvent()
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "final validation event unavailable"
+    assert manifest.selected_patch_applied is True
+    assert manifest.final_validation_status is FinalValidationStatus.PASSED
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+    assert persisted["selected_patch_applied"] is True
+    assert "Real checkout patch: remains applied" in (
+        workflow.artifacts.root / "report.md"
+    ).read_text()
+
+
+def test_terminal_event_keyboard_interrupt_is_durably_recorded_without_recursion(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    delegate = workflow.artifacts.event_store()
+
+    class InterruptTerminalEvent:
+        def emit(self, event: object) -> None:
+            if getattr(event, "kind", None) is EventKind.TERMINAL:
+                raise KeyboardInterrupt
+            delegate.emit(event)  # type: ignore[arg-type]
+
+    workflow.events = InterruptTerminalEvent()
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.CANCELLED
+    assert manifest.reason == "workflow interrupted during terminalization"
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+    assert persisted["status"] == RunStatus.CANCELLED.value
+    assert (workflow.artifacts.root / "report.md").exists()
