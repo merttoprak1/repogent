@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -319,7 +320,7 @@ def test_candidate_evaluator_restores_after_validator_exception(tmp_path: Path) 
     assert (root / "app.py").read_text() == "value = 1\n"
 
 
-def test_candidate_evaluator_restores_and_rejects_validator_changes_outside_patch(
+def test_candidate_evaluator_confines_validator_changes_to_disposable_copy(
     tmp_path: Path,
 ) -> None:
     class MutatingValidator:
@@ -340,29 +341,94 @@ def test_candidate_evaluator_restores_and_rejects_validator_changes_outside_patc
         root, candidate("candidate-1", 1, 2), ["value changes"], 30
     )
 
-    assert evidence.eligible is False
-    assert "repository-mutation" in evidence.required_failures
+    assert evidence.eligible is True
+    assert "repository-drift" not in evidence.required_failures
     assert evidence.restored_to_baseline is True
     assert (root / "app.py").read_text() == "value = 1\n"
     assert (root / "other.py").read_text() == "value = 1\n"
     assert not (root / "created.py").exists()
 
 
-def test_candidate_evaluator_recovers_a_failed_patch_transaction_before_marking_ineligible(
+def test_candidate_evaluator_uses_disposable_root_for_patch_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = repository_with_value(tmp_path, 1)
+    del monkeypatch
     applier = PatchApplier()
-    monkeypatch.setattr(applier, "restore", lambda *_args: None)
 
     evidence = CandidateEvaluator(PatchPolicy(), applier, RecordingValidator()).evaluate(
         root, candidate("candidate-1", 1, 2), ["value changes"], 30
     )
 
-    assert evidence.eligible is False
+    assert evidence.eligible is True
     assert evidence.restored_to_baseline is True
-    assert evidence.required_failures == ["repository-mutation"]
+    assert evidence.required_failures == []
     assert (root / "app.py").read_text() == "value = 1\n"
+
+
+def test_candidate_evaluator_detects_real_root_drift_without_restoring_it(tmp_path: Path) -> None:
+    class MaliciousValidator:
+        def run(
+            self, evaluation_root: Path, *, timeout_seconds: float | None = None
+        ) -> ValidationReport:
+            del evaluation_root, timeout_seconds
+            (root / ".git" / "config").write_text("changed\n")
+            os.chmod(root / "package", 0o500)
+            (root / "other.py").unlink()
+            (root / "other.py").symlink_to("app.py")
+            return ValidationReport(
+                checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
+            )
+
+    root = repository_with_value(tmp_path, 1)
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("original\n")
+    (root / "package").mkdir()
+    os.chmod(root / "package", 0o700)
+    (root / "other.py").write_text("other = 1\n")
+
+    evidence = CandidateEvaluator(PatchPolicy(), PatchApplier(), MaliciousValidator()).evaluate(
+        root, candidate("candidate-1", 1, 2), ["value changes"], 30
+    )
+
+    assert evidence.eligible is False
+    assert evidence.restored_to_baseline is False
+    assert "repository-drift" in evidence.required_failures
+    assert (root / ".git" / "config").read_text() == "changed\n"
+    assert (root / "other.py").is_symlink()
+    assert (root / "package").stat().st_mode & 0o777 == 0o500
+
+
+def test_candidate_evaluator_copies_safe_symlinks_and_cleans_special_eval_nodes(
+    tmp_path: Path,
+) -> None:
+    class EvalOnlyValidator:
+        def run(
+            self, evaluation_root: Path, *, timeout_seconds: float | None = None
+        ) -> ValidationReport:
+            del timeout_seconds
+            assert evaluation_root != root
+            assert (evaluation_root / "safe-link.py").is_symlink()
+            (evaluation_root / "created-link.py").symlink_to("app.py")
+            os.mkfifo(evaluation_root / "created.fifo")
+            return ValidationReport(
+                checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
+            )
+
+    root = repository_with_value(tmp_path, 1)
+    (root / "safe-link.py").symlink_to("app.py")
+    unchanged_mtime = (root / "app.py").stat().st_mtime_ns
+
+    evidence = CandidateEvaluator(PatchPolicy(), PatchApplier(), EvalOnlyValidator()).evaluate(
+        root, candidate("candidate-1", 1, 2), ["value changes"], 30
+    )
+
+    assert evidence.eligible is True
+    assert evidence.restored_to_baseline is True
+    assert (root / "safe-link.py").is_symlink()
+    assert not (root / "created-link.py").exists()
+    assert not (root / "created.fifo").exists()
+    assert (root / "app.py").stat().st_mtime_ns == unchanged_mtime
 
 
 def test_candidate_evaluator_rejects_unmapped_acceptance_without_mutation(tmp_path: Path) -> None:

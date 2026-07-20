@@ -199,13 +199,7 @@ class Workflow:
         candidate_evaluator = cast(CandidateEvaluator, self.candidate_evaluator)
         approval_baseline = candidate_evaluator.capture_baseline(self.root)
         candidates, evidence = self._evaluate_candidates(localization)
-        if not approval_baseline.matches(self.root, self.patch_applier):
-            try:
-                approval_baseline.restore(self.root, self.patch_applier)
-            except Exception as error:
-                raise RuntimeError(
-                    "repository baseline changed before approval and could not be restored"
-                ) from error
+        if not approval_baseline.matches(self.root):
             raise RuntimeError("repository baseline changed before approval")
         candidate_selector = cast(CandidateSelector, self.candidate_selector)
         selection = candidate_selector.select(candidates, evidence)
@@ -495,18 +489,38 @@ class Workflow:
         self._set_final_manifest(status, reason)
         persistence_error = self._persist_final_manifest()
         if persistence_error is not None:
-            self._set_final_manifest(RunStatus.HUMAN_INTERVENTION_REQUIRED, str(persistence_error))
-            retry_error = self._persist_final_manifest()
-            if retry_error is not None:
-                self.manifest = self.manifest.model_copy(
-                    update={
-                        "reason": f"{persistence_error}; final downgrade persistence failed: "
-                        f"{retry_error}",
-                        "updated_at": utc_now(),
-                    }
-                )
-            self._write_final_report()
+            return self._downgrade_finalization(str(persistence_error))
+        report_error = self._write_final_report()
+        if report_error is not None:
+            return self._downgrade_finalization(str(report_error))
+        if self._event_failed:
             return self.manifest
+        try:
+            self.emit(
+                EventKind.TERMINAL,
+                "workflow finished",
+                status=self.manifest.status.value,
+                reason=self.manifest.reason,
+            )
+        except Exception as error:
+            if self.manifest.status is not RunStatus.HUMAN_INTERVENTION_REQUIRED:
+                return self._downgrade_finalization(str(error))
+        return self.manifest
+
+    def _downgrade_finalization(self, reason: str) -> RunManifest:
+        self._set_final_manifest(RunStatus.HUMAN_INTERVENTION_REQUIRED, reason)
+        persistence_error = self._persist_final_manifest()
+        if persistence_error is not None:
+            self._set_final_manifest(
+                RunStatus.HUMAN_INTERVENTION_REQUIRED,
+                f"{reason}; final downgrade persistence failed: {persistence_error}",
+            )
+            self._persist_final_manifest()
+        report_error = self._write_final_report()
+        if report_error is not None:
+            self._set_final_manifest(RunStatus.HUMAN_INTERVENTION_REQUIRED, str(report_error))
+            self._persist_final_manifest()
+            self._write_final_report()
         if not self._event_failed:
             try:
                 self.emit(
@@ -515,19 +529,8 @@ class Workflow:
                     status=self.manifest.status.value,
                     reason=self.manifest.reason,
                 )
-            except Exception as error:
-                if self.manifest.status is not RunStatus.HUMAN_INTERVENTION_REQUIRED:
-                    self._set_final_manifest(RunStatus.HUMAN_INTERVENTION_REQUIRED, str(error))
-                    downgrade_error = self._persist_final_manifest()
-                    if downgrade_error is not None:
-                        self.manifest = self.manifest.model_copy(
-                            update={
-                                "reason": f"{error}; final downgrade persistence failed: "
-                                f"{downgrade_error}",
-                                "updated_at": utc_now(),
-                            }
-                        )
-        self._write_final_report()
+            except Exception:
+                return self.manifest
         return self.manifest
 
     def _set_final_manifest(self, status: RunStatus, reason: str | None) -> None:
@@ -545,17 +548,21 @@ class Workflow:
             }
         )
 
-    def _write_final_report(self) -> None:
-        self.artifacts.write_final(
-            "report.md",
-            render_report(
-                self.manifest,
-                self.requirements,
-                self.plan,
-                self.validation,
-                self.review,
-            ),
-        )
+    def _write_final_report(self) -> Exception | None:
+        try:
+            self.artifacts.write_final(
+                "report.md",
+                render_report(
+                    self.manifest,
+                    self.requirements,
+                    self.plan,
+                    self.validation,
+                    self.review,
+                ),
+            )
+        except Exception as error:
+            return error
+        return None
     def _persist_final_manifest(self) -> Exception | None:
         try:
             self.artifacts.update_manifest(self.manifest)

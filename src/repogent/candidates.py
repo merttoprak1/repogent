@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -19,8 +20,7 @@ from repogent.domain import (
     ValidationReport,
 )
 from repogent.localization import LocalizationReport
-from repogent.patching import PatchApplier, PatchPolicy, PatchPolicyError, Snapshot, ValidatedPatch
-from repogent.repository import IGNORED_DIRECTORIES
+from repogent.patching import PatchApplier, PatchPolicy, PatchPolicyError, ValidatedPatch
 
 
 class Validator(Protocol):
@@ -28,85 +28,156 @@ class Validator(Protocol):
 
 
 @dataclass(frozen=True)
-class RepositoryBaseline:
-    """A complete regular-file baseline outside VCS metadata."""
+class NodeFingerprint:
+    kind: str
+    mode: int
+    digest: str | None = None
+    target: str | None = None
 
-    files: dict[Path, Snapshot]
-    directories: frozenset[Path]
+
+@dataclass(frozen=True)
+class RepositoryIntegritySnapshot:
+    """Read-only whole-tree state used only to detect real-checkout drift."""
+
+    entries: dict[Path, NodeFingerprint]
 
     @classmethod
-    def capture(cls, root: Path, applier: PatchApplier) -> RepositoryBaseline:
-        files, directories = _repository_paths(root)
-        return cls(
-            files={path: applier._snapshot(root, path) for path in files},
-            directories=frozenset(directories),
-        )
+    def capture(cls, root: Path) -> RepositoryIntegritySnapshot:
+        repository = root.resolve(strict=True)
+        entries: dict[Path, NodeFingerprint] = {
+            Path(): NodeFingerprint("directory", stat.S_IMODE(repository.stat().st_mode))
+        }
+        descriptor = os.open(repository, PatchApplier._directory_flags())
 
-    def restore(self, root: Path, applier: PatchApplier) -> None:
-        current_files, current_directories = _repository_paths(root)
-        errors: list[Exception] = []
-        for path in sorted(
-            current_files - set(self.files), key=lambda item: len(item.parts), reverse=True
-        ):
+        def walk(directory_fd: int, relative: Path) -> None:
             try:
-                applier._restore_one(root, path, Snapshot(existed=False, content=b"", mode=None))
-            except Exception as error:
-                errors.append(error)
-        for path, snapshot in self.files.items():
-            try:
-                applier._restore_one(root, path, snapshot)
-            except Exception as error:
-                errors.append(error)
-        for path in sorted(
-            current_directories - set(self.directories),
-            key=lambda item: len(item.parts),
-            reverse=True,
-        ):
-            try:
-                applier._remove_empty_directory(root, path)
-            except Exception as error:
-                errors.append(error)
-        if errors:
-            raise RuntimeError(
-                "repository baseline restoration failed: " + "; ".join(map(str, errors))
-            )
+                with os.scandir(directory_fd) as scanned:
+                    names = sorted(entry.name for entry in scanned)
+                for name in names:
+                    path = relative / name
+                    metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    mode = stat.S_IMODE(metadata.st_mode)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        entries[path] = NodeFingerprint("directory", mode)
+                        child = os.open(
+                            name, PatchApplier._directory_flags(), dir_fd=directory_fd
+                        )
+                        walk(child, path)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        entries[path] = NodeFingerprint(
+                            "regular", mode, digest=_digest_file(directory_fd, name)
+                        )
+                    elif stat.S_ISLNK(metadata.st_mode):
+                        entries[path] = NodeFingerprint(
+                            "symlink", mode, target=os.readlink(name, dir_fd=directory_fd)
+                        )
+                    else:
+                        entries[path] = NodeFingerprint(_special_kind(metadata.st_mode), mode)
+            finally:
+                os.close(directory_fd)
 
-    def matches(self, root: Path, applier: PatchApplier) -> bool:
+        walk(descriptor, Path())
+        return cls(entries)
+
+    def matches(self, root: Path) -> bool:
         try:
-            current = self.capture(root, applier)
-        except Exception:
+            current = self.capture(root)
+        except (OSError, ValueError):
             return False
-        return current.files == self.files and current.directories == self.directories
+        return current == self
 
 
-def _repository_paths(root: Path) -> tuple[set[Path], set[Path]]:
-    repository = root.resolve(strict=True)
-    files: set[Path] = set()
-    directories: set[Path] = set()
+def _digest_file(directory_fd: int, name: str) -> str:
+    import hashlib
 
-    def walk(descriptor: int, relative: Path) -> None:
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 65_536):
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _special_kind(mode: int) -> str:
+    if stat.S_ISFIFO(mode):
+        return "fifo"
+    if stat.S_ISCHR(mode):
+        return "character"
+    if stat.S_ISBLK(mode):
+        return "block"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    return "unknown"
+
+
+def _copy_for_evaluation(source: Path, destination: Path) -> None:
+    """Copy only into a disposable tree; never mutate or follow source symlinks."""
+
+    repository = source.resolve(strict=True)
+    destination.mkdir(mode=0o700)
+    source_fd = os.open(repository, PatchApplier._directory_flags())
+
+    def copy_tree(directory_fd: int, source_directory: Path, target_directory: Path) -> None:
         try:
-            with os.scandir(descriptor) as entries:
+            with os.scandir(directory_fd) as entries:
                 names = sorted(entry.name for entry in entries)
             for name in names:
-                if name in IGNORED_DIRECTORIES:
+                if name in {".git", ".hg"}:
                     continue
-                path = relative / name
-                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                target = target_directory / name
                 if stat.S_ISDIR(metadata.st_mode):
-                    directories.add(path)
-                    child = os.open(name, PatchApplier._directory_flags(), dir_fd=descriptor)
-                    walk(child, path)
+                    target.mkdir(mode=stat.S_IMODE(metadata.st_mode))
+                    child = os.open(
+                        name, PatchApplier._directory_flags(), dir_fd=directory_fd
+                    )
+                    copy_tree(child, source_directory / name, target)
+                    os.chmod(target, stat.S_IMODE(metadata.st_mode))
                 elif stat.S_ISREG(metadata.st_mode):
-                    files.add(path)
-                else:
-                    raise PatchPolicyError(f"cannot establish repository baseline for {path}")
+                    _copy_regular_file(directory_fd, name, target, metadata)
+                elif stat.S_ISLNK(metadata.st_mode):
+                    link_target = os.readlink(name, dir_fd=directory_fd)
+                    if _is_safe_symlink(repository, source_directory, link_target):
+                        os.symlink(link_target, target)
         finally:
-            os.close(descriptor)
+            os.close(directory_fd)
 
-    descriptor = os.open(repository, PatchApplier._directory_flags())
-    walk(descriptor, Path())
-    return files, directories
+    copy_tree(source_fd, repository, destination)
+
+
+def _is_safe_symlink(repository: Path, parent: Path, target: str) -> bool:
+    if os.path.isabs(target):
+        return False
+    resolved = (parent / target).resolve()
+    return resolved == repository or repository in resolved.parents
+
+
+def _copy_regular_file(source_fd: int, name: str, target: Path, metadata: os.stat_result) -> None:
+    source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_fd)
+    destination = os.open(
+        target,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        stat.S_IMODE(metadata.st_mode),
+    )
+    try:
+        while chunk := os.read(source, 65_536):
+            _write_all(destination, chunk)
+        os.fchmod(destination, stat.S_IMODE(metadata.st_mode))
+    finally:
+        os.close(source)
+        os.close(destination)
+    os.utime(target, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written == 0:
+            raise OSError("short write while creating evaluation copy")
+        offset += written
 
 
 class ExpansionReason(StrEnum):
@@ -313,16 +384,6 @@ class CandidateEvaluator:
         timeout_seconds: float,
     ) -> CandidateEvidence:
         started = time.monotonic()
-        try:
-            validated = self.patch_policy.validate(root, candidate.proposal)
-        except PatchPolicyError as error:
-            return self._failure_evidence(
-                candidate.candidate_id,
-                "patch-policy",
-                str(error),
-                started,
-            )
-
         unknown_criteria = set(candidate.proposal.acceptance_criteria_addressed) - set(
             acceptance_criteria
         )
@@ -335,76 +396,57 @@ class CandidateEvaluator:
                 started,
             )
 
-        return self._evaluate_validated(
-            root,
-            candidate,
-            validated,
-            acceptance_criteria,
-            timeout_seconds,
-            started,
-        )
-
-    def capture_baseline(self, root: Path) -> RepositoryBaseline:
-        return RepositoryBaseline.capture(root, self.patch_applier)
-
-    def _evaluate_validated(
-        self,
-        root: Path,
-        candidate: CandidateRecord,
-        validated: ValidatedPatch,
-        acceptance_criteria: Sequence[str],
-        timeout_seconds: float,
-        started: float,
-    ) -> CandidateEvidence:
         validation = ValidationReport(checks=[])
-        baseline: RepositoryBaseline | None = None
+        baseline: RepositoryIntegritySnapshot | None = None
+        validated: ValidatedPatch | None = None
         evaluation_error: Exception | None = None
         validator_error: Exception | None = None
-        unexpected_mutation = False
 
         try:
             baseline = self.capture_baseline(root)
-            try:
-                with self.patch_applier.transaction(root, validated):
+            with tempfile.TemporaryDirectory(prefix="repogent-candidate-") as temporary:
+                evaluation_root = Path(temporary) / "repository"
+                _copy_for_evaluation(root, evaluation_root)
+                try:
+                    validated = self.patch_policy.validate(evaluation_root, candidate.proposal)
+                except PatchPolicyError as error:
+                    evaluation_error = error
+                if validated is not None:
                     try:
-                        validation = self.validator.run(root, timeout_seconds=timeout_seconds)
+                        with self.patch_applier.transaction(evaluation_root, validated):
+                            try:
+                                validation = self.validator.run(
+                                    evaluation_root, timeout_seconds=timeout_seconds
+                                )
+                            except Exception as error:
+                                validator_error = error
                     except Exception as error:
-                        validator_error = error
-            except Exception as error:
-                evaluation_error = error
+                        evaluation_error = error
         except Exception as error:
             evaluation_error = error
 
-        if baseline is not None:
-            unexpected_mutation = not baseline.matches(root, self.patch_applier)
-            try:
-                baseline.restore(root, self.patch_applier)
-            except Exception as error:
-                evaluation_error = error
+        restored_to_baseline = baseline is not None and baseline.matches(root)
 
         if validator_error is not None:
             validation = _with_failure(validation, "validation", str(validator_error))
-        if evaluation_error is not None:
-            name = "restoration" if _is_restoration_error(evaluation_error) else "patch-apply"
-            validation = _with_failure(validation, name, str(evaluation_error))
-
-        restored_to_baseline = (
-            baseline is not None and baseline.matches(root, self.patch_applier)
-        )
-
-        if not restored_to_baseline and not any(
-            check.name == "restoration" for check in validation.checks
-        ):
+        if evaluation_error is not None and not isinstance(evaluation_error, PatchPolicyError):
+            validation = _with_failure(validation, "evaluation", str(evaluation_error))
+        if not restored_to_baseline:
             validation = _with_failure(
                 validation,
-                "restoration",
-                "repository state did not match the recorded baseline after evaluation",
+                "repository-drift",
+                "real repository state changed during candidate evaluation",
             )
-        if unexpected_mutation:
-            validation = _with_failure(
-                validation,
-                "repository-mutation",
-                "candidate validation modified repository state outside the proposed patch",
+        if validated is None:
+            return self._failure_evidence(
+                candidate.candidate_id,
+                "patch-policy" if isinstance(evaluation_error, PatchPolicyError) else "evaluation",
+                str(evaluation_error)
+                if evaluation_error is not None
+                else "candidate evaluation did not produce a validated patch",
+                started,
+                restored_to_baseline=restored_to_baseline,
+                validation=validation,
             )
 
         required_failures = [
@@ -431,14 +473,20 @@ class CandidateEvaluator:
             restored_to_baseline=restored_to_baseline,
         )
 
+    def capture_baseline(self, root: Path) -> RepositoryIntegritySnapshot:
+        return RepositoryIntegritySnapshot.capture(root)
+
     @staticmethod
     def _failure_evidence(
         candidate_id: str,
         name: str,
         reason: str,
         started: float,
+        *,
+        restored_to_baseline: bool = True,
+        validation: ValidationReport | None = None,
     ) -> CandidateEvidence:
-        validation = _with_failure(ValidationReport(checks=[]), name, reason)
+        validation = _with_failure(validation or ValidationReport(checks=[]), name, reason)
         return CandidateEvidence(
             candidate_id=candidate_id,
             validation=validation,
@@ -449,7 +497,7 @@ class CandidateEvaluator:
             duration_seconds=max(0.0, time.monotonic() - started),
             required_failures=[name],
             skipped_checks=[],
-            restored_to_baseline=True,
+            restored_to_baseline=restored_to_baseline,
         )
 
 

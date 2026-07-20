@@ -297,7 +297,7 @@ def test_workflow_rechecks_complete_baseline_before_patch_approval(tmp_path: Pat
 
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
     assert manifest.reason == "repository baseline changed before approval"
-    assert not (workflow.root / "unapproved.py").exists()
+    assert (workflow.root / "unapproved.py").read_text() == "side_effect = True\n"
     assert [record.kind for record in workflow.approver.records] == [
         ApprovalKind.REQUIREMENTS,
         ApprovalKind.PLAN,
@@ -442,3 +442,38 @@ def test_final_manifest_persistence_failure_downgrades_and_persists_human_state(
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
     assert manifest.reason == "final manifest write failed"
     assert persisted["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
+    terminal = _events(workflow)[-1]
+    assert terminal["kind"] == EventKind.TERMINAL.value
+    assert terminal["data"]["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
+
+
+def test_report_persistence_failure_downgrades_before_terminal_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    original_write_final = workflow.artifacts.write_final
+    failed = False
+
+    def fail_once_report(filename: str, content: str) -> Path:
+        nonlocal failed
+        if filename == "report.md" and not failed:
+            failed = True
+            raise OSError("final report write failed")
+        return original_write_final(filename, content)
+
+    monkeypatch.setattr(workflow.artifacts, "write_final", fail_once_report)
+
+    manifest = workflow.run()
+    persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
+    terminal_events = [event for event in _events(workflow) if event["kind"] == "terminal"]
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "final report write failed"
+    assert persisted["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
+    assert (workflow.artifacts.root / "report.md").exists()
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["data"]["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
