@@ -2,7 +2,13 @@ from pathlib import Path
 
 from repogent.domain import CheckResult, CheckStatus, ValidationReport
 from repogent.repository import RepositoryInspector, RepositoryInventory
-from repogent.symbols import PythonSymbolGraph, PythonSymbolGraphBuilder
+from repogent.symbols import (
+    PythonSymbolGraph,
+    PythonSymbolGraphBuilder,
+    SymbolEdge,
+    SymbolKind,
+    SymbolNode,
+)
 
 
 def build_fixture(
@@ -147,3 +153,104 @@ def test_ambiguity_uses_exact_score_and_concentration_thresholds() -> None:
     assert _ambiguity([location(0.35)])[0] is False
     assert _ambiguity([location(0.60), location(0.50)])[0] is False
     assert _ambiguity([location(0.59), location(0.50)])[0] is True
+
+
+def test_localizer_resolves_dotted_and_relative_import_bindings(tmp_path: Path) -> None:
+    from repogent.localization import PythonLocalizer
+
+    inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/auth.py": "def login():\n    return True\n",
+            "billing.py": "def login():\n    return False\n",
+            "pkg/tests/test_consumer.py": (
+                "from ..auth import login\n"
+                "import pkg.auth as auth_alias\n"
+                "login()\n"
+                "auth_alias.login()\n"
+            ),
+        },
+    )
+
+    report = PythonLocalizer().localize(inventory, graph, "change login")
+    signals = {
+        location.symbol_id: {signal.name for signal in location.signals}
+        for location in report.locations
+    }
+
+    assert {"import", "call", "test"} <= signals["pkg/auth.py:pkg.auth.login"]
+    assert not {"import", "call", "test"} & signals["billing.py:billing.login"]
+
+
+def test_localizer_processes_deep_scopes_and_edges_once() -> None:
+    from repogent.localization import _incoming_edges, _ResolutionCounters
+
+    depth = 32
+    module = SymbolNode(
+        symbol_id="tests/test_deep.py:tests.test_deep",
+        qualified_name="tests.test_deep",
+        name="test_deep",
+        kind=SymbolKind.MODULE,
+        path="tests/test_deep.py",
+        start_line=1,
+        end_line=depth + 1,
+    )
+    auth_module = SymbolNode(
+        symbol_id="pkg/auth.py:pkg.auth",
+        qualified_name="pkg.auth",
+        name="auth",
+        kind=SymbolKind.MODULE,
+        path="pkg/auth.py",
+        start_line=1,
+        end_line=2,
+    )
+    auth_login = SymbolNode(
+        symbol_id="pkg/auth.py:pkg.auth.login",
+        qualified_name="pkg.auth.login",
+        name="login",
+        kind=SymbolKind.FUNCTION,
+        path="pkg/auth.py",
+        start_line=1,
+        end_line=2,
+        parent_id=auth_module.symbol_id,
+    )
+    nested = [module]
+    contains = [
+        SymbolEdge(source=auth_module.symbol_id, target=auth_login.symbol_id, kind="contains")
+    ]
+    parent = module
+    for index in range(depth):
+        node = SymbolNode(
+            symbol_id=f"scope:{index}",
+            qualified_name=f"tests.test_deep.scope_{index}",
+            name=f"scope_{index}",
+            kind=SymbolKind.FUNCTION,
+            path="tests/test_deep.py",
+            start_line=index + 1,
+            end_line=index + 1,
+            parent_id=parent.symbol_id,
+        )
+        nested.append(node)
+        contains.append(SymbolEdge(source=parent.symbol_id, target=node.symbol_id, kind="contains"))
+        parent = node
+    imports = [
+        SymbolEdge(
+            source=module.symbol_id,
+            target=auth_login.qualified_name,
+            kind="imports",
+            binding="login",
+        )
+    ]
+    calls = [SymbolEdge(source=node.symbol_id, target="login", kind="calls") for node in nested[1:]]
+    counters = _ResolutionCounters()
+
+    incoming, _source_paths = _incoming_edges(
+        [*contains, *imports, *calls], [*nested, auth_module, auth_login], counters
+    )
+
+    assert counters.nodes == depth + 3
+    assert counters.contains_edges == len(contains)
+    assert counters.import_edges == len(imports)
+    assert counters.call_edges == len(calls)
+    assert len([edge for edge in incoming[auth_login.symbol_id] if edge.kind == "calls"]) == depth

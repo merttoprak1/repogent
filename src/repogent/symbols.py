@@ -35,6 +35,7 @@ class SymbolEdge(VersionedModel):
     target: str
     kind: Literal["contains", "imports", "calls"]
     alias: str | None = None
+    binding: str | None = None
 
 
 class PythonSymbolGraph(VersionedModel):
@@ -47,6 +48,7 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
     def __init__(self, path: str, text: str) -> None:
         self.path = path
         self.module_name = _module_name(path)
+        self.package_name = _package_name(path)
         module_id = f"{path}:{self.module_name}"
         self.nodes = [
             SymbolNode(
@@ -87,11 +89,12 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                     target=imported.name,
                     kind="imports",
                     alias=imported.asname,
+                    binding=imported.asname or imported.name.split(".", maxsplit=1)[0],
                 )
             )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        module = "." * node.level + (node.module or "")
+        module = _imported_module(self.package_name, node.level, node.module)
         for imported in node.names:
             target = f"{module}.{imported.name}" if module else imported.name
             self.edges.append(
@@ -100,6 +103,7 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                     target=target,
                     kind="imports",
                     alias=imported.asname,
+                    binding=imported.asname or imported.name,
                 )
             )
 
@@ -169,7 +173,13 @@ class PythonSymbolGraphBuilder:
             nodes=sorted(nodes, key=lambda node: (node.path, node.start_line, node.qualified_name)),
             edges=sorted(
                 edges,
-                key=lambda edge: (edge.source, edge.kind, edge.target, edge.alias or ""),
+                key=lambda edge: (
+                    edge.source,
+                    edge.kind,
+                    edge.target,
+                    edge.alias or "",
+                    edge.binding or "",
+                ),
             ),
             parse_errors=dict(sorted(parse_errors.items())),
         )
@@ -189,3 +199,17 @@ def _module_name(path: str) -> str:
     if parts[-1] == "__init__" and len(parts) > 1:
         parts.pop()
     return ".".join(parts)
+
+
+def _package_name(path: str) -> str:
+    parts = list(Path(path).with_suffix("").parts)
+    return ".".join(parts[:-1])
+
+
+def _imported_module(package: str, level: int, module: str | None) -> str:
+    if level == 0:
+        return module or ""
+    package_parts = package.split(".") if package else []
+    base = package_parts[: max(0, len(package_parts) - level + 1)]
+    module_parts = module.split(".") if module else []
+    return ".".join((*base, *module_parts))

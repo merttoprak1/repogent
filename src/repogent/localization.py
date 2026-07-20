@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import Field
 
 from repogent.domain import ContextSnippet, ValidationReport, VersionedModel
 from repogent.repository import TOKEN, FileRecord, RepositoryInventory
-from repogent.symbols import PythonSymbolGraph, SymbolEdge, SymbolNode
+from repogent.symbols import PythonSymbolGraph, SymbolEdge, SymbolKind, SymbolNode
 
 SignalName = Literal["lexical", "symbol", "import", "call", "test", "failure"]
 
@@ -196,35 +197,77 @@ def _matches(query_tokens: list[str], document_tokens: list[str]) -> list[str]:
 
 
 def _incoming_edges(
-    edges: list[SymbolEdge], nodes: list[SymbolNode]
+    edges: list[SymbolEdge],
+    nodes: list[SymbolNode],
+    counters: _ResolutionCounters | None = None,
 ) -> tuple[dict[str, list[SymbolEdge]], dict[str, str]]:
+    counters = counters or _ResolutionCounters()
     nodes_by_id = {node.symbol_id: node for node in nodes}
     qualified_nodes = _unique_qualified_nodes(nodes)
-    parent_ids = {node.symbol_id: node.parent_id for node in nodes}
-    bindings: dict[str, dict[str, str]] = defaultdict(dict)
+    children: dict[str, list[str]] = defaultdict(list)
+    imports_by_source: dict[str, list[SymbolEdge]] = defaultdict(list)
+    calls_by_source: dict[str, list[SymbolEdge]] = defaultdict(list)
+    for edge in edges:
+        if edge.kind == "contains":
+            if edge.source in nodes_by_id and edge.target in nodes_by_id:
+                children[edge.source].append(edge.target)
+                counters.contains_edges += 1
+        elif edge.kind == "imports" and edge.source in nodes_by_id:
+            imports_by_source[edge.source].append(edge)
+        elif edge.kind == "calls" and edge.source in nodes_by_id:
+            calls_by_source[edge.source].append(edge)
+
     incoming: dict[str, list[SymbolEdge]] = defaultdict(list)
-    for edge in edges:
-        if edge.kind != "imports" or edge.source not in nodes_by_id:
-            continue
-        target = qualified_nodes.get(edge.target)
-        if target is None:
-            continue
-        incoming[target.symbol_id].append(edge)
-        local_name = edge.alias or edge.target.rsplit(".", maxsplit=1)[-1]
-        bindings[edge.source][local_name] = target.qualified_name
-    for edge in edges:
-        if edge.kind != "calls" or edge.source not in nodes_by_id:
-            continue
-        target = _resolve_call_target(
-            edge.target,
-            edge.source,
-            bindings,
-            parent_ids,
-            nodes_by_id,
-            qualified_nodes,
-        )
-        if target is not None:
-            incoming[target.symbol_id].append(edge)
+    binding_stacks: dict[str, list[str]] = defaultdict(list)
+    visited: set[str] = set()
+
+    def walk(root_id: str, module_name: str | None) -> None:
+        work: list[tuple[bool, str, str | None, list[str]]] = [
+            (False, root_id, module_name, [])
+        ]
+        while work:
+            exiting, node_id, current_module, pushed_bindings = work.pop()
+            if exiting:
+                for binding in reversed(pushed_bindings):
+                    binding_stacks[binding].pop()
+                continue
+            if node_id in visited:
+                continue
+            node = nodes_by_id[node_id]
+            visited.add(node_id)
+            counters.nodes += 1
+            if node.kind is SymbolKind.MODULE:
+                current_module = node.qualified_name
+
+            pushed_bindings = []
+            for edge in imports_by_source.get(node_id, []):
+                counters.import_edges += 1
+                target = qualified_nodes.get(edge.target)
+                if target is None:
+                    continue
+                incoming[target.symbol_id].append(edge)
+                if edge.binding is not None:
+                    binding_stacks[edge.binding].append(target.qualified_name)
+                    pushed_bindings.append(edge.binding)
+            for edge in calls_by_source.get(node_id, []):
+                counters.call_edges += 1
+                target = _resolve_scoped_call(
+                    edge.target, binding_stacks, current_module, qualified_nodes
+                )
+                if target is not None:
+                    incoming[target.symbol_id].append(edge)
+
+            work.append((True, node_id, current_module, pushed_bindings))
+            for child_id in reversed(children.get(node_id, [])):
+                work.append((False, child_id, current_module, []))
+
+    for node in nodes:
+        if node.parent_id is None:
+            walk(node.symbol_id, node.qualified_name if node.kind is SymbolKind.MODULE else None)
+    for node in nodes:
+        if node.symbol_id not in visited:
+            walk(node.symbol_id, node.qualified_name if node.kind is SymbolKind.MODULE else None)
+
     return incoming, {symbol_id: node.path for symbol_id, node in nodes_by_id.items()}
 
 
@@ -235,39 +278,29 @@ def _unique_qualified_nodes(nodes: list[SymbolNode]) -> dict[str, SymbolNode]:
     return {name: matches[0] for name, matches in grouped.items() if len(matches) == 1}
 
 
-def _resolve_call_target(
+def _resolve_scoped_call(
     target: str,
-    source_id: str,
-    bindings: dict[str, dict[str, str]],
-    parent_ids: dict[str, str | None],
-    nodes_by_id: dict[str, SymbolNode],
+    binding_stacks: dict[str, list[str]],
+    module_name: str | None,
     qualified_nodes: dict[str, SymbolNode],
 ) -> SymbolNode | None:
     first, *remainder = target.split(".")
-    scope_id: str | None = source_id
-    while scope_id is not None:
-        bound_target = bindings.get(scope_id, {}).get(first)
-        if bound_target is not None:
-            candidate = ".".join((bound_target, *remainder))
-            return qualified_nodes.get(candidate)
-        scope_id = parent_ids.get(scope_id)
+    bound_targets = binding_stacks.get(first)
+    if bound_targets:
+        candidate = ".".join((bound_targets[-1], *remainder))
+        return qualified_nodes.get(candidate)
     direct = qualified_nodes.get(target)
     if direct is not None:
         return direct
-    module = _module_for(source_id, parent_ids, nodes_by_id)
-    return qualified_nodes.get(f"{module.qualified_name}.{target}") if module else None
+    return qualified_nodes.get(f"{module_name}.{target}") if module_name else None
 
 
-def _module_for(
-    source_id: str, parent_ids: dict[str, str | None], nodes_by_id: dict[str, SymbolNode]
-) -> SymbolNode | None:
-    scope_id = source_id
-    while parent_ids.get(scope_id) is not None:
-        parent_id = parent_ids[scope_id]
-        if parent_id is None:
-            break
-        scope_id = parent_id
-    return nodes_by_id.get(scope_id)
+@dataclass
+class _ResolutionCounters:
+    nodes: int = 0
+    contains_edges: int = 0
+    import_edges: int = 0
+    call_edges: int = 0
 
 
 def _failure_tokens(failure_evidence: ValidationReport | None) -> set[str]:

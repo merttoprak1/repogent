@@ -72,6 +72,7 @@ def test_builder_adds_module_nodes_and_top_level_containment(tmp_path: Path) -> 
 
 def test_builder_preserves_import_aliases(tmp_path: Path) -> None:
     (tmp_path / "aliases.py").write_text(
+        "import package.submodule\n"
         "import package as package_alias\n"
         "from module import name as name_alias\n"
     )
@@ -79,7 +80,25 @@ def test_builder_preserves_import_aliases(tmp_path: Path) -> None:
     graph = PythonSymbolGraphBuilder().build(RepositoryInspector().inspect(tmp_path))
     imports = [edge for edge in graph.edges if edge.kind == "imports"]
 
-    assert [(edge.target, edge.alias) for edge in imports] == [
-        ("module.name", "name_alias"),
-        ("package", "package_alias"),
+    assert [(edge.target, edge.alias, edge.binding) for edge in imports] == [
+        ("module.name", "name_alias", "name_alias"),
+        ("package", "package_alias", "package_alias"),
+        ("package.submodule", None, "package"),
     ]
+
+
+def test_builder_normalizes_relative_import_targets(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "auth.py").write_text("def login():\n    return True\n")
+    (package / "consumer.py").write_text("from .auth import login\n")
+
+    graph = PythonSymbolGraphBuilder().build(RepositoryInspector().inspect(tmp_path))
+    relative_import = next(
+        edge for edge in graph.edges if edge.source == "pkg/consumer.py:pkg.consumer"
+    )
+
+    assert relative_import.target == "pkg.auth.login"
+    assert relative_import.alias is None
+    assert relative_import.binding == "login"
