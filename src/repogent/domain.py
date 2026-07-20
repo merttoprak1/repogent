@@ -55,6 +55,16 @@ class CheckStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class EventKind(StrEnum):
+    STAGE = "stage"
+    MODEL = "model"
+    CANDIDATE = "candidate"
+    VALIDATION = "validation"
+    APPROVAL = "approval"
+    WARNING = "warning"
+    TERMINAL = "terminal"
+
+
 class ApprovalKind(StrEnum):
     REQUIREMENTS = "requirements"
     PLAN = "plan"
@@ -121,6 +131,10 @@ class ContextSnippet(VersionedModel):
 class PatchProposal(VersionedModel):
     summary: str = Field(min_length=1)
     diff: str = Field(min_length=1)
+    acceptance_criteria_addressed: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    focused_tests: list[str] = Field(default_factory=list)
 
     @field_validator("diff")
     @classmethod
@@ -139,6 +153,7 @@ class CheckResult(VersionedModel):
     stderr: str = ""
     duration_seconds: float = Field(default=0, ge=0)
     reason: str | None = None
+    required: bool = True
 
 
 class ValidationReport(VersionedModel):
@@ -148,7 +163,7 @@ class ValidationReport(VersionedModel):
     @property
     def passed(self) -> bool:
         return bool(self.checks) and all(
-            check.status in {CheckStatus.PASSED, CheckStatus.SKIPPED} for check in self.checks
+            check.status is CheckStatus.PASSED for check in self.checks if check.required
         )
 
 
@@ -183,6 +198,54 @@ class ProviderUsage(VersionedModel):
     latency_seconds: float = Field(default=0, ge=0)
 
 
+class RunEvent(VersionedModel):
+    run_id: str = Field(min_length=1)
+    sequence: int = Field(ge=1)
+    kind: EventKind
+    stage: str | None = None
+    message: str = Field(min_length=1)
+    data: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class CandidateRecord(VersionedModel):
+    candidate_id: str = Field(pattern=r"^candidate-[1-3]$")
+    proposal: PatchProposal
+    parent_candidate_id: str | None = None
+    generation_reason: str = Field(min_length=1)
+    diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    usage: ProviderUsage
+
+
+class CandidateEvidence(VersionedModel):
+    candidate_id: str
+    validation: ValidationReport
+    acceptance_criteria_coverage: float = Field(ge=0, le=1)
+    risk_level: RiskLevel
+    changed_files: int = Field(ge=0)
+    changed_lines: int = Field(ge=0)
+    duration_seconds: float = Field(ge=0)
+    required_failures: list[str] = Field(default_factory=list)
+    skipped_checks: list[str] = Field(default_factory=list)
+    restored_to_baseline: bool
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def eligible(self) -> bool:
+        return (
+            not self.required_failures
+            and self.restored_to_baseline
+            and self.validation.passed
+        )
+
+
+class CandidateSelection(VersionedModel):
+    selected_candidate_id: str | None
+    eligible_candidate_ids: list[str]
+    ambiguous: bool = False
+    reason: str = Field(min_length=1)
+
+
 class Budget(VersionedModel):
     max_repairs: int = Field(default=2, ge=0, le=2)
     max_tokens: int = Field(default=200_000, gt=0)
@@ -201,3 +264,8 @@ class RunManifest(VersionedModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     reason: str | None = None
+    repository_fingerprint: str | None = None
+    configuration_fingerprint: str | None = None
+    candidate_ids: list[str] = Field(default_factory=list)
+    selected_candidate_id: str | None = None
+    events_file: str | None = None

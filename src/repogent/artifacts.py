@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from repogent.events import JsonlEventStore
 from repogent.sanitization import redact_text, sanitize_data
 
 
@@ -75,6 +76,9 @@ class ArtifactStore:
         )
         self._atomic_write(path, content)
         return path
+
+    def event_store(self) -> JsonlEventStore:
+        return JsonlEventStore(self._path_in_root("events.jsonl"), self.secrets)
 
     def write_final(self, filename: str, content: str) -> Path:
         if Path(filename).name != filename or not filename.endswith((".md", ".json")):

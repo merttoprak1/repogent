@@ -5,11 +5,13 @@ from pydantic import ValidationError
 
 from repogent.domain import (
     Budget,
+    CandidateEvidence,
     CheckResult,
     CheckStatus,
     ImplementationPlan,
     PlanStep,
     RequirementsSpec,
+    RiskLevel,
     RunManifest,
     RunStage,
     RunStatus,
@@ -31,14 +33,44 @@ def test_plan_rejects_unknown_dependency() -> None:
         )
 
 
-def test_validation_report_passes_only_when_every_check_passes_or_skips() -> None:
+def test_validation_report_passes_when_required_checks_pass_and_optional_checks_do_not() -> None:
     report = ValidationReport(
         checks=[
             CheckResult(name="pytest", argv=["python", "-m", "pytest"], status=CheckStatus.PASSED),
-            CheckResult(name="ruff", argv=["ruff", "check", "."], status=CheckStatus.SKIPPED),
+            CheckResult(
+                name="ruff",
+                argv=["ruff", "check", "."],
+                status=CheckStatus.SKIPPED,
+                required=False,
+            ),
         ]
     )
     assert report.passed is True
+
+
+def test_candidate_evidence_with_failed_required_check_is_ineligible() -> None:
+    validation = ValidationReport(
+        checks=[
+            CheckResult(
+                name="pytest",
+                argv=["python", "-m", "pytest"],
+                status=CheckStatus.FAILED,
+            )
+        ]
+    )
+
+    evidence = CandidateEvidence(
+        candidate_id="candidate-1",
+        validation=validation,
+        acceptance_criteria_coverage=1,
+        risk_level=RiskLevel.LOW,
+        changed_files=1,
+        changed_lines=3,
+        duration_seconds=1.5,
+        restored_to_baseline=True,
+    )
+
+    assert evidence.eligible is False
 
 
 def test_budget_defaults_to_two_repairs_and_positive_limits() -> None:
@@ -52,3 +84,19 @@ def test_manifest_starts_in_created_state() -> None:
     manifest = RunManifest(run_id="run-123", request="Add a health route")
     assert manifest.status is RunStatus.RUNNING
     assert manifest.stage is RunStage.CREATED
+
+
+def test_manifest_phase_two_fields_round_trip_through_json() -> None:
+    manifest = RunManifest(
+        run_id="run-123",
+        request="Add a health route",
+        repository_fingerprint="a" * 64,
+        configuration_fingerprint="b" * 64,
+        candidate_ids=["candidate-1", "candidate-2"],
+        selected_candidate_id="candidate-1",
+        events_file="events.jsonl",
+    )
+
+    restored = RunManifest.model_validate_json(manifest.model_dump_json())
+
+    assert restored == manifest
