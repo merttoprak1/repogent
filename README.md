@@ -59,7 +59,7 @@ OPENAI_API_KEY=... repogent run --repository /path/to/fastapi-repo \
   --output-dir ./.repogent/runs
 ```
 
-The OpenAI provider uses structured outputs. Docker remains the default if `--executor` is omitted. If Docker or the fixed validator image is unavailable, checks are recorded as skipped rather than silently switching to local execution; select `--executor local` only when you accept the weaker boundary.
+The OpenAI provider uses structured outputs. Docker remains the default if `--executor` is omitted. If Docker or the fixed validator image is unavailable, `DockerExecutor` reports unavailable execution as skipped rather than silently switching to local execution; select `--executor local` only when you accept the weaker boundary. `ValidationPipeline` treats an unavailable required check as failed—`pytest` is required when the repository has tests—while optional checks are skipped. An unavailable required check can therefore lead to an approved repair attempt or `human_intervention_required`.
 
 ## Approvals and mutation
 
