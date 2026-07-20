@@ -232,6 +232,20 @@ def test_candidate_selector_returns_ambiguous_for_equal_ranked_candidates() -> N
     assert selection.eligible_candidate_ids == ["candidate-1", "candidate-2"]
 
 
+def test_candidate_selector_detects_equal_top_rank_before_output_cap() -> None:
+    records = [candidate("candidate-1", 1, 2), candidate("candidate-2", 1, 3)]
+    evidence = [
+        candidate_evidence(candidate_id="candidate-1"),
+        candidate_evidence(candidate_id="candidate-2"),
+    ]
+
+    selection = CandidateSelector(max_candidates=1).select(records, evidence)
+
+    assert selection.selected_candidate_id is None
+    assert selection.ambiguous is True
+    assert selection.eligible_candidate_ids == ["candidate-2"]
+
+
 def test_candidate_selector_limits_accepted_candidate_ids_to_three() -> None:
     records = [candidate("candidate-1", 1, 2), candidate("candidate-2", 1, 3)]
     evidence = [

@@ -89,17 +89,17 @@ class CandidateSelector:
             key=lambda pair: (_rank(pair[0], pair[1]), pair[0].candidate_id),
             reverse=True,
         )
-        accepted = ranked[: self.max_candidates]
-        eligible_ids = sorted(record.candidate_id for record, _ in accepted)
 
-        if not accepted:
+        if not ranked:
             return CandidateSelection(
                 selected_candidate_id=None,
                 eligible_candidate_ids=[],
                 reason="no candidate passed required validation",
             )
 
-        if len(accepted) > 1 and _rank(*accepted[0]) == _rank(*accepted[1]):
+        accepted = ranked[: self.max_candidates]
+        eligible_ids = sorted(record.candidate_id for record, _ in accepted)
+        if len(ranked) > 1 and _rank(*ranked[0]) == _rank(*ranked[1]):
             return CandidateSelection(
                 selected_candidate_id=None,
                 eligible_candidate_ids=eligible_ids,
