@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from openai import OpenAIError
 
 from repogent.agents import RoleSet
 from repogent.approvals import CliApprover
@@ -12,7 +13,7 @@ from repogent.artifacts import ArtifactStore, ArtifactStoreError
 from repogent.domain import Budget, RunManifest, RunStatus
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
 from repogent.patching import PatchApplier, PatchPolicy
-from repogent.providers import OpenAIProvider, ScriptedProvider
+from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
 from repogent.repository import LexicalRetriever, RepositoryInspector
 from repogent.validation import ValidationPipeline
 from repogent.workflow import Workflow
@@ -51,7 +52,7 @@ def run_command(
     model: Annotated[str, typer.Option("--model")] = "gpt-5.6-sol",
     script: Annotated[Path | None, typer.Option("--script", exists=True, dir_okay=False)] = None,
     executor: Annotated[str, typer.Option("--executor")] = "docker",
-    output_dir: Annotated[Path, typer.Option("--output-dir")] = Path(".repogent/runs"),
+    output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
 ) -> None:
     """Run the approval-gated workflow and retain evidence outside the repository."""
     if provider not in {"openai", "scripted"}:
@@ -59,18 +60,32 @@ def run_command(
     if provider == "scripted" and script is None:
         typer.echo("--script is required for scripted provider")
         raise typer.Exit(2)
+    if provider == "openai" and script is not None:
+        typer.echo("--script is only supported with --provider scripted")
+        raise typer.Exit(2)
     if executor not in {"docker", "local"}:
         raise typer.BadParameter("executor must be docker or local", param_hint="--executor")
 
+    evidence_dir = output_dir or repository.parent / ".repogent" / "runs"
     try:
-        store = ArtifactStore.create(output_dir, repository, request)
+        store = ArtifactStore.create(evidence_dir, repository, request)
     except ArtifactStoreError as error:
         typer.echo(str(error))
         raise typer.Exit(2) from error
 
-    model_provider = (
-        ScriptedProvider.from_json(str(script)) if script else OpenAIProvider(model=model)
-    )
+    model_provider: ModelProvider
+    if provider == "scripted":
+        try:
+            model_provider = ScriptedProvider.from_json(str(script))
+        except (OSError, UnicodeError, json.JSONDecodeError, ProviderError) as error:
+            typer.echo(f"could not load scripted provider: {error}")
+            raise typer.Exit(2) from error
+    else:
+        try:
+            model_provider = OpenAIProvider(model=model)
+        except OpenAIError as error:
+            typer.echo(f"could not load OpenAI provider: {error}")
+            raise typer.Exit(2) from error
     policy = ValidationPolicy()
     command_executor = (
         DockerExecutor()
