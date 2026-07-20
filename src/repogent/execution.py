@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import secrets
 import shutil
+import signal
 import subprocess  # nosec B404
 import sys
 import time
 from collections import deque
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import BinaryIO, Protocol
 
 from repogent.domain import CheckResult, CheckStatus
@@ -22,25 +25,45 @@ class CommandPolicyError(ValueError):
 
 DEFAULT_TIMEOUT_SECONDS = 300
 _OUTPUT_READ_BYTES = 8_192
+_OUTPUT_DRAIN_TIMEOUT_SECONDS = 0.5
+_PROCESS_TERMINATION_TIMEOUT_SECONDS = 1
+_DOCKER_CONTROL_TIMEOUT_SECONDS = 5
 
 
-def _bounded_output(stream: BinaryIO, max_output_chars: int) -> str:
-    chunks: deque[bytes] = deque()
-    retained = 0
-    while chunk := stream.read(_OUTPUT_READ_BYTES):
-        if len(chunk) > max_output_chars:
-            chunk = chunk[-max_output_chars:]
-        chunks.append(chunk)
-        retained += len(chunk)
-        while retained > max_output_chars:
-            discarded = chunks.popleft()
-            excess = retained - max_output_chars
-            if len(discarded) > excess:
-                chunks.appendleft(discarded[excess:])
-                retained -= excess
-            else:
-                retained -= len(discarded)
-    return b"".join(chunks).decode(errors="replace")
+class _BoundedOutput:
+    def __init__(self, max_output_chars: int) -> None:
+        self._max_output_chars = max_output_chars
+        self._chunks: deque[bytes] = deque()
+        self._retained = 0
+        self._lock = Lock()
+
+    def collect(self, stream: BinaryIO) -> None:
+        try:
+            while chunk := stream.read(_OUTPUT_READ_BYTES):
+                self._append(chunk)
+        except (OSError, ValueError):
+            # A bounded caller may return while a descendant still holds the pipe.
+            # If another owner closes the stream, retain everything read so far.
+            return
+
+    def _append(self, chunk: bytes) -> None:
+        if len(chunk) > self._max_output_chars:
+            chunk = chunk[-self._max_output_chars :]
+        with self._lock:
+            self._chunks.append(chunk)
+            self._retained += len(chunk)
+            while self._retained > self._max_output_chars:
+                discarded = self._chunks.popleft()
+                excess = self._retained - self._max_output_chars
+                if len(discarded) > excess:
+                    self._chunks.appendleft(discarded[excess:])
+                    self._retained -= excess
+                else:
+                    self._retained -= len(discarded)
+
+    def text(self) -> str:
+        with self._lock:
+            return b"".join(self._chunks).decode(errors="replace")
 
 
 @dataclass(frozen=True)
@@ -58,7 +81,9 @@ def _run_with_bounded_output(
     max_output_chars: int,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    terminate_process_group: bool = False,
 ) -> _ProcessResult:
+    use_process_group = terminate_process_group and os.name == "posix"
     process = subprocess.Popen(  # noqa: S603  # nosec B603
         argv,
         cwd=cwd,
@@ -66,36 +91,44 @@ def _run_with_bounded_output(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,
+        start_new_session=use_process_group,
     )
     if process.stdout is None or process.stderr is None:
         process.kill()
         raise RuntimeError("subprocess output pipes are unavailable")
     stdout = process.stdout
     stderr = process.stderr
-    output: dict[str, str] = {}
-
-    def collect_output(name: str, stream: BinaryIO) -> None:
-        output[name] = _bounded_output(stream, max_output_chars)
-
-    stdout_reader = Thread(target=collect_output, args=("stdout", stdout))
-    stderr_reader = Thread(target=collect_output, args=("stderr", stderr))
+    stdout_output = _BoundedOutput(max_output_chars)
+    stderr_output = _BoundedOutput(max_output_chars)
+    stdout_reader = Thread(target=stdout_output.collect, args=(stdout,), daemon=True)
+    stderr_reader = Thread(target=stderr_output.collect, args=(stderr,), daemon=True)
     stdout_reader.start()
     stderr_reader.start()
     try:
         exit_code = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+        if use_process_group:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                process.kill()
+        else:
+            process.kill()
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_PROCESS_TERMINATION_TIMEOUT_SECONDS)
         timed_out = True
         exit_code = None
     else:
         timed_out = False
-    stdout_reader.join()
-    stderr_reader.join()
+    drain_deadline = time.monotonic() + _OUTPUT_DRAIN_TIMEOUT_SECONDS
+    for reader in (stdout_reader, stderr_reader):
+        reader.join(timeout=max(0.0, drain_deadline - time.monotonic()))
     return _ProcessResult(
         exit_code=exit_code,
-        stdout=output["stdout"],
-        stderr=output["stderr"],
+        stdout=stdout_output.text(),
+        stderr=stderr_output.text(),
         timed_out=timed_out,
     )
 
@@ -134,15 +167,12 @@ class _RestrictedExecutor:
         self,
         *,
         allowed: dict[str, tuple[str, ...]] | None,
-        timeout_limits: dict[str, int] | None,
         max_output_chars: int,
     ) -> None:
         defaults = ValidationPolicy().commands(Path.cwd())
-        self.allowed = allowed or {command.name: command.argv for command in defaults}
-        default_timeout_limits = {command.name: command.timeout_seconds for command in defaults}
-        self.timeout_limits = timeout_limits or {
-            name: default_timeout_limits.get(name, DEFAULT_TIMEOUT_SECONDS) for name in self.allowed
-        }
+        self.allowed = (
+            {command.name: command.argv for command in defaults} if allowed is None else allowed
+        )
         if max_output_chars <= 0:
             raise ValueError("max_output_chars must be positive")
         self.max_output_chars = max_output_chars
@@ -154,12 +184,10 @@ class _RestrictedExecutor:
             raise CommandPolicyError(f"command timeout is not approved: {command.name}")
 
     def _has_approved_timeout(self, command: CommandSpec) -> bool:
-        timeout_limit = self.timeout_limits.get(command.name)
         return not (
             type(command.timeout_seconds) is not int
             or command.timeout_seconds <= 0
-            or timeout_limit is None
-            or command.timeout_seconds > timeout_limit
+            or command.timeout_seconds > DEFAULT_TIMEOUT_SECONDS
         )
 
     def _is_allowed(self, command: CommandSpec) -> bool:
@@ -174,12 +202,10 @@ class LocalExecutor(_RestrictedExecutor):
         self,
         *,
         allowed: dict[str, tuple[str, ...]] | None = None,
-        timeout_limits: dict[str, int] | None = None,
         max_output_chars: int = 100_000,
     ) -> None:
         super().__init__(
             allowed=allowed,
-            timeout_limits=timeout_limits,
             max_output_chars=max_output_chars,
         )
 
@@ -208,6 +234,7 @@ class LocalExecutor(_RestrictedExecutor):
             env=environment,
             timeout_seconds=command.timeout_seconds,
             max_output_chars=self.max_output_chars,
+            terminate_process_group=True,
         )
         if result.timed_out:
             return CheckResult(
@@ -236,36 +263,50 @@ class DockerExecutor(_RestrictedExecutor):
         *,
         image: str = "repogent-validator:py311",
         allowed: dict[str, tuple[str, ...]] | None = None,
-        timeout_limits: dict[str, int] | None = None,
         max_output_chars: int = 100_000,
     ) -> None:
         self.image = image
         self.docker = shutil.which("docker")
         super().__init__(
             allowed=allowed,
-            timeout_limits=timeout_limits,
             max_output_chars=max_output_chars,
         )
 
     def available(self, command: CommandSpec) -> bool:
         if not self._is_allowed(command):
             return False
-        if self.docker is None:
-            return False
+        inspection = self._inspect_image()
+        return (
+            inspection is not None
+            and not inspection.timed_out
+            and inspection.exit_code == 0
+        )
+
+    def _inspect_image(self) -> _ProcessResult | None:
+        docker = self.docker
+        if docker is None:
+            return None
         try:
-            result = subprocess.run(  # noqa: S603  # nosec B603
-                [self.docker, "image", "inspect", self.image],
-                capture_output=True,
-                check=False,
+            return _run_with_bounded_output(
+                [docker, "image", "inspect", self.image],
+                timeout_seconds=_DOCKER_CONTROL_TIMEOUT_SECONDS,
+                max_output_chars=self.max_output_chars,
             )
         except OSError:
-            return False
-        return result.returncode == 0
+            return None
 
     def run(self, command: CommandSpec, root: Path) -> CheckResult:
         self._validate_command(command)
         docker = self.docker
-        if docker is None or not self.available(command):
+        inspection = self._inspect_image()
+        if inspection is not None and inspection.timed_out:
+            return CheckResult(
+                name=command.name,
+                argv=list(command.argv),
+                status=CheckStatus.SKIPPED,
+                reason="docker image inspection timed out",
+            )
+        if docker is None or inspection is None or inspection.exit_code != 0:
             return CheckResult(
                 name=command.name,
                 argv=list(command.argv),
@@ -274,10 +315,13 @@ class DockerExecutor(_RestrictedExecutor):
             )
         repository = root.resolve(strict=True)
         tmpfs = f"{Path(os.sep, 'tmp')}:rw,noexec,nosuid,size=256m"
+        container_name = f"repogent-validator-{secrets.token_hex(16)}"
         argv = [
             docker,
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--pull=never",
             "--network",
             "none",
@@ -308,6 +352,12 @@ class DockerExecutor(_RestrictedExecutor):
             max_output_chars=self.max_output_chars,
         )
         if result.timed_out:
+            with suppress(OSError):
+                _run_with_bounded_output(
+                    [docker, "rm", "--force", container_name],
+                    timeout_seconds=_DOCKER_CONTROL_TIMEOUT_SECONDS,
+                    max_output_chars=self.max_output_chars,
+                )
             return CheckResult(
                 name=command.name,
                 argv=list(command.argv),

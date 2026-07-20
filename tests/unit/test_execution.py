@@ -1,9 +1,13 @@
+import inspect
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from repogent import execution as execution_module
 from repogent.domain import CheckStatus
 from repogent.execution import (
     CommandPolicyError,
@@ -67,6 +71,37 @@ def test_local_executor_returns_timeout_result(tmp_path: Path) -> None:
     assert result.reason == "command timed out"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process-group cleanup is POSIX-specific")
+def test_local_timeout_terminates_descendants_that_inherit_output_pipes(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "descendant-survived"
+    descendant_code = (
+        "import time; from pathlib import Path; "
+        f"time.sleep(3); Path({str(marker)!r}).write_text('leaked')"
+    )
+    parent_code = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}]); "
+        "print('before', flush=True); time.sleep(30)"
+    )
+    command = CommandSpec(
+        name="python",
+        argv=("python", "-c", parent_code),
+        required=True,
+        timeout_seconds=1,
+    )
+
+    started = time.monotonic()
+    result = LocalExecutor(allowed={"python": command.argv}).run(command, tmp_path)
+    elapsed = time.monotonic() - started
+    time.sleep(2.25)
+
+    assert result.status is CheckStatus.TIMED_OUT
+    assert elapsed < 2.5
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("timeout_seconds", [0, -1, 301])
 def test_local_executor_rejects_invalid_or_enlarged_timeout(
     tmp_path: Path, timeout_seconds: int
@@ -99,6 +134,11 @@ def test_executors_report_an_unapproved_timeout_as_unavailable(
 
     assert not LocalExecutor(allowed={"python": command.argv}).available(command)
     assert not DockerExecutor(allowed={"python": command.argv}).available(command)
+
+
+def test_executor_timeout_ceiling_cannot_be_configured_above_300_seconds() -> None:
+    assert "timeout_limits" not in inspect.signature(LocalExecutor).parameters
+    assert "timeout_limits" not in inspect.signature(DockerExecutor).parameters
 
 
 def test_local_executor_boundedly_collects_stdout_and_stderr(
@@ -186,11 +226,11 @@ def test_docker_executor_skips_missing_image_without_running_container(
     monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
     docker_calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], **_: object) -> object:
+    def fake_bounded_run(argv: list[str], **_: object) -> object:
         docker_calls.append(argv)
-        return type("Result", (), {"returncode": 1})()
+        return execution_module._ProcessResult(1, "", "", False)
 
-    monkeypatch.setattr("repogent.execution.subprocess.run", fake_run)
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
     command = CommandSpec(
         name="python",
         argv=("python", "-c", "print('ok')"),
@@ -203,6 +243,83 @@ def test_docker_executor_skips_missing_image_without_running_container(
     assert docker_calls == [
         ["/usr/local/bin/docker", "image", "inspect", "repogent-validator:py311"]
     ]
+
+
+def test_docker_executor_skips_when_image_preflight_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+    monkeypatch.setattr(
+        "repogent.execution.subprocess.run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    def fake_bounded_run(*_args: object, **_kwargs: object) -> object:
+        return execution_module._ProcessResult(None, "", "", True)
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
+    command = CommandSpec(
+        name="python",
+        argv=("python", "-c", "print('ok')"),
+        required=True,
+    )
+
+    result = DockerExecutor(allowed={"python": command.argv}).run(command, tmp_path)
+
+    assert result.status is CheckStatus.SKIPPED
+    assert result.reason == "docker image inspection timed out"
+
+
+def test_docker_timeout_force_removes_the_internal_container_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+    monkeypatch.setattr(
+        "repogent.execution.subprocess.run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+    calls: list[tuple[list[str], int]] = []
+
+    def fake_bounded_run(
+        argv: list[str], *, timeout_seconds: int, **_kwargs: object
+    ) -> object:
+        calls.append((argv, timeout_seconds))
+        if "run" in argv:
+            return execution_module._ProcessResult(None, "partial", "", True)
+        return execution_module._ProcessResult(0, "", "", False)
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
+    command = CommandSpec(
+        name="python",
+        argv=("python", "-c", "print('ok')"),
+        required=True,
+        timeout_seconds=10,
+    )
+
+    result = DockerExecutor(allowed={"python": command.argv}).run(command, tmp_path)
+
+    assert result.status is CheckStatus.TIMED_OUT
+    assert len(calls) == 3
+    inspect_argv, inspect_timeout = calls[0]
+    run_argv, run_timeout = calls[1]
+    cleanup_argv, cleanup_timeout = calls[2]
+    assert inspect_argv == [
+        "/usr/local/bin/docker",
+        "image",
+        "inspect",
+        "repogent-validator:py311",
+    ]
+    container_name = run_argv[run_argv.index("--name") + 1]
+    assert container_name.startswith("repogent-validator-")
+    assert cleanup_argv == [
+        "/usr/local/bin/docker",
+        "rm",
+        "--force",
+        container_name,
+    ]
+    assert inspect_timeout == 5
+    assert run_timeout == 10
+    assert cleanup_timeout == 5
 
 
 def test_docker_executor_never_pulls_an_image(
