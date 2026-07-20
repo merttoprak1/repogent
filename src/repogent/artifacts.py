@@ -18,6 +18,8 @@ SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"(?i)(password|token|secret)\s*[=:]\s*[^\s]+"),
 )
+SAFE_STEM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+SAFE_SUFFIX = re.compile(r"\.[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def redact(text: str, explicit_secrets: list[str]) -> str:
@@ -49,6 +51,8 @@ class ArtifactStore:
         base = base_dir.resolve()
         if base == target or target in base.parents:
             raise ArtifactStoreError("evidence directory must be outside target repository")
+        if run_id is not None and not _is_plain_component(run_id, SAFE_STEM):
+            raise ArtifactStoreError("run ID must be a plain path component")
         identifier = run_id or f"run-{uuid.uuid4().hex[:12]}"
         root = base / identifier
         root.mkdir(parents=True, exist_ok=False)
@@ -58,21 +62,33 @@ class ArtifactStore:
         return self.write_text(name, model.model_dump_json(indent=2), suffix=".json")
 
     def write_text(self, name: str, text: str, *, suffix: str = ".txt") -> Path:
+        if not _is_plain_component(name, SAFE_STEM):
+            raise ArtifactStoreError("artifact name must be a plain safe stem")
+        if not _is_plain_component(suffix, SAFE_SUFFIX):
+            raise ArtifactStoreError("suffix must be a plain suffix beginning with one dot")
         index = len(list(self.root.glob(f"{name}-*{suffix}"))) + 1
-        path = self.root / f"{name}-{index:03d}{suffix}"
+        path = self._path_in_root(f"{name}-{index:03d}{suffix}")
         self._atomic_write(path, redact(text, self.secrets))
         return path
 
     def update_manifest(self, manifest: BaseModel) -> Path:
-        path = self.root / "run.json"
-        self._atomic_write(path, manifest.model_dump_json(indent=2))
+        path = self._path_in_root("run.json")
+        self._atomic_write(path, redact(manifest.model_dump_json(indent=2), self.secrets))
         return path
 
     def write_final(self, filename: str, content: str) -> Path:
         if Path(filename).name != filename or not filename.endswith((".md", ".json")):
             raise ArtifactStoreError("final artifact must be a plain Markdown or JSON filename")
-        path = self.root / filename
+        path = self._path_in_root(filename)
         self._atomic_write(path, redact(content, self.secrets))
+        return path
+
+    def _path_in_root(self, filename: str) -> Path:
+        path = self.root / filename
+        resolved_root = self.root.resolve(strict=True)
+        resolved_path = path.resolve()
+        if resolved_root not in resolved_path.parents:
+            raise ArtifactStoreError("artifact path must remain inside evidence directory")
         return path
 
     @staticmethod
@@ -89,3 +105,7 @@ class ArtifactStore:
             temporary_path.replace(path)
         finally:
             temporary_path.unlink(missing_ok=True)
+
+
+def _is_plain_component(value: str, pattern: re.Pattern[str]) -> bool:
+    return bool(pattern.fullmatch(value)) and "/" not in value and "\\" not in value
