@@ -103,3 +103,50 @@ def test_applier_restores_all_touched_files_after_post_apply_failure(
         PatchApplier().apply(tmp_path, patch)
     assert first.read_text() == "first = 1\n"
     assert second.read_text() == "second = 1\n"
+
+
+def test_applier_removes_new_parent_directories_after_post_apply_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diff = """--- /dev/null
++++ b/generated/nested/app.py
+@@ -0,0 +1 @@
++value = 1
+"""
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="add", diff=diff))
+    original_apply = PatchApplier._git_apply
+
+    def fail_after_apply(root: Path, content: str, *, check: bool) -> None:
+        original_apply(root, content, check=check)
+        if not check:
+            raise RuntimeError("git apply failed after creating directories")
+
+    monkeypatch.setattr(PatchApplier, "_git_apply", staticmethod(fail_after_apply))
+    with pytest.raises(RuntimeError, match="after creating directories"):
+        PatchApplier().apply(tmp_path, patch)
+    assert not (tmp_path / "generated").exists()
+
+
+def test_applier_preserves_existing_parent_directories_after_post_apply_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing_parent = tmp_path / "generated"
+    existing_parent.mkdir()
+    diff = """--- /dev/null
++++ b/generated/nested/app.py
+@@ -0,0 +1 @@
++value = 1
+"""
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="add", diff=diff))
+    original_apply = PatchApplier._git_apply
+
+    def fail_after_apply(root: Path, content: str, *, check: bool) -> None:
+        original_apply(root, content, check=check)
+        if not check:
+            raise RuntimeError("git apply failed after creating directories")
+
+    monkeypatch.setattr(PatchApplier, "_git_apply", staticmethod(fail_after_apply))
+    with pytest.raises(RuntimeError, match="after creating directories"):
+        PatchApplier().apply(tmp_path, patch)
+    assert existing_parent.is_dir()
+    assert not (existing_parent / "nested").exists()

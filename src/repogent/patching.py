@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import subprocess  # nosec B404  # fixed argv; the model supplies only patch content
@@ -149,11 +150,16 @@ class PatchApplier:
         snapshots = {
             relative: self._snapshot(repository, relative) for relative in validated.touched_paths
         }
+        missing_directories = {
+            directory
+            for relative in validated.touched_paths
+            for directory in self._missing_parent_directories(repository, relative)
+        }
         try:
             self._git_apply(repository, validated.proposal.diff, check=True)
             self._git_apply(repository, validated.proposal.diff, check=False)
         except Exception as apply_error:
-            restore_errors = self._restore(repository, snapshots)
+            restore_errors = self._restore(repository, snapshots, missing_directories)
             if restore_errors:
                 details = "; ".join(str(error) for error in restore_errors)
                 raise RuntimeError(f"patch restoration failed: {details}") from apply_error
@@ -202,11 +208,26 @@ class PatchApplier:
             os.close(parent_fd)
 
     @classmethod
-    def _restore(cls, root: Path, snapshots: dict[Path, Snapshot]) -> list[Exception]:
+    def _restore(
+        cls,
+        root: Path,
+        snapshots: dict[Path, Snapshot],
+        missing_directories: set[Path],
+    ) -> list[Exception]:
         errors: list[Exception] = []
         for relative, snapshot in snapshots.items():
             try:
                 cls._restore_one(root, relative, snapshot)
+            except Exception as error:
+                errors.append(error)
+        directories = sorted(
+            missing_directories,
+            key=lambda path: len(path.parts),
+            reverse=True,
+        )
+        for directory in directories:
+            try:
+                cls._remove_empty_directory(root, directory)
             except Exception as error:
                 errors.append(error)
         return errors
@@ -236,6 +257,40 @@ class PatchApplier:
                     os.fchmod(descriptor, snapshot.mode)
             finally:
                 os.close(descriptor)
+        finally:
+            os.close(parent_fd)
+
+    @classmethod
+    def _missing_parent_directories(cls, root: Path, relative: Path) -> tuple[Path, ...]:
+        descriptor = os.open(root, cls._directory_flags())
+        try:
+            for index, component in enumerate(relative.parts[:-1]):
+                try:
+                    child = os.open(component, cls._directory_flags(), dir_fd=descriptor)
+                except FileNotFoundError:
+                    return tuple(
+                        Path(*relative.parts[:depth])
+                        for depth in range(index + 1, len(relative.parts))
+                    )
+                os.close(descriptor)
+                descriptor = child
+            return ()
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _remove_empty_directory(cls, root: Path, directory: Path) -> None:
+        try:
+            parent_fd, name = cls._open_parent(root, directory, create=False)
+        except _MissingParentError:
+            return
+        try:
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError as error:
+                if error.errno in {errno.EEXIST, errno.ENOENT, errno.ENOTEMPTY}:
+                    return
+                raise
         finally:
             os.close(parent_fd)
 
