@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import configparser
 import importlib.util
 import os
 import secrets
 import shutil
 import signal
+import stat
 import subprocess  # nosec B404
 import sys
 import time
+import tomllib
 from collections import deque
 from collections.abc import Sequence
 from contextlib import suppress
@@ -28,6 +31,36 @@ _OUTPUT_READ_BYTES = 8_192
 _OUTPUT_DRAIN_TIMEOUT_SECONDS = 0.5
 _PROCESS_TERMINATION_TIMEOUT_SECONDS = 1
 _DOCKER_CONTROL_TIMEOUT_SECONDS = 5
+_DISCOVERY_MAX_ENTRIES = 20_000
+_DISCOVERY_MAX_DEPTH = 16
+_PYTEST_CONFIG_MAX_BYTES = 256_000
+_SUPPORTS_FD_RELATIVE_CONFIG = (
+    os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
+_DOCKER_MODULE_PROBE = (
+    "import importlib.util,sys;"
+    "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)"
+)
+_DISCOVERY_IGNORED_DIRECTORIES = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "site-packages",
+}
+
+
+class _PytestConfigurationUncertain(Exception):
+    pass
 
 
 class _BoundedOutput:
@@ -144,7 +177,7 @@ class CommandSpec:
 
 class ValidationPolicy:
     def commands(self, root: Path) -> list[CommandSpec]:
-        pytest_required = (root / "tests").is_dir() or any(root.glob("test_*.py"))
+        pytest_required = _has_pytest_suite(root)
         return [
             CommandSpec(
                 "pytest", ("python", "-m", "pytest", "-q"), pytest_required, module="pytest"
@@ -157,7 +190,177 @@ class ValidationPolicy:
         ]
 
 
+def _has_pytest_suite(root: Path) -> bool:
+    if _has_pytest_configuration(root):
+        return True
+    pending: list[tuple[Path, int]] = [(root, 0)]
+    entries_seen = 0
+    while pending:
+        directory, depth = pending.pop()
+        try:
+            entries = []
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    entries_seen += 1
+                    if entries_seen > _DISCOVERY_MAX_ENTRIES:
+                        return True
+                    entries.append(entry)
+        except OSError:
+            return True
+        for entry in sorted(entries, key=lambda item: item.name):
+            name = entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if name in _DISCOVERY_IGNORED_DIRECTORIES:
+                        continue
+                    if name in {"test", "tests"}:
+                        return True
+                    if depth >= _DISCOVERY_MAX_DEPTH:
+                        return True
+                    pending.append((Path(entry.path), depth + 1))
+                elif entry.is_file(follow_symlinks=False) and name.endswith(".py"):
+                    if name.startswith("test_") or name.endswith("_test.py"):
+                        return True
+            except OSError:
+                return True
+    return False
+
+
+def _has_pytest_configuration(root: Path) -> bool:
+    try:
+        pyproject = _read_recognized_configuration(root, "pyproject.toml")
+    except _PytestConfigurationUncertain:
+        return True
+    if pyproject is not None:
+        try:
+            data = tomllib.loads(pyproject)
+        except tomllib.TOMLDecodeError:
+            return True
+        tool = data.get("tool", {})
+        if isinstance(tool, dict) and isinstance(tool.get("pytest"), dict):
+            return True
+    for name, sections in (
+        ("pytest.ini", {"pytest"}),
+        ("setup.cfg", {"tool:pytest"}),
+        ("tox.ini", {"pytest"}),
+    ):
+        try:
+            contents = _read_recognized_configuration(root, name)
+        except _PytestConfigurationUncertain:
+            return True
+        if contents is None:
+            continue
+        try:
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(contents)
+        except configparser.Error:
+            return True
+        if sections & set(parser.sections()):
+            return True
+    return False
+
+
+def _read_recognized_configuration(root: Path, name: str) -> str | None:
+    """Read one root config without following links or blocking on special files."""
+
+    try:
+        repository = root.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise _PytestConfigurationUncertain from error
+    if _SUPPORTS_FD_RELATIVE_CONFIG:
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            directory_fd = os.open(repository, directory_flags)
+        except OSError as error:
+            raise _PytestConfigurationUncertain from error
+        try:
+            try:
+                metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            except OSError as error:
+                raise _PytestConfigurationUncertain from error
+            _validate_configuration_metadata(metadata)
+            try:
+                descriptor = os.open(
+                    name, _configuration_open_flags(), dir_fd=directory_fd
+                )
+            except OSError as error:
+                raise _PytestConfigurationUncertain from error
+            return _read_configuration_descriptor(descriptor, metadata)
+        finally:
+            os.close(directory_fd)
+
+    path = repository / name
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise _PytestConfigurationUncertain from error
+    _validate_configuration_metadata(metadata)
+    try:
+        descriptor = os.open(path, _configuration_open_flags())
+    except OSError as error:
+        raise _PytestConfigurationUncertain from error
+    return _read_configuration_descriptor(descriptor, metadata)
+
+
+def _configuration_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _validate_configuration_metadata(metadata: os.stat_result) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise _PytestConfigurationUncertain
+    if metadata.st_size > _PYTEST_CONFIG_MAX_BYTES:
+        raise _PytestConfigurationUncertain
+
+
+def _read_configuration_descriptor(
+    descriptor: int, expected: os.stat_result
+) -> str:
+    try:
+        opened = os.fstat(descriptor)
+        _validate_configuration_metadata(opened)
+        if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            raise _PytestConfigurationUncertain
+        chunks: list[bytes] = []
+        remaining = _PYTEST_CONFIG_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(_OUTPUT_READ_BYTES, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        contents = b"".join(chunks)
+        if len(contents) > _PYTEST_CONFIG_MAX_BYTES:
+            raise _PytestConfigurationUncertain
+        after = os.fstat(descriptor)
+        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
+            raise _PytestConfigurationUncertain
+        try:
+            return contents.decode("utf-8")
+        except UnicodeError as error:
+            raise _PytestConfigurationUncertain from error
+    except OSError as error:
+        raise _PytestConfigurationUncertain from error
+    finally:
+        os.close(descriptor)
+
+
 class Executor(Protocol):
+    def readiness(self) -> tuple[bool, str | None]: ...
     def available(self, command: CommandSpec) -> bool: ...
     def run(self, command: CommandSpec, root: Path) -> CheckResult: ...
 
@@ -208,6 +411,9 @@ class LocalExecutor(_RestrictedExecutor):
             allowed=allowed,
             max_output_chars=max_output_chars,
         )
+
+    def readiness(self) -> tuple[bool, str | None]:
+        return (True, "restricted local execution provides weaker isolation")
 
     def available(self, command: CommandSpec) -> bool:
         return self._is_allowed(command) and (
@@ -267,24 +473,68 @@ class DockerExecutor(_RestrictedExecutor):
     ) -> None:
         self.image = image
         self.docker = shutil.which("docker")
+        self._availability_cache: dict[tuple[str, str], bool] = {}
         super().__init__(
             allowed=allowed,
             max_output_chars=max_output_chars,
         )
 
+    def readiness(self) -> tuple[bool, str | None]:
+        if self.docker is None:
+            return (False, "docker executable is unavailable")
+        inspection = self._inspect_image()
+        if inspection is None:
+            return (False, "docker image inspection failed")
+        if inspection.timed_out:
+            return (False, "docker image inspection timed out")
+        if inspection.exit_code != 0:
+            return (False, f"validator image is unavailable: {self.image}")
+        return (True, None)
+
     def available(self, command: CommandSpec) -> bool:
-        if not self._is_allowed(command):
+        docker = self.docker
+        if docker is None or not self._is_allowed(command):
             return False
-        inspection = self._inspect_image(
-            timeout_seconds=min(
-                _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
+        tool = command.module or f"executable:{command.argv[0]}"
+        cache_key = (self.image, tool)
+        if cache_key in self._availability_cache:
+            return self._availability_cache[cache_key]
+        probe_command = (
+            ["python", "-c", _DOCKER_MODULE_PROBE, command.module]
+            if command.module is not None
+            else [command.argv[0], "--version"]
+        )
+        argv = [
+            docker,
+            "run",
+            "--rm",
+            "--pull=never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cpus",
+            "0.25",
+            "--memory",
+            "128m",
+            "--pids-limit",
+            "64",
+            self.image,
+            *probe_command,
+        ]
+        try:
+            result = _run_with_bounded_output(
+                argv,
+                timeout_seconds=min(
+                    _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
+                ),
+                max_output_chars=self.max_output_chars,
             )
-        )
-        return (
-            inspection is not None
-            and not inspection.timed_out
-            and inspection.exit_code == 0
-        )
+        except OSError:
+            available = False
+        else:
+            available = not result.timed_out and result.exit_code == 0
+        self._availability_cache[cache_key] = available
+        return available
 
     def _inspect_image(
         self, *, timeout_seconds: int = _DOCKER_CONTROL_TIMEOUT_SECONDS

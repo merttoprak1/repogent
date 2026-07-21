@@ -39,6 +39,7 @@ packages = ["src/repogent"]
 addopts = "-q --strict-markers --cov=repogent --cov-report=term-missing --cov-fail-under=85"
 testpaths = ["tests"]
 pythonpath = ["src"]
+norecursedirs = ["tests/fixtures"]
 markers = ["docker: requires a running Docker daemon and validator image"]
 
 [tool.ruff]

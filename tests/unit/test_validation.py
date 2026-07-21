@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from repogent.domain import CheckResult, CheckStatus
-from repogent.execution import CommandSpec
+from repogent.execution import CommandSpec, ValidationPolicy
 from repogent.validation import ValidationPipeline
 
 
@@ -42,6 +42,31 @@ def test_pipeline_records_missing_optional_check_as_skipped(tmp_path: Path) -> N
     ruff = next(check for check in report.checks if check.name == "ruff")
     assert ruff.status is CheckStatus.SKIPPED
     assert ruff.reason == "optional tool unavailable"
+    assert ruff.required is False
+    assert report.passed is True
+
+
+def test_pipeline_keeps_available_failed_optional_check_non_blocking(tmp_path: Path) -> None:
+    class FailedOptionalExecutor:
+        def available(self, command: CommandSpec) -> bool:
+            return True
+
+        def run(self, command: CommandSpec, root: Path) -> CheckResult:
+            del root
+            return CheckResult(
+                name=command.name,
+                argv=list(command.argv),
+                status=CheckStatus.FAILED,
+            )
+
+    class OptionalPolicy(ValidationPolicy):
+        def commands(self, root: Path) -> list[CommandSpec]:
+            del root
+            return [CommandSpec("ruff", ("ruff", "check", "."), required=False)]
+
+    report = ValidationPipeline(FailedOptionalExecutor(), policy=OptionalPolicy()).run(tmp_path)
+
+    assert report.checks[0].required is False
     assert report.passed is True
 
 
