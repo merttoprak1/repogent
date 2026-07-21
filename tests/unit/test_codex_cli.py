@@ -9,12 +9,23 @@ from typing import Any
 
 import pytest
 
+import repogent.codex_cli as codex_cli_module
 from repogent.codex_cli import CodexCliProvider
 from repogent.domain import ProviderCallStatus, RequirementsSpec
 from repogent.providers import ProviderError
 
 _SECRET = "sk-proj-secretvalue123456"  # noqa: S105
 _MAX_ERROR_LENGTH = 4096
+
+
+class _WindowsOs:
+    name = "nt"
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
 
 
 @pytest.fixture
@@ -254,16 +265,20 @@ def test_generate_adds_explicit_model_once(fake_codex: tuple[Path, Path]) -> Non
     assert result.evidence.model == "gpt-5.6-sol"
 
 
-def test_generate_removes_target_root_from_prompt_and_environment(
+def test_generate_uses_explicit_target_root_when_process_cwd_differs(
     fake_codex: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     executable, capture_path = fake_codex
-    target_root = Path.cwd().resolve()
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    process_cwd = tmp_path / "process-cwd"
+    process_cwd.mkdir()
     safe_home = tmp_path / "home"
     safe_home.mkdir()
     safe_path_entries = ["/usr/bin", "/bin"]
+    monkeypatch.chdir(process_cwd)
     monkeypatch.setenv("HOME", str(safe_home))
     monkeypatch.setenv("CODEX_HOME", str(target_root))
     monkeypatch.setenv(
@@ -277,7 +292,9 @@ def test_generate_removes_target_root_from_prompt_and_environment(
             ]
         ),
     )
-    provider = CodexCliProvider(executable=str(executable))
+    provider = CodexCliProvider(
+        executable=str(executable), model="gpt-5.6-sol", target_root=target_root
+    )
 
     provider.generate(
         role="requirements",
@@ -297,6 +314,15 @@ def test_generate_removes_target_root_from_prompt_and_environment(
     assert capture["environment"]["HOME"] == str(safe_home)
     assert "CODEX_HOME" not in capture["environment"]
     assert capture["environment"]["PATH"].split(":") == safe_path_entries
+    assert Path(capture["cwd"]) != process_cwd
+    assert not Path(capture["cwd"]).is_relative_to(target_root)
+    assert not Path(capture["workdir"]).is_relative_to(target_root)
+    schema_path = Path(capture["argv"][capture["argv"].index("--output-schema") + 1])
+    result_path = Path(
+        capture["argv"][capture["argv"].index("--output-last-message") + 1]
+    )
+    assert not schema_path.is_relative_to(target_root)
+    assert not result_path.is_relative_to(target_root)
     assert prompt["payload"]["repository_context"] == [
         {"path": "src/repogent/codex_cli.py"}
     ]
@@ -305,17 +331,130 @@ def test_generate_removes_target_root_from_prompt_and_environment(
 def test_check_ready_rejects_executable_inside_target_root_without_invoking_it(
     fake_codex: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     executable, capture_path = fake_codex
     calls_path = capture_path.with_name("calls.jsonl")
-    monkeypatch.chdir(executable.parent)
-    provider = CodexCliProvider(executable=str(executable))
+    process_cwd = tmp_path / "process-cwd"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    provider = CodexCliProvider(
+        executable=str(executable), target_root=executable.parent
+    )
 
     readiness = provider.check_ready()
 
     assert readiness.ready is False
     assert readiness.reason == "Codex CLI executable must be outside the target repository"
     assert not calls_path.exists()
+
+
+def test_generate_rejects_model_containing_explicit_target_root_before_preflight(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    process_cwd = tmp_path / "process-cwd"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    provider = CodexCliProvider(
+        executable=str(executable),
+        model=f"provider{target_root}suffix",
+        target_root=target_root,
+    )
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(
+        captured,
+        ProviderCallStatus.CAPABILITY_MISSING,
+        forbidden=(_SECRET, str(target_root)),
+    )
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.model == "invalid"
+    assert not capture_path.with_name("calls.jsonl").exists()
+
+
+def test_generate_revalidates_model_after_successful_readiness(
+    fake_codex: tuple[Path, Path], tmp_path: Path
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    provider = CodexCliProvider(executable=str(executable), target_root=target_root)
+    assert provider.check_ready().ready is True
+    provider.model = f"provider{target_root}suffix"
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(
+        captured,
+        ProviderCallStatus.CAPABILITY_MISSING,
+        forbidden=(_SECRET, str(target_root)),
+    )
+    calls = [
+        json.loads(line)
+        for line in capture_path.with_name("calls.jsonl").read_text().splitlines()
+    ]
+    assert calls == [["--version"], ["exec", "--help"], ["login", "status"]]
+
+
+def test_generate_rejects_windows_equivalent_target_root_in_model(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = tmp_path / "TargetRoot"
+    target_root.mkdir()
+    windows_root = str(target_root).upper().replace("/", "\\")
+    monkeypatch.setattr(
+        codex_cli_module, "os", _WindowsOs(codex_cli_module.os)
+    )
+    provider = CodexCliProvider(
+        executable=str(executable),
+        model=f"provider{windows_root}suffix",
+        target_root=target_root,
+    )
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(captured, ProviderCallStatus.CAPABILITY_MISSING)
+    assert not capture_path.with_name("calls.jsonl").exists()
+
+
+def test_generate_redacts_windows_equivalent_target_root_from_prompt(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = tmp_path / "TargetRoot"
+    target_root.mkdir()
+    provider = CodexCliProvider(executable=str(executable), target_root=target_root)
+    assert provider.check_ready().ready is True
+    windows_root = str(target_root).upper().replace("/", "\\")
+    monkeypatch.setattr(
+        codex_cli_module, "os", _WindowsOs(codex_cli_module.os)
+    )
+
+    _generate(
+        provider,
+        system_prompt=f"Do not inspect {windows_root} or its contents",
+        payload={"request": f"Change {windows_root}\\src", "repository_context": []},
+    )
+
+    prompt = json.loads(
+        json.loads(capture_path.read_text(encoding="utf-8"))["prompt"]
+    )
+    assert windows_root not in json.dumps(prompt, sort_keys=True)
+    assert prompt["system_prompt"] == "Do not inspect [REDACTED] or its contents"
 
 
 def test_generate_ignores_target_root_tempdir_configuration(
@@ -327,10 +466,12 @@ def test_generate_ignores_target_root_tempdir_configuration(
     target_root = tmp_path / "target"
     unsafe_temp_parent = target_root / "tmp"
     unsafe_temp_parent.mkdir(parents=True)
-    monkeypatch.chdir(target_root)
+    process_cwd = tmp_path / "process-cwd"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
     monkeypatch.setenv("TMPDIR", str(unsafe_temp_parent))
     monkeypatch.setattr(tempfile, "tempdir", str(unsafe_temp_parent))
-    provider = CodexCliProvider(executable=str(executable))
+    provider = CodexCliProvider(executable=str(executable), target_root=target_root)
 
     readiness = provider.check_ready()
     result = provider.generate(
@@ -385,9 +526,13 @@ def test_generate_classifies_missing_executable(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("behavior", "expected_status"),
+    ("behavior", "expected_status", "expected_backend_version"),
     [
-        ({"help_stdout": "--ephemeral"}, ProviderCallStatus.CAPABILITY_MISSING),
+        (
+            {"help_stdout": "--ephemeral"},
+            ProviderCallStatus.CAPABILITY_MISSING,
+            "codex-cli 1.2.3",
+        ),
         (
             {
                 "help_stdout": "--ephemeral --sandbox --ignore-user-config "
@@ -395,14 +540,17 @@ def test_generate_classifies_missing_executable(tmp_path: Path) -> None:
                 "--model-extra"
             },
             ProviderCallStatus.CAPABILITY_MISSING,
+            "codex-cli 1.2.3",
         ),
         (
             {"login_exit": 1, "login_stderr": f"token={_SECRET}"},
             ProviderCallStatus.AUTHENTICATION_FAILED,
+            "codex-cli 1.2.3",
         ),
         (
             {"version_exit": 1, "version_stderr": f"token={_SECRET}"},
             ProviderCallStatus.EXECUTION_FAILED,
+            None,
         ),
     ],
 )
@@ -410,15 +558,23 @@ def test_generate_classifies_readiness_failures(
     fake_codex: tuple[Path, Path],
     behavior: dict[str, Any],
     expected_status: ProviderCallStatus,
+    expected_backend_version: str | None,
 ) -> None:
     executable, capture_path = fake_codex
     _set_behavior(capture_path, **behavior)
     provider = CodexCliProvider(executable=str(executable))
 
+    readiness = provider.check_ready()
+
+    assert readiness.ready is False
+    assert readiness.backend_version == expected_backend_version
+
     with pytest.raises(ProviderError) as captured:
         _generate(provider)
 
     _assert_provider_error(captured, expected_status)
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.backend_version == expected_backend_version
 
 
 def test_check_ready_caches_each_successful_probe(
@@ -623,6 +779,186 @@ def test_generate_classifies_nonzero_exit_with_unavailable_diagnostic_excerpt(
     _assert_provider_error(captured, ProviderCallStatus.EXECUTION_FAILED)
     assert captured.value.evidence is not None
     assert captured.value.evidence.exit_code == 12
+
+
+def test_generate_classifies_temporary_workspace_creation_failure(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable, _ = fake_codex
+    target_root = Path.cwd().resolve()
+    provider = CodexCliProvider(executable=str(executable))
+    assert provider.check_ready().ready is True
+
+    def fail_workspace(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(f"workspace {_SECRET} {target_root}")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", fail_workspace)
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(
+        captured,
+        ProviderCallStatus.EXECUTION_FAILED,
+        forbidden=(_SECRET, str(target_root)),
+    )
+
+
+def test_generate_classifies_owner_only_artifact_creation_failure(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable, _ = fake_codex
+    target_root = Path.cwd().resolve()
+    provider = CodexCliProvider(executable=str(executable))
+    assert provider.check_ready().ready is True
+    real_owner_only_file = provider._owner_only_file
+
+    def fail_result_file(workdir: Path, prefix: str, suffix: str) -> Path:
+        if prefix == "result-":
+            raise OSError(f"artifact {_SECRET} {target_root}")
+        return real_owner_only_file(workdir, prefix, suffix)
+
+    monkeypatch.setattr(provider, "_owner_only_file", fail_result_file)
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(
+        captured,
+        ProviderCallStatus.EXECUTION_FAILED,
+        forbidden=(_SECRET, str(target_root)),
+    )
+
+
+@pytest.mark.parametrize("failed_write", [1, 2], ids=["schema", "prompt"])
+def test_generate_classifies_owner_only_artifact_write_failure(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failed_write: int,
+) -> None:
+    executable, _ = fake_codex
+    target_root = Path.cwd().resolve()
+    provider = CodexCliProvider(executable=str(executable))
+    assert provider.check_ready().ready is True
+    real_write_bytes = Path.write_bytes
+    writes = 0
+
+    def fail_selected_write(path: Path, data: bytes) -> int:
+        nonlocal writes
+        writes += 1
+        if writes == failed_write:
+            raise OSError(f"write {_SECRET} {target_root}")
+        return real_write_bytes(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_selected_write)
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(
+        captured,
+        ProviderCallStatus.EXECUTION_FAILED,
+        forbidden=(_SECRET, str(target_root)),
+    )
+
+
+def test_generate_classifies_cleanup_failure_after_subprocess_execution(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = Path.cwd().resolve()
+    provider = CodexCliProvider(executable=str(executable))
+    assert provider.check_ready().ready is True
+    real_temporary_directory = tempfile.TemporaryDirectory
+
+    class CleanupFailure:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._temporary = real_temporary_directory(*args, **kwargs)
+            self.name = self._temporary.name
+
+        def __enter__(self) -> str:
+            return self.name
+
+        def __exit__(self, *_args: object) -> None:
+            self.cleanup()
+
+        def cleanup(self) -> None:
+            self._temporary.cleanup()
+            raise OSError(f"cleanup {_SECRET} {target_root}")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", CleanupFailure)
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(
+        captured,
+        ProviderCallStatus.EXECUTION_FAILED,
+        forbidden=(_SECRET, str(target_root)),
+    )
+    assert capture_path.exists()
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    ("primary", "expected_exception", "expected_status"),
+    [
+        ("provider", ProviderError, ProviderCallStatus.INVALID_OUTPUT),
+        ("interrupt", KeyboardInterrupt, None),
+    ],
+)
+def test_generate_cleanup_failure_does_not_mask_primary_exception(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    primary: str,
+    expected_exception: type[BaseException],
+    expected_status: ProviderCallStatus | None,
+) -> None:
+    executable, capture_path = fake_codex
+    provider = CodexCliProvider(executable=str(executable))
+    assert provider.check_ready().ready is True
+    real_temporary_directory = tempfile.TemporaryDirectory
+    cleanup_attempted = False
+
+    class CleanupFailure:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._temporary = real_temporary_directory(*args, **kwargs)
+            self.name = self._temporary.name
+
+        def __enter__(self) -> str:
+            return self.name
+
+        def __exit__(self, *_args: object) -> None:
+            self.cleanup()
+
+        def cleanup(self) -> None:
+            nonlocal cleanup_attempted
+            cleanup_attempted = True
+            self._temporary.cleanup()
+            raise OSError("cleanup failed")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", CleanupFailure)
+    if primary == "provider":
+        _set_behavior(capture_path, result_mode="invalid_json")
+    else:
+        monkeypatch.setattr(
+            provider,
+            "_run_exec",
+            lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+        )
+
+    with pytest.raises(expected_exception) as captured:
+        _generate(provider)
+
+    assert cleanup_attempted is True
+    if expected_status is not None:
+        assert isinstance(captured.value, ProviderError)
+        assert captured.value.evidence is not None
+        assert captured.value.evidence.status is expected_status
 
 
 def test_generate_timeout_terminates_child_and_removes_temporary_directory(

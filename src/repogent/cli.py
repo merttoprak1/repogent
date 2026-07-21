@@ -145,7 +145,7 @@ def run_command(
         if provider == "scripted":
             model_provider = ScriptedProvider.from_json(str(script))
         elif provider == "codex-cli":
-            codex_provider = CodexCliProvider(model=model)
+            codex_provider = CodexCliProvider(model=model, target_root=repository)
             readiness = codex_provider.check_ready()
             store.write_model("provider-readiness", readiness)
             if not readiness.ready:
