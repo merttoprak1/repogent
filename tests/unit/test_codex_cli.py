@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from repogent.domain import ProviderCallStatus, RequirementsSpec
 def fake_codex(tmp_path: Path) -> tuple[Path, Path]:
     capture_path = tmp_path / "capture.json"
     calls_path = tmp_path / "calls.jsonl"
+    records_path = tmp_path / "records.jsonl"
     executable = tmp_path / "codex"
     executable.write_text(
         f"""#!/usr/bin/env python3
@@ -24,9 +26,12 @@ import sys
 
 capture_path = pathlib.Path({str(capture_path)!r})
 calls_path = pathlib.Path({str(calls_path)!r})
+records_path = pathlib.Path({str(records_path)!r})
 args = sys.argv[1:]
 with calls_path.open("a", encoding="utf-8") as calls:
     calls.write(json.dumps(args) + "\\n")
+with records_path.open("a", encoding="utf-8") as records:
+    records.write(json.dumps({{"argv": args, "cwd": os.getcwd()}}) + "\\n")
 
 if args == ["--version"]:
     print("codex-cli 1.2.3")
@@ -51,6 +56,9 @@ elif args and args[0] == "exec":
                 "schema": schema,
                 "environment": dict(os.environ),
                 "calls": [json.loads(line) for line in calls_path.read_text().splitlines()],
+                "records": [
+                    json.loads(line) for line in records_path.read_text().splitlines()
+                ],
             }},
             sort_keys=True,
         ),
@@ -207,3 +215,60 @@ def test_generate_removes_target_root_from_prompt_and_environment(
     assert prompt["payload"]["repository_context"] == [
         {"path": "src/repogent/codex_cli.py"}
     ]
+
+
+def test_check_ready_rejects_executable_inside_target_root_without_invoking_it(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable, capture_path = fake_codex
+    calls_path = capture_path.with_name("calls.jsonl")
+    monkeypatch.chdir(executable.parent)
+    provider = CodexCliProvider(executable=str(executable))
+
+    readiness = provider.check_ready()
+
+    assert readiness.ready is False
+    assert readiness.reason == "Codex CLI executable must be outside the target repository"
+    assert not calls_path.exists()
+
+
+def test_generate_ignores_target_root_tempdir_configuration(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = tmp_path / "target"
+    unsafe_temp_parent = target_root / "tmp"
+    unsafe_temp_parent.mkdir(parents=True)
+    monkeypatch.chdir(target_root)
+    monkeypatch.setenv("TMPDIR", str(unsafe_temp_parent))
+    monkeypatch.setattr(tempfile, "tempdir", str(unsafe_temp_parent))
+    provider = CodexCliProvider(executable=str(executable))
+
+    readiness = provider.check_ready()
+    result = provider.generate(
+        role="requirements",
+        system_prompt="bounded role",
+        payload={"request": "change", "repository_context": []},
+        output_type=RequirementsSpec,
+        timeout_seconds=5,
+    )
+
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    assert readiness.ready is True
+    assert result.output.objective == "Change the project"
+    assert str(target_root.resolve()) not in json.dumps(capture, sort_keys=True)
+    assert not Path(capture["workdir"]).is_relative_to(target_root)
+    assert not Path(capture["cwd"]).is_relative_to(target_root)
+    assert all(
+        not Path(record["cwd"]).is_relative_to(target_root)
+        for record in capture["records"]
+    )
+    schema_path = Path(capture["argv"][capture["argv"].index("--output-schema") + 1])
+    result_path = Path(
+        capture["argv"][capture["argv"].index("--output-last-message") + 1]
+    )
+    assert not schema_path.is_relative_to(target_root)
+    assert not result_path.is_relative_to(target_root)
