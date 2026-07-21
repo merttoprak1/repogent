@@ -17,6 +17,17 @@ class PatchPolicyError(ValueError):
     pass
 
 
+class CheckoutRecoveryError(RuntimeError):
+    def __init__(self, touched_paths: tuple[Path, ...], restore_error: BaseException) -> None:
+        self.touched_paths = touched_paths
+        self.restore_error = restore_error
+        paths = ", ".join(path.as_posix() for path in touched_paths)
+        super().__init__(
+            "checkout recovery could not be proved for "
+            f"{paths}: {type(restore_error).__name__}: {restore_error}"
+        )
+
+
 class _MissingParentError(Exception):
     pass
 
@@ -147,6 +158,29 @@ class PatchApplier:
         if not repository.is_dir():
             raise PatchPolicyError("repository root must be a directory")
         validated = PatchPolicy().validate(repository, patch.proposal)
+        snapshots, missing_directories = self.snapshot(repository, validated)
+        try:
+            self._git_apply(repository, validated.proposal.diff, check=True)
+            self._git_apply(repository, validated.proposal.diff, check=False)
+        except (Exception, KeyboardInterrupt, SystemExit) as apply_error:
+            try:
+                self.restore(repository, snapshots, missing_directories)
+            except (Exception, KeyboardInterrupt, SystemExit) as restore_error:
+                raise CheckoutRecoveryError(
+                    validated.touched_paths, restore_error
+                ) from apply_error
+            raise
+
+    def transaction(self, root: Path, patch: ValidatedPatch) -> PatchTransaction:
+        return PatchTransaction(self, root, patch)
+
+    def snapshot(
+        self, root: Path, patch: ValidatedPatch
+    ) -> tuple[dict[Path, Snapshot], set[Path]]:
+        repository = root.resolve(strict=True)
+        if not repository.is_dir():
+            raise PatchPolicyError("repository root must be a directory")
+        validated = PatchPolicy().validate(repository, patch.proposal)
         snapshots = {
             relative: self._snapshot(repository, relative) for relative in validated.touched_paths
         }
@@ -155,15 +189,19 @@ class PatchApplier:
             for relative in validated.touched_paths
             for directory in self._missing_parent_directories(repository, relative)
         }
-        try:
-            self._git_apply(repository, validated.proposal.diff, check=True)
-            self._git_apply(repository, validated.proposal.diff, check=False)
-        except Exception as apply_error:
-            restore_errors = self._restore(repository, snapshots, missing_directories)
-            if restore_errors:
-                details = "; ".join(str(error) for error in restore_errors)
-                raise RuntimeError(f"patch restoration failed: {details}") from apply_error
-            raise
+        return snapshots, missing_directories
+
+    def restore(
+        self,
+        root: Path,
+        snapshots: dict[Path, Snapshot],
+        missing_directories: set[Path],
+    ) -> None:
+        repository = root.resolve(strict=True)
+        errors = self._restore(repository, snapshots, missing_directories)
+        if errors:
+            details = "; ".join(str(error) for error in errors)
+            raise RuntimeError(f"patch restoration failed: {details}")
 
     @staticmethod
     def _git_apply(root: Path, diff: str, *, check: bool) -> None:
@@ -337,3 +375,25 @@ class PatchApplier:
             if written == 0:
                 raise OSError("failed to restore complete snapshot")
             remaining = remaining[written:]
+
+
+class PatchTransaction:
+    def __init__(self, applier: PatchApplier, root: Path, patch: ValidatedPatch) -> None:
+        self.applier = applier
+        self.root = root.resolve(strict=True)
+        self.patch = patch
+        self._snapshots: dict[Path, Snapshot] = {}
+        self._missing_directories: set[Path] = set()
+        self._committed = False
+
+    def __enter__(self) -> PatchTransaction:
+        self._snapshots, self._missing_directories = self.applier.snapshot(self.root, self.patch)
+        self.applier.apply(self.root, self.patch)
+        return self
+
+    def commit(self) -> None:
+        self._committed = True
+
+    def __exit__(self, *_error: object) -> None:
+        if not self._committed:
+            self.applier.restore(self.root, self._snapshots, self._missing_directories)

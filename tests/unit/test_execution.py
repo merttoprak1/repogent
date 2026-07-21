@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from repogent import execution as execution_module
-from repogent.domain import CheckStatus
+from repogent.domain import (
+    CandidateEvidence,
+    CheckResult,
+    CheckStatus,
+    RiskLevel,
+    ValidationReport,
+)
 from repogent.execution import (
     CommandPolicyError,
     CommandSpec,
@@ -26,6 +32,216 @@ def test_policy_returns_only_fixed_module_commands(tmp_path: Path) -> None:
     assert all(
         not any(token in {"sh", "bash", "-c"} for token in command.argv) for command in commands
     )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "contents"),
+    [
+        ("quality/regression/test_nested.py", "def test_value(): pass\n"),
+        ("checks/unit/value_test.py", "def test_value(): pass\n"),
+        ("specs/test_behavior.py", "def test_value(): pass\n"),
+    ],
+)
+def test_policy_requires_pytest_for_bounded_nested_test_discovery(
+    tmp_path: Path, relative_path: str, contents: str
+) -> None:
+    path = tmp_path / relative_path
+    path.parent.mkdir(parents=True)
+    path.write_text(contents)
+
+    pytest_command = ValidationPolicy().commands(tmp_path)[0]
+
+    assert pytest_command.required is True
+
+
+@pytest.mark.parametrize(
+    ("config_name", "contents"),
+    [
+        ("pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["specs"]\n'),
+        ("pytest.ini", "[pytest]\ntestpaths = specs\n"),
+        ("setup.cfg", "[tool:pytest]\ntestpaths = specs\n"),
+        ("tox.ini", "[pytest]\ntestpaths = specs\n"),
+    ],
+)
+def test_policy_requires_pytest_when_configuration_declares_testpaths(
+    tmp_path: Path, config_name: str, contents: str
+) -> None:
+    (tmp_path / config_name).write_text(contents)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+def test_policy_discovery_ignores_generated_and_vcs_trees(tmp_path: Path) -> None:
+    for relative in (".git/test_hidden.py", ".venv/test_dependency.py", "build/test_output.py"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_hidden(): pass\n")
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is False
+
+
+def test_policy_requires_pytest_when_depth_bound_prevents_complete_discovery(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path
+    for index in range(18):
+        directory /= f"level_{index}"
+        directory.mkdir()
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+def test_policy_requires_pytest_when_entry_bound_is_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_text("not a test\n")
+    monkeypatch.setattr(execution_module, "_DISCOVERY_MAX_ENTRIES", 2)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+@pytest.mark.parametrize(
+    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
+)
+def test_policy_requires_pytest_when_recognized_config_is_oversized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_name: str
+) -> None:
+    (tmp_path / config_name).write_text("x" * 20)
+    monkeypatch.setattr(execution_module, "_PYTEST_CONFIG_MAX_BYTES", 10)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+def test_policy_requires_pytest_when_recognized_config_is_malformed(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options\n")
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+def test_policy_requires_pytest_when_config_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
+    original_open = execution_module.os.open
+
+    def fail_config_open(path: object, *args: object, **kwargs: object) -> int:
+        if Path(str(path)).name == config.name:
+            raise PermissionError("config unreadable")
+        return original_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.os, "open", fail_config_open)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+@pytest.mark.parametrize(
+    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
+)
+def test_policy_requires_pytest_without_following_recognized_config_symlinks(
+    tmp_path: Path, config_name: str
+) -> None:
+    if not Path("/dev/null").exists():
+        pytest.skip("requires a POSIX device target")
+    (tmp_path / config_name).symlink_to("/dev/null")
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+@pytest.mark.parametrize(
+    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
+)
+def test_policy_requires_pytest_without_opening_recognized_config_fifos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_name: str
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFOs are unavailable on this platform")
+    config = tmp_path / config_name
+    os.mkfifo(config)
+    original_read_text = Path.read_text
+    read_attempted = False
+
+    def nonblocking_read(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal read_attempted
+        if path == config:
+            read_attempted = True
+            return ""
+        return original_read_text(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", nonblocking_read)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+    assert read_attempted is False
+
+
+def test_policy_requires_pytest_when_config_is_swapped_after_metadata_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not Path("/dev/null").exists():
+        pytest.skip("requires a POSIX device target")
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
+    original_stat = execution_module.os.stat
+    swapped = False
+
+    def swap_after_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal swapped
+        metadata = original_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+        if not swapped and str(path) in {str(config), config.name}:
+            swapped = True
+            config.unlink()
+            config.symlink_to("/dev/null")
+        return metadata
+
+    monkeypatch.setattr(execution_module.os, "stat", swap_after_stat)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+    assert swapped is True
+
+
+def test_policy_requires_pytest_when_repository_scan_is_inaccessible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied_scandir(_path: Path) -> None:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(execution_module.os, "scandir", denied_scandir)
+
+    assert ValidationPolicy().commands(tmp_path)[0].required is True
+
+
+def test_fail_closed_pytest_result_cannot_become_candidate_eligible(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path
+    for index in range(18):
+        directory /= f"level_{index}"
+        directory.mkdir()
+    pytest_command = ValidationPolicy().commands(tmp_path)[0]
+    evidence = CandidateEvidence(
+        candidate_id="candidate-1",
+        validation=ValidationReport(
+            checks=[
+                CheckResult(
+                    name=pytest_command.name,
+                    argv=list(pytest_command.argv),
+                    status=CheckStatus.FAILED,
+                    required=pytest_command.required,
+                )
+            ]
+        ),
+        acceptance_criteria_coverage=1,
+        risk_level=RiskLevel.LOW,
+        changed_files=1,
+        changed_lines=1,
+        duration_seconds=0,
+        required_failures=["pytest"],
+        restored_to_baseline=True,
+    )
+
+    assert pytest_command.required is True
+    assert evidence.eligible is False
 
 
 def test_local_executor_runs_allowlisted_command_without_shell(tmp_path: Path) -> None:
@@ -56,6 +272,14 @@ def test_local_executor_reports_missing_module_as_unavailable() -> None:
         module="repogent_module_that_does_not_exist",
     )
     assert not LocalExecutor(allowed={"optional": command.argv}).available(command)
+
+
+def test_local_executor_readiness_warns_without_affecting_command_availability() -> None:
+    command = CommandSpec("python", ("python", "-c", "print('ok')"), True)
+    executor = LocalExecutor(allowed={"python": command.argv})
+
+    assert executor.readiness() == (True, "restricted local execution provides weaker isolation")
+    assert executor.available(command) is True
 
 
 def test_local_executor_returns_timeout_result(tmp_path: Path) -> None:
@@ -220,6 +444,14 @@ def test_docker_executor_skips_when_docker_is_unavailable(
     assert result.reason == "docker executable or validator image unavailable"
 
 
+def test_docker_executor_readiness_reports_missing_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: None)
+
+    assert DockerExecutor().readiness() == (False, "docker executable is unavailable")
+
+
 def test_docker_executor_skips_missing_image_without_running_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -292,6 +524,55 @@ def test_docker_image_preflight_is_capped_by_command_timeout(
 
     assert DockerExecutor(allowed={"python": command.argv}).available(command) is True
     assert timeouts == [2]
+
+
+def test_docker_command_availability_probes_module_inside_existing_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+    calls: list[list[str]] = []
+
+    def fake_bounded_run(argv: list[str], **_kwargs: object) -> object:
+        calls.append(argv)
+        if argv[1:3] == ["image", "inspect"]:
+            return execution_module._ProcessResult(0, "", "", False)
+        return execution_module._ProcessResult(1, "", "module missing", False)
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
+    command = CommandSpec(
+        "pytest", ("python", "-m", "pytest", "-q"), True, module="pytest"
+    )
+    executor = DockerExecutor(allowed={command.name: command.argv})
+
+    assert executor.readiness() == (True, None)
+    assert executor.available(command) is False
+    probe = calls[1]
+    assert probe[:3] == ["/usr/local/bin/docker", "run", "--rm"]
+    assert "--network" in probe and probe[probe.index("--network") + 1] == "none"
+    assert "--read-only" in probe
+    assert "--mount" not in probe
+    assert probe[-1] == "pytest"
+
+
+def test_docker_command_availability_accepts_present_module_and_caches_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+    calls: list[list[str]] = []
+
+    def fake_bounded_run(argv: list[str], **_kwargs: object) -> object:
+        calls.append(argv)
+        return execution_module._ProcessResult(0, "", "", False)
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
+    command = CommandSpec(
+        "pytest", ("python", "-m", "pytest", "-q"), True, module="pytest"
+    )
+    executor = DockerExecutor(allowed={command.name: command.argv})
+
+    assert executor.available(command) is True
+    assert executor.available(command) is True
+    assert len(calls) == 1
 
 
 def test_docker_timeout_force_removes_the_internal_container_name(
