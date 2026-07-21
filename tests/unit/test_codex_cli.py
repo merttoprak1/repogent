@@ -159,3 +159,51 @@ def test_generate_adds_explicit_model_once(fake_codex: tuple[Path, Path]) -> Non
     assert result.usage.model == "gpt-5.6-sol"
     assert result.evidence is not None
     assert result.evidence.model == "gpt-5.6-sol"
+
+
+def test_generate_removes_target_root_from_prompt_and_environment(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = Path.cwd().resolve()
+    safe_home = tmp_path / "home"
+    safe_home.mkdir()
+    safe_path_entries = ["/usr/bin", "/bin"]
+    monkeypatch.setenv("HOME", str(safe_home))
+    monkeypatch.setenv("CODEX_HOME", str(target_root))
+    monkeypatch.setenv(
+        "PATH",
+        ":".join(
+            [
+                safe_path_entries[0],
+                str(target_root),
+                str(target_root / "bin"),
+                safe_path_entries[1],
+            ]
+        ),
+    )
+    provider = CodexCliProvider(executable=str(executable))
+
+    provider.generate(
+        role="requirements",
+        system_prompt=f"Do not inspect {target_root} or its contents",
+        payload={
+            "request": f"Change {target_root / 'src' / 'repogent'}",
+            "repository_context": [{"path": "src/repogent/codex_cli.py"}],
+        },
+        output_type=RequirementsSpec,
+        timeout_seconds=5,
+    )
+
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    serialized_capture = json.dumps(capture, sort_keys=True)
+    prompt = json.loads(capture["prompt"])
+    assert str(target_root) not in serialized_capture
+    assert capture["environment"]["HOME"] == str(safe_home)
+    assert "CODEX_HOME" not in capture["environment"]
+    assert capture["environment"]["PATH"].split(":") == safe_path_entries
+    assert prompt["payload"]["repository_context"] == [
+        {"path": "src/repogent/codex_cli.py"}
+    ]
