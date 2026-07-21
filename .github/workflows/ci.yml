@@ -21,7 +21,7 @@ jobs:
       - run: make verify
       - name: Build and inspect wheel
         run: |
-          python -m build --wheel --no-isolation
+          python -m build --wheel
           python -c "import glob, zipfile; wheels = glob.glob('dist/*.whl'); assert len(wheels) == 1; names = zipfile.ZipFile(wheels[0]).namelist(); assert 'repogent/py.typed' in names; assert any(name.endswith('.dist-info/licenses/LICENSE') for name in names)"
       - name: Install wheel in isolated environment
         run: |
