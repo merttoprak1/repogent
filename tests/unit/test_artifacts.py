@@ -38,6 +38,19 @@ def test_model_write_is_versioned_and_manifest_is_atomic(tmp_path: Path) -> None
     assert not list(store.root.glob("*.tmp"))
 
 
+def test_event_store_uses_the_run_events_file_and_store_secrets(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    store = ArtifactStore.create(
+        tmp_path / "runs", target, "change", run_id="run-1", secrets=["named-secret"]
+    )
+
+    event_store = store.event_store()
+
+    assert event_store.path == store.root / "events.jsonl"
+    assert event_store.secrets == ["named-secret"]
+
+
 def test_redaction_removes_named_secrets_and_common_api_keys() -> None:
     text = "OPENAI_API_KEY=sk-secretvalue token=ghp_abcdefghijklmnopqrstuvwxyz123456"
     assert "sk-secretvalue" not in redact(text, ["sk-secretvalue"])

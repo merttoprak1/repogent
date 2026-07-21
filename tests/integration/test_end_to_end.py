@@ -5,6 +5,7 @@ from pathlib import Path
 from repogent.agents import RoleSet
 from repogent.approvals import FakeApprover
 from repogent.artifacts import ArtifactStore
+from repogent.candidates import CandidatePolicy
 from repogent.domain import Budget, Decision, RunManifest, RunStatus
 from repogent.execution import LocalExecutor, ValidationPolicy
 from repogent.patching import PatchApplier, PatchPolicy
@@ -34,6 +35,7 @@ def test_scripted_fastapi_change_reaches_verified_report(tmp_path: Path) -> None
         artifacts=store,
         inspector=RepositoryInspector(),
         retriever=LexicalRetriever(),
+        candidate_policy=CandidatePolicy(max_candidates=2),
         budget=Budget(),
     )
     result = workflow.run()

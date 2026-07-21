@@ -1,6 +1,11 @@
 from repogent.domain import (
+    CandidateEvidence,
+    CandidateRecord,
+    CandidateSelection,
+    CheckoutState,
     CheckResult,
     CheckStatus,
+    FinalValidationStatus,
     ImplementationPlan,
     MergeRecommendation,
     PlanStep,
@@ -11,6 +16,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
 )
+from repogent.localization import LocalizationReport, LocalizedSymbol
 from repogent.reporting import render_report
 
 
@@ -42,3 +48,168 @@ def test_report_separates_tool_evidence_from_qa_interpretation() -> None:
     assert "## Deterministic validation" in report
     assert "pytest: passed (exit 0)" in report
     assert "## Model-generated QA review" in report
+
+
+def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
+    manifest = RunManifest(run_id="run-1", request="add route | safely", status=RunStatus.COMPLETED)
+    validation = ValidationReport(
+        checks=[
+            CheckResult(
+                name="pytest | unit",
+                argv=["pytest"],
+                status=CheckStatus.PASSED,
+                exit_code=0,
+            )
+        ]
+    )
+    localization = LocalizationReport(
+        locations=[
+            LocalizedSymbol(
+                symbol_id="route", path="app.py", start_line=1, end_line=4, score=1,
+                signals=[],
+            )
+        ],
+        snippets=[],
+        ambiguous=True,
+        ambiguity_reason="two paths | tied",
+    )
+    candidates = [
+        (
+            CandidateRecord.model_validate(
+                {
+                    "candidate_id": "candidate-2",
+                    "proposal": {
+                        "summary": "Rejected | unsafe",
+                        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+                    },
+                    "generation_reason": "alternative",
+                    "diff_sha256": "a" * 64,
+                    "usage": {"model": "test", "estimated_cost_usd": "0.18"},
+                }
+            ),
+            CandidateEvidence(
+                candidate_id="candidate-2",
+                validation=validation,
+                acceptance_criteria_coverage=0.875,
+                risk_level=RiskLevel.HIGH,
+                changed_files=2,
+                changed_lines=17,
+                duration_seconds=1.5,
+                required_failures=["pytest | unit"],
+                skipped_checks=["lint"],
+                restored_to_baseline=True,
+            ),
+        ),
+        (
+            CandidateRecord.model_validate(
+                {
+                    "candidate_id": "candidate-1",
+                    "proposal": {
+                        "summary": "Selected",
+                        "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+                    },
+                    "generation_reason": "initial implementation",
+                    "diff_sha256": "b" * 64,
+                    "usage": {"model": "test", "estimated_cost_usd": "0.08"},
+                }
+            ),
+            CandidateEvidence(
+                candidate_id="candidate-1",
+                validation=validation,
+                acceptance_criteria_coverage=1.0,
+                risk_level=RiskLevel.LOW,
+                changed_files=1,
+                changed_lines=2,
+                duration_seconds=0.5,
+                restored_to_baseline=True,
+            ),
+        ),
+    ]
+    selection = CandidateSelection(
+        selected_candidate_id="candidate-1",
+        eligible_candidate_ids=["candidate-1"],
+        reason="candidate-1 has the strongest evidence",
+    )
+
+    report = render_report(
+        manifest,
+        None,
+        None,
+        validation,
+        None,
+        localization=localization,
+        candidates=candidates,
+        selection=selection,
+    )
+
+    for section in (
+        "## Localization",
+        "## Candidate comparison",
+        "## Selection",
+        "## Deterministic validation",
+        "## Cost and duration",
+        "## Recovery",
+    ):
+        assert section in report
+    assert report.index("candidate-1") < report.index("candidate-2")
+    assert "candidate-2" in report
+    assert "pytest \\| unit" in report
+    assert "two paths \\| tied" in report
+    assert "selected" in report
+    assert "0.875" in report
+    assert "$0.18" in report
+    assert "restored" in report
+
+    interrupted_report = render_report(
+        manifest,
+        None,
+        None,
+        None,
+        None,
+        candidates=[(candidates[0][0], None)],
+    )
+
+    assert "candidate-2" in interrupted_report
+    assert "not evaluated" in interrupted_report
+    assert "evaluation interrupted; recovery unknown" in interrupted_report
+
+
+def test_report_distinguishes_disposable_recovery_from_applied_real_patch() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="change",
+        status=RunStatus.HUMAN_INTERVENTION_REQUIRED,
+        selected_patch_applied=True,
+        applied_paths=["src/app.py"],
+        final_validation_status=FinalValidationStatus.FAILED,
+        recovery_guidance=(
+            "Review src/app.py, run required validation, and revert the approved patch manually "
+            "if it should not remain."
+        ),
+        checkout_state=CheckoutState.APPLIED,
+    )
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Real checkout patch: remains applied" in report
+    assert "src/app.py" in report
+    assert "Final validation: failed" in report
+    assert "revert the approved patch manually" in report
+
+
+def test_report_never_claims_not_applied_when_checkout_recovery_is_unknown() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="change",
+        status=RunStatus.HUMAN_INTERVENTION_REQUIRED,
+        checkout_state=CheckoutState.RECOVERY_UNKNOWN,
+        selected_patch_applied=False,
+        applied_paths=["src/app.py"],
+        recovery_guidance="Inspect and manually restore src/app.py before continuing.",
+    )
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Real checkout patch: recovery unknown" in report
+    assert "Real checkout patch: not applied" not in report
+    assert "Inspect and manually restore src/app.py" in report
