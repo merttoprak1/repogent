@@ -278,9 +278,11 @@ def test_generate_uses_explicit_target_root_when_process_cwd_differs(
     safe_home = tmp_path / "home"
     safe_home.mkdir()
     safe_path_entries = ["/usr/bin", "/bin"]
+    adjacent_path_entry = f"prefix{target_root}/bin"
     monkeypatch.chdir(process_cwd)
     monkeypatch.setenv("HOME", str(safe_home))
-    monkeypatch.setenv("CODEX_HOME", str(target_root))
+    monkeypatch.setenv("CODEX_HOME", f"prefix{target_root}/homesuffix")
+    monkeypatch.setenv("HTTPS_PROXY", f"https://prefix{target_root}/proxysuffix")
     monkeypatch.setenv(
         "PATH",
         ":".join(
@@ -288,6 +290,7 @@ def test_generate_uses_explicit_target_root_when_process_cwd_differs(
                 safe_path_entries[0],
                 str(target_root),
                 str(target_root / "bin"),
+                adjacent_path_entry,
                 safe_path_entries[1],
             ]
         ),
@@ -298,9 +301,10 @@ def test_generate_uses_explicit_target_root_when_process_cwd_differs(
 
     provider.generate(
         role="requirements",
-        system_prompt=f"Do not inspect {target_root} or its contents",
+        system_prompt=f"prefix{target_root}/systemsuffix",
         payload={
-            "request": f"Change {target_root / 'src' / 'repogent'}",
+            "request": f"value{target_root}/valuesuffix",
+            f"key{target_root}/keysuffix": "nested",
             "repository_context": [{"path": "src/repogent/codex_cli.py"}],
         },
         output_type=RequirementsSpec,
@@ -313,6 +317,7 @@ def test_generate_uses_explicit_target_root_when_process_cwd_differs(
     assert str(target_root) not in serialized_capture
     assert capture["environment"]["HOME"] == str(safe_home)
     assert "CODEX_HOME" not in capture["environment"]
+    assert "HTTPS_PROXY" not in capture["environment"]
     assert capture["environment"]["PATH"].split(":") == safe_path_entries
     assert Path(capture["cwd"]) != process_cwd
     assert not Path(capture["cwd"]).is_relative_to(target_root)
@@ -326,6 +331,9 @@ def test_generate_uses_explicit_target_root_when_process_cwd_differs(
     assert prompt["payload"]["repository_context"] == [
         {"path": "src/repogent/codex_cli.py"}
     ]
+    assert prompt["system_prompt"] == "prefix[REDACTED]/systemsuffix"
+    assert prompt["payload"]["request"] == "value[REDACTED]/valuesuffix"
+    assert prompt["payload"]["key[REDACTED]/keysuffix"] == "nested"
 
 
 def test_check_ready_rejects_executable_inside_target_root_without_invoking_it(
@@ -443,18 +451,67 @@ def test_generate_redacts_windows_equivalent_target_root_from_prompt(
     monkeypatch.setattr(
         codex_cli_module, "os", _WindowsOs(codex_cli_module.os)
     )
+    safe_path_entries = ["/usr/bin", "/bin"]
+    monkeypatch.setenv("HTTPS_PROXY", f"https://prefix{windows_root}\\proxysuffix")
+    monkeypatch.setenv(
+        "PATH",
+        ":".join(
+            [
+                safe_path_entries[0],
+                f"prefix{windows_root}\\bin",
+                safe_path_entries[1],
+            ]
+        ),
+    )
 
     _generate(
         provider,
-        system_prompt=f"Do not inspect {windows_root} or its contents",
-        payload={"request": f"Change {windows_root}\\src", "repository_context": []},
+        system_prompt=f"prefix{windows_root}\\systemsuffix",
+        payload={
+            "request": f"value{windows_root}\\valuesuffix",
+            f"key{windows_root}\\keysuffix": "nested",
+            "repository_context": [],
+        },
     )
 
-    prompt = json.loads(
-        json.loads(capture_path.read_text(encoding="utf-8"))["prompt"]
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    prompt = json.loads(capture["prompt"])
+    assert "HTTPS_PROXY" not in capture["environment"]
+    assert capture["environment"]["PATH"].split(":") == safe_path_entries
+    assert prompt["system_prompt"] == "prefix[REDACTED]\\systemsuffix"
+    assert prompt["payload"]["request"] == "value[REDACTED]\\valuesuffix"
+    assert prompt["payload"]["key[REDACTED]\\keysuffix"] == "nested"
+
+
+def test_generate_redacts_windows_equivalent_adjacent_root_from_diagnostic(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable, capture_path = fake_codex
+    target_root = tmp_path / "TargetRoot"
+    target_root.mkdir()
+    provider = CodexCliProvider(executable=str(executable), target_root=target_root)
+    assert provider.check_ready().ready is True
+    windows_root = str(target_root).upper().replace("/", "\\")
+    monkeypatch.setattr(
+        codex_cli_module, "os", _WindowsOs(codex_cli_module.os)
     )
-    assert windows_root not in json.dumps(prompt, sort_keys=True)
-    assert prompt["system_prompt"] == "Do not inspect [REDACTED] or its contents"
+    _set_behavior(
+        capture_path,
+        exec_exit=7,
+        exec_stderr=f"failure-prefix{windows_root}\\srcsuffix",
+    )
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(
+        captured,
+        ProviderCallStatus.EXECUTION_FAILED,
+        forbidden=(_SECRET, windows_root),
+    )
+    assert "failure-prefix[REDACTED]\\srcsuffix" in str(captured.value)
 
 
 def test_generate_ignores_target_root_tempdir_configuration(
@@ -653,7 +710,8 @@ def test_generate_classifies_nonzero_exit_and_redacts_bounded_diagnostics(
     target_root = str(Path.cwd().resolve())
     credential_path = str(Path.home() / ".codex" / "auth.json")
     stderr = (
-        f"token={_SECRET} root={target_root} credentials={credential_path} "
+        f"token={_SECRET} root=prefix{target_root}/srcsuffix "
+        f"credentials={credential_path} "
         + ("failure " * 1000)
     )
     _set_behavior(capture_path, exec_exit=7, exec_stderr=stderr)

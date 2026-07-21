@@ -81,18 +81,10 @@ class CodexCliProvider:
         self._target_root = (
             Path.cwd() if target_root is None else target_root
         ).resolve()
-        self._target_root_pattern = re.compile(
-            rf"(?<![A-Za-z0-9_.-]){re.escape(str(self._target_root))}"
-            r"(?=$|[/\\\s:;,)=\]}\'\"?#&])"
-        )
+        self._target_root_pattern = re.compile(re.escape(str(self._target_root)))
         windows_root_fragment = r"[/\\]".join(
             re.escape(part)
             for part in str(self._target_root).replace("\\", "/").split("/")
-        )
-        self._windows_target_root_pattern = re.compile(
-            rf"(?<![A-Za-z0-9_.-]){windows_root_fragment}"
-            r"(?=$|[/\\\s:;,)=\]}\'\"?#&])",
-            re.IGNORECASE,
         )
         self._windows_target_root_contains_pattern = re.compile(
             windows_root_fragment, re.IGNORECASE
@@ -729,7 +721,7 @@ class CodexCliProvider:
                 safe_entries = [
                     entry
                     for entry in value.split(os.pathsep)
-                    if not self._is_target_root_path(entry)
+                    if not self._contains_target_root_path(entry)
                 ]
                 environment[key] = os.pathsep.join(safe_entries)
             elif not self._contains_target_root_path(value):
@@ -780,7 +772,9 @@ class CodexCliProvider:
     def _redact_target_root(self, text: str) -> str:
         redacted = self._target_root_pattern.sub("[REDACTED]", text)
         if os.name == "nt":
-            redacted = self._windows_target_root_pattern.sub("[REDACTED]", redacted)
+            redacted = self._windows_target_root_contains_pattern.sub(
+                "[REDACTED]", redacted
+            )
         return redacted
 
     def _redact_target_root_data(self, value: Any) -> Any:
@@ -800,8 +794,13 @@ class CodexCliProvider:
         return value
 
     def _contains_target_root_path(self, value: str) -> bool:
-        return bool(self._target_root_pattern.search(value)) or self._is_target_root_path(
-            value
+        return (
+            bool(self._target_root_pattern.search(value))
+            or (
+                os.name == "nt"
+                and bool(self._windows_target_root_contains_pattern.search(value))
+            )
+            or self._is_target_root_path(value)
         )
 
     def _is_target_root_path(self, value: str) -> bool:
