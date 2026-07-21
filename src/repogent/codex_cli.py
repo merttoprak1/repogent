@@ -355,19 +355,48 @@ class CodexCliProvider:
                     exit_code=exit_code,
                     message=str(error),
                 ) from error
-
-            if exit_code != 0:
+            except OSError as error:
                 raise self._provider_error(
                     role=role,
                     status=ProviderCallStatus.EXECUTION_FAILED,
                     started=started,
                     readiness=readiness,
                     exit_code=exit_code,
-                    message=self._diagnostic_excerpt(
+                    message="Codex CLI diagnostic artifact was unavailable",
+                ) from error
+
+            if exit_code != 0:
+                try:
+                    diagnostic = self._diagnostic_excerpt(
                         stdout_path,
                         stderr_path,
                         fallback="Codex CLI structured exec failed",
-                    ),
+                    )
+                except _OutputTooLargeError as error:
+                    raise self._provider_error(
+                        role=role,
+                        status=ProviderCallStatus.OUTPUT_TOO_LARGE,
+                        started=started,
+                        readiness=readiness,
+                        exit_code=exit_code,
+                        message=str(error),
+                    ) from error
+                except OSError as error:
+                    raise self._provider_error(
+                        role=role,
+                        status=ProviderCallStatus.EXECUTION_FAILED,
+                        started=started,
+                        readiness=readiness,
+                        exit_code=exit_code,
+                        message="Codex CLI diagnostic artifact was unavailable",
+                    ) from error
+                raise self._provider_error(
+                    role=role,
+                    status=ProviderCallStatus.EXECUTION_FAILED,
+                    started=started,
+                    readiness=readiness,
+                    exit_code=exit_code,
+                    message=diagnostic,
                 )
 
             try:
@@ -384,11 +413,11 @@ class CodexCliProvider:
             except OSError as error:
                 raise self._provider_error(
                     role=role,
-                    status=ProviderCallStatus.INVALID_OUTPUT,
+                    status=ProviderCallStatus.EXECUTION_FAILED,
                     started=started,
                     readiness=readiness,
                     exit_code=exit_code,
-                    message="Codex CLI structured output was missing",
+                    message="Codex CLI structured output artifact was unavailable",
                 ) from error
             if not raw_output:
                 raise self._provider_error(

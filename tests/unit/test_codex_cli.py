@@ -87,6 +87,8 @@ elif args and args[0] == "exec":
                 "workdir": str(workdir),
                 "prompt": prompt,
                 "schema": schema,
+                "schema_permissions": stat.S_IMODE(schema_path.stat().st_mode),
+                "result_permissions": stat.S_IMODE(result_path.stat().st_mode),
                 "environment": dict(os.environ),
                 "calls": [json.loads(line) for line in calls_path.read_text().splitlines()],
                 "records": [
@@ -119,6 +121,11 @@ elif args and args[0] == "exec":
         result_path.write_text("x" * behavior["result_size"], encoding="utf-8")
     elif result_mode == "missing":
         result_path.unlink(missing_ok=True)
+    elif result_mode == "non_regular":
+        result_path.unlink(missing_ok=True)
+        result_path.mkdir()
+    elif result_mode == "empty":
+        pass
     raise SystemExit(behavior.get("exec_exit", 0))
 else:
     raise SystemExit(2)
@@ -222,6 +229,8 @@ def test_generate_uses_isolated_structured_exec(
         "system_prompt": "bounded role",
     }
     assert capture["schema"]["title"] == "RequirementsSpec"
+    assert capture["schema_permissions"] == 0o600
+    assert capture["result_permissions"] == 0o600
 
 
 def test_generate_adds_explicit_model_once(fake_codex: tuple[Path, Path]) -> None:
@@ -510,7 +519,9 @@ def test_generate_classifies_nonzero_exit_and_redacts_bounded_diagnostics(
 @pytest.mark.parametrize(
     ("behavior", "max_output_bytes", "expected_status"),
     [
-        ({"result_mode": "missing"}, 4096, ProviderCallStatus.INVALID_OUTPUT),
+        ({"result_mode": "missing"}, 4096, ProviderCallStatus.EXECUTION_FAILED),
+        ({"result_mode": "non_regular"}, 4096, ProviderCallStatus.EXECUTION_FAILED),
+        ({"result_mode": "empty"}, 4096, ProviderCallStatus.INVALID_OUTPUT),
         (
             {"result_mode": "oversized", "result_size": 4097},
             4096,
@@ -550,6 +561,68 @@ def test_generate_rejects_oversized_diagnostics_without_reading_them(
 
     _assert_provider_error(captured, ProviderCallStatus.OUTPUT_TOO_LARGE)
     assert "diagnostic" in str(captured.value).lower()
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "replacement"),
+    [("stdout_path", "missing"), ("stderr_path", "non_regular")],
+)
+def test_generate_classifies_unavailable_diagnostic_artifacts(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_name: str,
+    replacement: str,
+) -> None:
+    executable, _ = fake_codex
+    provider = CodexCliProvider(executable=str(executable))
+    assert provider.check_ready().ready is True
+    real_run_exec = provider._run_exec
+
+    def run_and_replace_diagnostic(**kwargs: Any) -> int:
+        exit_code = real_run_exec(**kwargs)
+        artifact = kwargs[artifact_name]
+        assert isinstance(artifact, Path)
+        artifact.unlink()
+        if replacement == "non_regular":
+            artifact.mkdir()
+        return exit_code
+
+    monkeypatch.setattr(provider, "_run_exec", run_and_replace_diagnostic)
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(captured, ProviderCallStatus.EXECUTION_FAILED)
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.exit_code == 0
+
+
+def test_generate_classifies_nonzero_exit_with_unavailable_diagnostic_excerpt(
+    fake_codex: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable, capture_path = fake_codex
+    _set_behavior(capture_path, exec_exit=12, exec_stderr=_SECRET)
+    provider = CodexCliProvider(executable=str(executable))
+    real_diagnostic_excerpt = provider._diagnostic_excerpt
+
+    def replace_before_excerpt(
+        stdout_path: Path, stderr_path: Path, *, fallback: str
+    ) -> str:
+        stderr_path.unlink()
+        stderr_path.mkdir()
+        return real_diagnostic_excerpt(
+            stdout_path, stderr_path, fallback=fallback
+        )
+
+    monkeypatch.setattr(provider, "_diagnostic_excerpt", replace_before_excerpt)
+
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+
+    _assert_provider_error(captured, ProviderCallStatus.EXECUTION_FAILED)
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.exit_code == 12
 
 
 def test_generate_timeout_terminates_child_and_removes_temporary_directory(
