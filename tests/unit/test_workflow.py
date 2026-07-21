@@ -21,6 +21,8 @@ from repogent.domain import (
     Decision,
     EventKind,
     FinalValidationStatus,
+    ProviderCallEvidence,
+    ProviderCallStatus,
     ProviderUsage,
     RiskLevel,
     RunManifest,
@@ -889,6 +891,39 @@ def test_post_apply_qa_provider_failure_keeps_applied_patch_and_guidance(
     assert "Real checkout patch: remains applied" in (
         workflow.artifacts.root / "report.md"
     ).read_text()
+
+
+def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+    )
+    evidence = ProviderCallEvidence(
+        provider="codex-cli",
+        model="default",
+        role="requirements",
+        invocation=1,
+        status=ProviderCallStatus.AUTHENTICATION_FAILED,
+        structured_output_valid=False,
+    )
+    error = ProviderError(
+        "Codex CLI is not authenticated", retryable=False, evidence=evidence
+    )
+
+    class FailingProvider:
+        def generate(self, **_kwargs: object) -> object:
+            raise error
+
+    workflow.roles = RoleSet.from_provider(FailingProvider())  # type: ignore[arg-type]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    failure = json.loads((workflow.artifacts.root / "provider-failure-001.json").read_text())
+    assert failure == evidence.model_dump(mode="json")
 
 
 def test_post_apply_event_failure_keeps_real_checkout_state_in_manifest_and_report(

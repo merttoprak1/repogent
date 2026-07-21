@@ -212,6 +212,38 @@ class ProviderUsage(VersionedModel):
     latency_seconds: float = Field(default=0, ge=0)
 
 
+class ProviderCallStatus(StrEnum):
+    COMPLETED = "completed"
+    EXECUTABLE_MISSING = "executable_missing"
+    CAPABILITY_MISSING = "capability_missing"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    TIMED_OUT = "timed_out"
+    EXECUTION_FAILED = "execution_failed"
+    OUTPUT_TOO_LARGE = "output_too_large"
+    INVALID_OUTPUT = "invalid_output"
+
+
+class ProviderReadiness(VersionedModel):
+    provider: str
+    model: str
+    ready: bool
+    backend_version: str | None = None
+    reason: str | None = None
+
+
+class ProviderCallEvidence(VersionedModel):
+    provider: str
+    model: str
+    role: str
+    invocation: int = Field(ge=1)
+    status: ProviderCallStatus
+    backend_version: str | None = None
+    exit_code: int | None = None
+    latency_seconds: float = Field(default=0, ge=0)
+    structured_output_valid: bool = False
+    error: str | None = None
+
+
 class RunEvent(VersionedModel):
     run_id: str = Field(min_length=1)
     sequence: int = Field(ge=1)
