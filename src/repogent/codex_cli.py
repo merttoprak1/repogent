@@ -8,6 +8,7 @@ import subprocess  # noqa: S404  # nosec B404
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -76,6 +77,7 @@ class CodexCliProvider:
         )
         self._ready: ProviderReadiness | None = None
         self._resolved_executable: str | None = None
+        self._temporary_parent: Path | None = None
         self._invocation = 0
 
     @property
@@ -89,20 +91,31 @@ class CodexCliProvider:
         resolved = shutil.which(self.executable)
         if resolved is None:
             return self._not_ready(f"Codex CLI executable not found: {self.executable}")
+        resolved_path = Path(resolved).resolve()
+        if self._is_target_root_path(str(resolved_path)):
+            return self._not_ready(
+                "Codex CLI executable must be outside the target repository"
+            )
+
+        temporary_parent = self._select_safe_temporary_parent()
+        if temporary_parent is None:
+            return self._not_ready("No safe writable temporary directory is available")
 
         environment = self._child_environment()
         try:
-            with tempfile.TemporaryDirectory(prefix="repogent-codex-ready-") as directory:
+            with tempfile.TemporaryDirectory(
+                prefix="repogent-codex-ready-", dir=temporary_parent
+            ) as directory:
                 workdir = Path(directory)
                 version = self._run_readiness(
-                    [resolved, "--version"], workdir, environment
+                    [str(resolved_path), "--version"], workdir, environment
                 )
                 if version.returncode != 0:
                     return self._not_ready("Codex CLI version check failed")
                 backend_version = version.stdout.strip()
 
                 help_result = self._run_readiness(
-                    [resolved, "exec", "--help"], workdir, environment
+                    [str(resolved_path), "exec", "--help"], workdir, environment
                 )
                 help_text = f"{help_result.stdout}\n{help_result.stderr}"
                 missing_flags = [flag for flag in _REQUIRED_EXEC_FLAGS if flag not in help_text]
@@ -110,7 +123,7 @@ class CodexCliProvider:
                     return self._not_ready("Codex CLI lacks required structured exec flags")
 
                 login = self._run_readiness(
-                    [resolved, "login", "status"], workdir, environment
+                    [str(resolved_path), "login", "status"], workdir, environment
                 )
                 if login.returncode != 0:
                     return self._not_ready("Codex CLI is not authenticated")
@@ -125,7 +138,8 @@ class CodexCliProvider:
             ready=True,
             backend_version=backend_version,
         )
-        self._resolved_executable = resolved
+        self._resolved_executable = str(resolved_path)
+        self._temporary_parent = temporary_parent
         self._ready = readiness
         return readiness
 
@@ -183,7 +197,12 @@ class CodexCliProvider:
             sort_keys=True,
         )
 
-        with tempfile.TemporaryDirectory(prefix="repogent-codex-") as directory:
+        temporary_parent = self._temporary_parent
+        if temporary_parent is None:
+            raise RuntimeError("successful readiness did not retain a temporary parent")
+        with tempfile.TemporaryDirectory(
+            prefix="repogent-codex-", dir=temporary_parent
+        ) as directory:
             workdir = Path(directory)
             schema_path = workdir / "schema.json"
             result_path = workdir / "result.json"
@@ -299,6 +318,47 @@ class CodexCliProvider:
             elif not self._contains_target_root_path(value):
                 environment[key] = value
         return environment
+
+    def _select_safe_temporary_parent(self) -> Path | None:
+        candidates: list[Path] = []
+        with suppress(OSError):
+            candidates.append(Path(tempfile.gettempdir()))
+        if os.name == "nt":
+            candidates.extend(
+                Path(value)
+                for key in ("TEMP", "TMP")
+                if (value := os.environ.get(key))
+            )
+            if local_app_data := os.environ.get("LOCALAPPDATA"):
+                candidates.append(Path(local_app_data) / "Temp")
+            if system_root := os.environ.get("SYSTEMROOT"):
+                candidates.append(Path(system_root) / "Temp")
+        else:
+            candidates.extend(
+                (Path("/tmp"), Path("/var/tmp"))  # noqa: S108  # nosec B108
+            )
+
+        seen: set[Path] = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.expanduser().resolve(strict=True)
+            except OSError:
+                continue
+            if resolved in seen or not resolved.is_dir():
+                continue
+            seen.add(resolved)
+            if self._is_target_root_path(str(resolved)):
+                continue
+            try:
+                with tempfile.TemporaryDirectory(
+                    prefix="repogent-codex-probe-", dir=resolved
+                ) as probe:
+                    if self._is_target_root_path(str(Path(probe).resolve())):
+                        continue
+            except OSError:
+                continue
+            return resolved
+        return None
 
     def _redact_target_root(self, text: str) -> str:
         return self._target_root_pattern.sub("[REDACTED]", text)
