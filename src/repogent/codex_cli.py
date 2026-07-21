@@ -8,8 +8,8 @@ import stat
 import subprocess  # noqa: S404  # nosec B404
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import IO, Any, TypeVar
 
@@ -68,6 +68,7 @@ class CodexCliProvider:
         *,
         executable: str = "codex",
         model: str | None = None,
+        target_root: Path | None = None,
         secrets: Sequence[str] = (),
         max_prompt_bytes: int = DEFAULT_MAX_PROMPT_BYTES,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
@@ -77,10 +78,24 @@ class CodexCliProvider:
         self.secrets = tuple(secrets)
         self.max_prompt_bytes = max_prompt_bytes
         self.max_output_bytes = max_output_bytes
-        self._target_root = Path.cwd().resolve()
+        self._target_root = (
+            Path.cwd() if target_root is None else target_root
+        ).resolve()
         self._target_root_pattern = re.compile(
             rf"(?<![A-Za-z0-9_.-]){re.escape(str(self._target_root))}"
             r"(?=$|[/\\\s:;,)=\]}\'\"?#&])"
+        )
+        windows_root_fragment = r"[/\\]".join(
+            re.escape(part)
+            for part in str(self._target_root).replace("\\", "/").split("/")
+        )
+        self._windows_target_root_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_.-]){windows_root_fragment}"
+            r"(?=$|[/\\\s:;,)=\]}\'\"?#&])",
+            re.IGNORECASE,
+        )
+        self._windows_target_root_contains_pattern = re.compile(
+            windows_root_fragment, re.IGNORECASE
         )
         self._ready: ProviderReadiness | None = None
         self._readiness_failure_status = ProviderCallStatus.EXECUTION_FAILED
@@ -101,11 +116,11 @@ class CodexCliProvider:
         return self.model
 
     def check_ready(self) -> ProviderReadiness:
-        if self._ready is not None:
-            return self._ready
-
         if model_error := self._model_validation_error():
             return self._not_ready(model_error, ProviderCallStatus.CAPABILITY_MISSING)
+
+        if self._ready is not None:
+            return self._ready
 
         resolved_path: Path
         if self._resolved_executable is None:
@@ -138,10 +153,9 @@ class CodexCliProvider:
 
         environment = self._child_environment()
         try:
-            with tempfile.TemporaryDirectory(
-                prefix="repogent-codex-ready-", dir=temporary_parent
-            ) as directory:
-                workdir = Path(directory)
+            with self._temporary_directory(
+                prefix="repogent-codex-ready-", parent=temporary_parent
+            ) as workdir:
                 if not self._version_checked:
                     version = self._run_readiness(
                         [str(resolved_path), "--version"], workdir, environment
@@ -274,10 +288,14 @@ class CodexCliProvider:
         temporary_parent = self._temporary_parent
         if temporary_parent is None:
             raise RuntimeError("successful readiness did not retain a temporary parent")
-        with tempfile.TemporaryDirectory(
-            prefix="repogent-codex-", dir=temporary_parent
-        ) as directory:
-            workdir = Path(directory)
+        exit_code: int | None = None
+        with self._execution_workspace(
+            parent=temporary_parent,
+            role=role,
+            started=started,
+            readiness=readiness,
+            exit_code=lambda: exit_code,
+        ) as workdir:
             schema_path = self._owner_only_file(workdir, "schema-", ".json")
             result_path = self._owner_only_file(workdir, "result-", ".json")
             prompt_path = self._owner_only_file(workdir, "prompt-", ".json")
@@ -559,6 +577,48 @@ class CodexCliProvider:
         path.chmod(0o600)
         return path
 
+    @staticmethod
+    @contextmanager
+    def _temporary_directory(*, prefix: str, parent: Path) -> Iterator[Path]:
+        temporary = tempfile.TemporaryDirectory(prefix=prefix, dir=parent)
+        primary_error: BaseException | None = None
+        try:
+            yield Path(temporary.name)
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                temporary.cleanup()
+            except OSError:
+                if primary_error is None:
+                    raise
+
+    @contextmanager
+    def _execution_workspace(
+        self,
+        *,
+        parent: Path,
+        role: str,
+        started: float,
+        readiness: ProviderReadiness,
+        exit_code: Callable[[], int | None],
+    ) -> Iterator[Path]:
+        try:
+            with self._temporary_directory(
+                prefix="repogent-codex-", parent=parent
+            ) as workdir:
+                yield workdir
+        except OSError as error:
+            raise self._provider_error(
+                role=role,
+                status=ProviderCallStatus.EXECUTION_FAILED,
+                started=started,
+                readiness=readiness,
+                exit_code=exit_code(),
+                message="Codex CLI temporary workspace or artifact operation failed",
+            ) from error
+
     def _check_bounded_file(self, path: Path, label: str) -> None:
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode):
@@ -646,6 +706,11 @@ class CodexCliProvider:
             return "Codex CLI model must contain 1 to 200 printable characters"
         if "\x00" in self.model or not self.model.isprintable():
             return "Codex CLI model must contain 1 to 200 printable characters"
+        if str(self._target_root) in self.model or (
+            os.name == "nt"
+            and self._windows_target_root_contains_pattern.search(self.model)
+        ):
+            return "Codex CLI model must not contain the target repository path"
         return None
 
     @staticmethod
@@ -713,7 +778,10 @@ class CodexCliProvider:
         return None
 
     def _redact_target_root(self, text: str) -> str:
-        return self._target_root_pattern.sub("[REDACTED]", text)
+        redacted = self._target_root_pattern.sub("[REDACTED]", text)
+        if os.name == "nt":
+            redacted = self._windows_target_root_pattern.sub("[REDACTED]", redacted)
+        return redacted
 
     def _redact_target_root_data(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -754,6 +822,7 @@ class CodexCliProvider:
             provider="codex-cli",
             model=self._model_name,
             ready=False,
+            backend_version=self._backend_version,
             reason=self._bounded_redacted_text(
                 reason, fallback="Codex CLI is not ready"
             ),

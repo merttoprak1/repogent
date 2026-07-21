@@ -173,9 +173,10 @@ def test_run_constructs_ready_codex_after_preflight_and_records_default_model(
     captured: dict[str, object] = {}
 
     class ReadyCodex:
-        def __init__(self, *, model: str | None) -> None:
+        def __init__(self, *, model: str | None, target_root: Path) -> None:
             assert preflight_complete is True
             captured["model"] = model
+            captured["target_root"] = target_root
 
         def check_ready(self) -> ProviderReadiness:
             return ProviderReadiness(provider="codex-cli", model="default", ready=True)
@@ -208,13 +209,14 @@ def test_run_constructs_ready_codex_after_preflight_and_records_default_model(
     monkeypatch.setattr(cli, "configuration_fingerprint", record_fingerprint)
     monkeypatch.setattr(cli.RoleSet, "from_provider", lambda provider: provider)
     monkeypatch.setattr(cli, "Workflow", FakeWorkflow)
+    monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(
         app,
         [
             "run",
             "--repository",
-            str(target),
+            "target",
             "--request",
             "change",
             "--provider",
@@ -228,6 +230,7 @@ def test_run_constructs_ready_codex_after_preflight_and_records_default_model(
 
     assert result.exit_code == 0
     assert captured["model"] is None
+    assert captured["target_root"] == target.resolve()
     assert captured["fingerprint"][:3] == ("codex-cli", "default", "local")
     readiness = json.loads((next(evidence.iterdir()) / "provider-readiness-001.json").read_text())
     assert readiness == {
@@ -248,8 +251,9 @@ def test_run_terminalizes_not_ready_codex_without_constructing_workflow(
     evidence = tmp_path / "runs"
 
     class NotReadyCodex:
-        def __init__(self, *, model: str | None) -> None:
+        def __init__(self, *, model: str | None, target_root: Path) -> None:
             assert model is None
+            assert target_root == target.resolve()
 
         def check_ready(self) -> ProviderReadiness:
             return ProviderReadiness(
