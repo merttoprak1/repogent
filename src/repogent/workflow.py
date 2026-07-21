@@ -35,6 +35,7 @@ from repogent.domain import (
     FinalValidationStatus,
     ImplementationPlan,
     MergeRecommendation,
+    ProviderCallEvidence,
     ProviderUsage,
     QAReview,
     RequirementsSpec,
@@ -49,6 +50,7 @@ from repogent.events import EventSink
 from repogent.localization import LocalizationReport, PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.provider_context import ProviderContextBuilder
+from repogent.providers import ProviderError
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
 from repogent.symbols import PythonSymbolGraph, PythonSymbolGraphBuilder
@@ -158,6 +160,20 @@ class Workflow:
             self._mark_post_apply_interrupted()
             status = RunStatus.CANCELLED
             reason = "workflow interrupted by user"
+        except ProviderError as error:
+            self._mark_post_apply_interrupted()
+            if error.evidence is not None:
+                try:
+                    self.artifacts.write_model("provider-failure", error.evidence)
+                except Exception as persistence_error:
+                    status = RunStatus.HUMAN_INTERVENTION_REQUIRED
+                    reason = str(persistence_error)
+                else:
+                    status = RunStatus.HUMAN_INTERVENTION_REQUIRED
+                    reason = str(error)
+            else:
+                status = RunStatus.HUMAN_INTERVENTION_REQUIRED
+                reason = str(error)
         except Exception as error:
             self._mark_post_apply_interrupted()
             status = RunStatus.HUMAN_INTERVENTION_REQUIRED
@@ -194,7 +210,11 @@ class Workflow:
         )
         self.requirements = requirements_result.output
         self.write("requirements", self.requirements)
-        self.account(requirements_result.usage, generated_artifact="requirements")
+        self.account(
+            requirements_result.usage,
+            generated_artifact="requirements",
+            evidence=requirements_result.evidence,
+        )
         self.emit(EventKind.MODEL, "requirements generation completed", role="requirements")
         self.advance(RunStage.REQUIREMENTS)
         if not self.approve(ApprovalKind.REQUIREMENTS, self.requirements):
@@ -210,7 +230,11 @@ class Workflow:
         plan_result = self.roles.planning.run(plan_payload, timeout_seconds=self.remaining_time())
         self.plan = plan_result.output
         self.write("plan", self.plan)
-        self.account(plan_result.usage, generated_artifact="plan")
+        self.account(
+            plan_result.usage,
+            generated_artifact="plan",
+            evidence=plan_result.evidence,
+        )
         self.emit(EventKind.MODEL, "planning generation completed", role="planning")
         self.advance(RunStage.PLANNED)
         if not self.approve(ApprovalKind.PLAN, self.plan):
@@ -362,7 +386,11 @@ class Workflow:
         review_result = self.roles.qa.run(qa_payload, timeout_seconds=self.remaining_time())
         self.review = review_result.output
         self.write("qa-review", self.review)
-        self.account(review_result.usage, generated_artifact="qa-review")
+        self.account(
+            review_result.usage,
+            generated_artifact="qa-review",
+            evidence=review_result.evidence,
+        )
         self.emit(EventKind.MODEL, "QA generation completed", role="qa")
         self.advance(RunStage.REVIEWED)
         status = {
@@ -453,7 +481,11 @@ class Workflow:
             )
             self.artifacts.update_manifest(self.manifest)
             self.write("candidate", candidate)
-            self.account(result.usage, generated_artifact="candidate")
+            self.account(
+                result.usage,
+                generated_artifact="candidate",
+                evidence=result.evidence,
+            )
             self.emit(EventKind.CANDIDATE, "candidate generated", candidate_id=candidate_id)
             candidate_evaluator = cast(CandidateEvaluator, self.candidate_evaluator)
             candidate_evidence = candidate_evaluator.evaluate(
@@ -551,7 +583,11 @@ class Workflow:
         return record.decision is Decision.APPROVED
 
     def account(
-        self, usage: ProviderUsage, *, generated_artifact: str | None = None
+        self,
+        usage: ProviderUsage,
+        *,
+        generated_artifact: str | None = None,
+        evidence: ProviderCallEvidence | None = None,
     ) -> None:
         tokens = self.manifest.token_usage + usage.input_tokens + usage.output_tokens
         cost = self.manifest.estimated_cost_usd + usage.estimated_cost_usd
@@ -559,6 +595,8 @@ class Workflow:
             update={"token_usage": tokens, "estimated_cost_usd": cost, "updated_at": utc_now()}
         )
         self.artifacts.write_model("provider-usage", usage)
+        if evidence is not None:
+            self.artifacts.write_model("provider-call", evidence)
         self.artifacts.update_manifest(self.manifest)
         exceeded_reason: str | None = None
         if tokens > self.budget.max_tokens:

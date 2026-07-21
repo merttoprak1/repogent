@@ -36,6 +36,7 @@ class RoleAgent(Generic[T]):
         for _attempt in range(2):
             try:
                 options: dict[str, Any] = {
+                    "role": self.name,
                     "system_prompt": f"You are the Repogent {self.name} role. {ROLE_RULES}",
                     "payload": payload,
                     "output_type": self.output_type,
@@ -51,6 +52,8 @@ class RoleAgent(Generic[T]):
                     **options,
                 )
             except ProviderError as error:
+                if not error.retryable:
+                    raise
                 last_error = error
         raise ProviderError(f"{self.name} failed structured generation twice") from last_error
 
