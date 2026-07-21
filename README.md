@@ -87,6 +87,22 @@ OPENAI_API_KEY=... repogent run --repository /path/to/fastapi-repo \
 
 The OpenAI provider uses structured outputs. Provider-facing context is centralized and globally bounded to 64,000 serialized characters: requirements receive inventory metadata without file bodies; later roles receive the highest-ranked locations and complete-line snippets; repair and QA receive capped command summaries. A deterministic structured allocator progressively shortens or omits low-priority bulk fields, records truncation and omission counts, and preserves critical identifiers, statuses, and reasons without chopping serialized JSON. Docker remains the default if `--executor` is omitted. If Docker or the fixed validator image is unavailable, `DockerExecutor` reports unavailable execution as skipped rather than silently switching to local execution; select `--executor local` only when you accept the weaker boundary. `ValidationPipeline` treats an unavailable required check as failed, while optional checks are skipped.
 
+## Codex CLI provider
+
+Repogent can use the locally installed Codex CLI as interchangeable proposal intelligence. Install Codex separately, then initiate authentication yourself with `codex login`; Repogent checks readiness but never starts an interactive login flow. Codex has its own authentication and sandbox controls. This provider does not turn a Codex, ChatGPT, or other account entitlement into an OpenAI API billing arrangement.
+
+Use a disposable checkout and the normal Repogent approval flow:
+
+```bash
+repogent run --repository /path/to/fastapi-repo \
+  --request "Add a health endpoint" --provider codex-cli --executor docker \
+  --output-dir ./.repogent/runs
+```
+
+When `--model` is omitted, Repogent leaves model choice to Codex and records `default` in its evidence. Pass `--model NAME` to request an explicit Codex model; Repogent passes that value once to each `codex exec` invocation. The provider performs separate readiness checks (executable, structured-exec capability, and login state) and writes a `provider-readiness` artifact. A successful role generation writes `provider-usage` and `provider-call` artifacts; a `ProviderError` writes `provider-failure` evidence and terminalizes without usage accounting. Each role generation is one structured `codex exec` call—there is no provider-side retry or hidden second proposal call.
+
+Codex does not replace Repogent's gate: it proposes typed artifacts, while Repogent independently bounds context, validates schemas and patches, runs deterministic checks, records evidence, and requires human approval before mutation. The CLI subprocess runs in a provider-owned temporary directory and uses Codex's read-only sandbox mode, but this is practical isolation rather than strict OS-enforced read isolation of the host or repository. Keep credentials out of the target repository and follow the [security model](docs/security.md).
+
 ## Approvals and mutation
 
 A normal successful run pauses for approval of:
@@ -105,7 +121,7 @@ A rejection or normal user interruption ends the run as `cancelled`. The checkou
 - numbered `inventory-*.json`, `symbol-graph-*.json`, `localization-*.json`, and role inputs and outputs;
 - `candidate-*.json`, `candidate-evidence-*.json`, `candidate-selection-*.json`, approvals, proposed/applied diffs, and repair history;
 - raw validation status, fixed argument arrays, output, exit codes, durations, and reasons for skipped checks;
-- provider usage and the independent QA result.
+- as applicable, provider readiness; successful-call usage and per-call evidence; or provider-failure evidence; and the independent QA result.
 
 Versioned domain/model artifacts currently declare `schema_version: "1"` (for example, manifests, events, localization, candidates, evidence, selection, and validation models). Raw role-input JSON/text payload artifacts, such as `requirements-input`, `planning-input`, `candidate-input`, and `qa-input`, preserve bounded provider context but are not versioned model envelopes. Stage artifacts are append-only, while `run.json` is atomically replaced as the state changes. It records fingerprints, candidate IDs, selected-candidate and real-checkout `checkout_state` (`not_applied`, `applied`, or `recovery_unknown`), applied paths, final-validation state, recovery guidance, generated-but-not-consumed outputs, event linkage, and terminal reason. A provider output and its usage are persisted before its budget is enforced, so an output that crosses a limit remains inspectable but is not approved, evaluated, or used to start another stage. Common credential forms and configured secrets are redacted before persistence, but evidence still deserves careful handling.
 

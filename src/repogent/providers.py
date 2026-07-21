@@ -11,14 +11,23 @@ from typing import Any, Generic, Protocol, TypeVar
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, ValidationError
 
-from repogent.domain import ProviderUsage
+from repogent.domain import ProviderCallEvidence, ProviderUsage
 from repogent.sanitization import redact_text, sanitize_data
 
 T = TypeVar("T", bound=BaseModel)
 
 
 class ProviderError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        evidence: ProviderCallEvidence | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.evidence = evidence
 
 
 @dataclass(frozen=True)
@@ -31,6 +40,7 @@ class ModelPricing:
 class ProviderResult(Generic[T]):
     output: T
     usage: ProviderUsage
+    evidence: ProviderCallEvidence | None = None
 
 
 class ModelProvider(Protocol):
@@ -40,6 +50,7 @@ class ModelProvider(Protocol):
         system_prompt: str,
         payload: Mapping[str, Any],
         output_type: type[T],
+        role: str = "unknown",
     ) -> ProviderResult[T]: ...
 
 
@@ -54,6 +65,7 @@ class ScriptedProvider:
         system_prompt: str,
         payload: Mapping[str, Any],
         output_type: type[T],
+        role: str = "unknown",
         timeout_seconds: float | None = None,
     ) -> ProviderResult[T]:
         del timeout_seconds
@@ -62,6 +74,7 @@ class ScriptedProvider:
                 "system_prompt": system_prompt,
                 "payload": dict(payload),
                 "output_type": output_type.__name__,
+                "role": role,
             }
         )
         if not self._outputs:
@@ -101,8 +114,10 @@ class OpenAIProvider:
         system_prompt: str,
         payload: Mapping[str, Any],
         output_type: type[T],
+        role: str = "unknown",
         timeout_seconds: float | None = None,
     ) -> ProviderResult[T]:
+        del role
         started = time.monotonic()
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise ProviderError("provider timeout exhausted")
