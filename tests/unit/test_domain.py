@@ -12,6 +12,8 @@ from repogent.domain import (
     FinalValidationStatus,
     ImplementationPlan,
     PlanStep,
+    ProviderCallEvidence,
+    ProviderCallStatus,
     RequirementsSpec,
     RiskLevel,
     RunEvent,
@@ -20,6 +22,21 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
 )
+
+
+def test_provider_call_evidence_requires_a_positive_invocation() -> None:
+    evidence = ProviderCallEvidence(
+        provider="codex-cli",
+        model="default",
+        role="requirements",
+        invocation=1,
+        status=ProviderCallStatus.AUTHENTICATION_FAILED,
+    )
+
+    assert evidence.structured_output_valid is False
+
+    with pytest.raises(ValidationError):
+        ProviderCallEvidence(**{**evidence.model_dump(), "invocation": 0})
 
 
 def test_requirements_reject_empty_objective() -> None:

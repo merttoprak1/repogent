@@ -40,7 +40,10 @@ addopts = "-q --strict-markers --cov=repogent --cov-report=term-missing --cov-fa
 testpaths = ["tests"]
 pythonpath = ["src"]
 norecursedirs = ["tests/fixtures"]
-markers = ["docker: requires a running Docker daemon and validator image"]
+markers = [
+  "docker: requires a running Docker daemon and validator image",
+  "manual: consumes an authenticated external provider",
+]
 
 [tool.ruff]
 target-version = "py311"

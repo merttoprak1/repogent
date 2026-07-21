@@ -7,7 +7,8 @@ from typer.testing import CliRunner
 
 from repogent import cli
 from repogent.cli import app
-from repogent.domain import RunStatus
+from repogent.domain import ProviderReadiness, RunStatus
+from repogent.preflight import PreflightReport
 
 runner = CliRunner()
 
@@ -84,7 +85,9 @@ def test_run_rejects_unknown_provider_without_traceback(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 2
-    assert "provider must be openai or scripted" in result.output
+    assert "provider must be openai" in result.output
+    assert "codex-cli" in result.output
+    assert "scripted" in result.output
     assert "Traceback" not in result.output
 
 
@@ -132,6 +135,175 @@ def test_run_rejects_script_with_openai_provider(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "--script is only supported with --provider scripted" in result.output
     assert "Traceback" not in result.output
+
+
+def test_run_rejects_script_with_codex_cli_provider_without_traceback(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--provider",
+            "codex-cli",
+            "--script",
+            str(script),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--script is only supported with --provider scripted" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_run_constructs_ready_codex_after_preflight_and_records_default_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+    preflight_complete = False
+    captured: dict[str, object] = {}
+
+    class ReadyCodex:
+        def __init__(self, *, model: str | None, target_root: Path) -> None:
+            assert preflight_complete is True
+            captured["model"] = model
+            captured["target_root"] = target_root
+
+        def check_ready(self) -> ProviderReadiness:
+            return ProviderReadiness(provider="codex-cli", model="default", ready=True)
+
+    class PassingPreflight:
+        def run(self, _repository: Path) -> PreflightReport:
+            nonlocal preflight_complete
+            preflight_complete = True
+            return PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repository"
+            )
+
+    class FakeWorkflow:
+        def __init__(self, **kwargs: object) -> None:
+            captured["workflow_provider"] = kwargs["roles"]
+
+        def run(self) -> object:
+            return type(
+                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
+            )()
+
+    def record_fingerprint(
+        provider: str, model: str, executor: str, commands: object
+    ) -> str:
+        captured["fingerprint"] = (provider, model, executor, commands)
+        return "fingerprint"
+
+    monkeypatch.setattr(cli, "CodexCliProvider", ReadyCodex, raising=False)
+    monkeypatch.setattr(cli, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(cli, "configuration_fingerprint", record_fingerprint)
+    monkeypatch.setattr(cli.RoleSet, "from_provider", lambda provider: provider)
+    monkeypatch.setattr(cli, "Workflow", FakeWorkflow)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            "target",
+            "--request",
+            "change",
+            "--provider",
+            "codex-cli",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["model"] is None
+    assert captured["target_root"] == target.resolve()
+    assert captured["fingerprint"][:3] == ("codex-cli", "default", "local")
+    readiness = json.loads((next(evidence.iterdir()) / "provider-readiness-001.json").read_text())
+    assert readiness == {
+        "schema_version": "1",
+        "provider": "codex-cli",
+        "model": "default",
+        "ready": True,
+        "backend_version": None,
+        "reason": None,
+    }
+
+
+def test_run_terminalizes_not_ready_codex_without_constructing_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+
+    class NotReadyCodex:
+        def __init__(self, *, model: str | None, target_root: Path) -> None:
+            assert model is None
+            assert target_root == target.resolve()
+
+        def check_ready(self) -> ProviderReadiness:
+            return ProviderReadiness(
+                provider="codex-cli",
+                model="default",
+                ready=False,
+                reason="Codex CLI is not authenticated; run codex login",
+            )
+
+    class PassingPreflight:
+        def run(self, _repository: Path) -> PreflightReport:
+            return PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repository"
+            )
+
+    def workflow_must_not_be_constructed(**_kwargs: object) -> object:
+        raise AssertionError("Workflow must not be constructed when Codex is not ready")
+
+    monkeypatch.setattr(cli, "CodexCliProvider", NotReadyCodex, raising=False)
+    monkeypatch.setattr(cli, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(cli, "Workflow", workflow_must_not_be_constructed)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--provider",
+            "codex-cli",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "run codex login" in result.output
+    assert "Traceback" not in result.output
+    run_directory = next(evidence.iterdir())
+    assert (run_directory / "provider-readiness-001.json").exists()
+    manifest = json.loads((run_directory / "run.json").read_text())
+    assert manifest["status"] == RunStatus.HUMAN_INTERVENTION_REQUIRED.value
+    assert "run codex login" in manifest["reason"]
+    assert (run_directory / "report.md").exists()
+    terminal = json.loads((run_directory / "events.jsonl").read_text().splitlines()[-1])
+    assert terminal["kind"] == "terminal"
 
 
 @pytest.mark.parametrize("contents", ["{", '{"output": "not an array"}'])
@@ -227,7 +399,18 @@ def test_run_uses_external_default_evidence_directory(
             },
         )(),
     )
-    monkeypatch.setattr(cli, "OpenAIProvider", lambda *, model: object())
+    def fake_openai_provider(*, model: str) -> object:
+        captured["model"] = model
+        return object()
+
+    def record_fingerprint(
+        provider: str, model: str, executor: str, commands: object
+    ) -> str:
+        captured["fingerprint"] = (provider, model, executor, commands)
+        return "fingerprint"
+
+    monkeypatch.setattr(cli, "OpenAIProvider", fake_openai_provider)
+    monkeypatch.setattr(cli, "configuration_fingerprint", record_fingerprint)
     monkeypatch.setattr(cli.RoleSet, "from_provider", lambda _provider: object())
     monkeypatch.setattr(cli, "Workflow", FakeWorkflow)
 
@@ -235,6 +418,64 @@ def test_run_uses_external_default_evidence_directory(
 
     assert result.exit_code == 0
     assert captured["base_dir"] == target.parent / ".repogent" / "runs"
+    assert captured["model"] == "gpt-5.6-sol"
+    assert captured["fingerprint"][:3] == ("openai", "gpt-5.6-sol", "docker")
+
+
+def test_run_fingerprints_scripted_provider_with_scripted_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    captured: dict[str, object] = {}
+
+    class PassingPreflight:
+        def run(self, _repository: Path) -> PreflightReport:
+            return PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repository"
+            )
+
+    class FakeWorkflow:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def run(self) -> object:
+            return type(
+                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
+            )()
+
+    def record_fingerprint(
+        provider: str, model: str, executor: str, commands: object
+    ) -> str:
+        captured["fingerprint"] = (provider, model, executor, commands)
+        return "fingerprint"
+
+    monkeypatch.setattr(cli, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(cli, "configuration_fingerprint", record_fingerprint)
+    monkeypatch.setattr(cli, "RoleSet", type("Roles", (), {"from_provider": lambda _: object()}))
+    monkeypatch.setattr(cli, "Workflow", FakeWorkflow)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--provider",
+            "scripted",
+            "--script",
+            str(script),
+            "--executor",
+            "local",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["fingerprint"][:3] == ("scripted", "scripted", "local")
 
 
 def test_run_stores_failed_preflight_before_constructing_provider(

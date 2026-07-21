@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 
 from repogent.agents import RoleSet
 from repogent.approvals import CliApprover
 from repogent.artifacts import ArtifactStore, ArtifactStoreError
+from repogent.codex_cli import CodexCliProvider
 from repogent.domain import Budget, EventKind, RunEvent, RunManifest, RunStage, RunStatus
 from repogent.events import CompositeEventSink, ConsoleEventSink
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
 from repogent.localization import PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.preflight import Preflight, configuration_fingerprint
-from repogent.providers import ModelProvider, OpenAIProvider, ScriptedProvider
+from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
 from repogent.symbols import PythonSymbolGraphBuilder
@@ -55,18 +56,20 @@ def run_command(
     ],
     request: Annotated[str, typer.Option("--request")],
     provider: Annotated[str, typer.Option("--provider")] = "openai",
-    model: Annotated[str, typer.Option("--model")] = "gpt-5.6-sol",
+    model: Annotated[str | None, typer.Option("--model")] = None,
     script: Annotated[Path | None, typer.Option("--script", exists=True, dir_okay=False)] = None,
     executor: Annotated[str, typer.Option("--executor")] = "docker",
     output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
 ) -> None:
     """Run the approval-gated workflow and retain evidence outside the repository."""
-    if provider not in {"openai", "scripted"}:
-        raise typer.BadParameter("provider must be openai or scripted", param_hint="--provider")
+    if provider not in {"openai", "codex-cli", "scripted"}:
+        raise typer.BadParameter(
+            "provider must be openai, codex-cli, or scripted", param_hint="--provider"
+        )
     if provider == "scripted" and script is None:
         typer.echo("--script is required for scripted provider")
         raise typer.Exit(2)
-    if provider == "openai" and script is not None:
+    if provider != "scripted" and script is not None:
         typer.echo("--script is only supported with --provider scripted")
         raise typer.Exit(2)
     if executor not in {"docker", "local"}:
@@ -87,13 +90,18 @@ def run_command(
         request=request,
         events_file="events.jsonl",
     )
+    effective_model = model or {
+        "openai": "gpt-5.6-sol",
+        "codex-cli": "default",
+        "scripted": "scripted",
+    }[provider]
     try:
         policy = ValidationPolicy()
         commands = policy.commands(repository)
         manifest = manifest.model_copy(
             update={
                 "configuration_fingerprint": configuration_fingerprint(
-                    provider, model, executor, commands
+                    provider, effective_model, executor, commands
                 )
             }
         )
@@ -136,8 +144,18 @@ def run_command(
         model_provider: ModelProvider
         if provider == "scripted":
             model_provider = ScriptedProvider.from_json(str(script))
+        elif provider == "codex-cli":
+            codex_provider = CodexCliProvider(model=model, target_root=repository)
+            readiness = codex_provider.check_ready()
+            store.write_model("provider-readiness", readiness)
+            if not readiness.ready:
+                reason = readiness.reason or "Codex CLI is not ready"
+                if "codex login" not in reason.lower():
+                    reason += "; run `codex login` to authenticate"
+                raise ProviderError(reason, retryable=False)
+            model_provider = cast(ModelProvider, codex_provider)
         else:
-            model_provider = OpenAIProvider(model=model)
+            model_provider = OpenAIProvider(model=effective_model)
     except KeyboardInterrupt:
         _terminalize_cli_failure(
             store, manifest, "workflow interrupted by user", RunStatus.CANCELLED
@@ -145,7 +163,11 @@ def run_command(
         typer.echo(f"Evidence: {store.root}")
         raise typer.Exit(2) from None
     except Exception as error:
-        label = "scripted provider" if provider == "scripted" else "OpenAI provider"
+        label = {
+            "scripted": "scripted provider",
+            "codex-cli": "Codex CLI provider",
+            "openai": "OpenAI provider",
+        }[provider]
         reason = f"could not load {label}: {error}"
         _terminalize_cli_failure(store, manifest, reason)
         typer.echo(reason)
