@@ -926,6 +926,80 @@ def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
     assert failure == evidence.model_dump(mode="json")
 
 
+def test_retryable_provider_failure_writes_final_attempt_evidence(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+    )
+
+    class FailingProvider:
+        calls = 0
+
+        def generate(self, **_kwargs: object) -> object:
+            self.calls += 1
+            evidence = ProviderCallEvidence(
+                provider="codex-cli",
+                model="default",
+                role="requirements",
+                invocation=self.calls,
+                status=ProviderCallStatus.EXECUTION_FAILED,
+                structured_output_valid=False,
+            )
+            raise ProviderError("Codex CLI execution failed", evidence=evidence)
+
+    provider = FailingProvider()
+    workflow.roles = RoleSet.from_provider(provider)  # type: ignore[arg-type]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert provider.calls == 2
+    failure = json.loads((workflow.artifacts.root / "provider-failure-001.json").read_text())
+    assert failure["invocation"] == 2
+
+
+def test_provider_failure_evidence_persistence_error_is_terminal_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+    )
+    evidence = ProviderCallEvidence(
+        provider="codex-cli",
+        model="default",
+        role="requirements",
+        invocation=1,
+        status=ProviderCallStatus.AUTHENTICATION_FAILED,
+        structured_output_valid=False,
+    )
+
+    class FailingProvider:
+        def generate(self, **_kwargs: object) -> object:
+            raise ProviderError(
+                "Codex CLI is not authenticated", retryable=False, evidence=evidence
+            )
+
+    original_write_model = workflow.artifacts.write_model
+
+    def fail_provider_failure(name: str, model: object) -> Path:
+        if name == "provider-failure":
+            raise OSError("provider failure evidence unavailable")
+        return original_write_model(name, model)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workflow.artifacts, "write_model", fail_provider_failure)
+    workflow.roles = RoleSet.from_provider(FailingProvider())  # type: ignore[arg-type]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "provider failure evidence unavailable"
+
+
 def test_post_apply_event_failure_keeps_real_checkout_state_in_manifest_and_report(
     tmp_path: Path,
 ) -> None:
