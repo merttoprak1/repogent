@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess  # noqa: S404  # nosec B404
 import tempfile
@@ -68,6 +69,11 @@ class CodexCliProvider:
         self.secrets = tuple(secrets)
         self.max_prompt_bytes = max_prompt_bytes
         self.max_output_bytes = max_output_bytes
+        self._target_root = Path.cwd().resolve()
+        self._target_root_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_.-]){re.escape(str(self._target_root))}"
+            r"(?=$|[/\\\s:;,)=\]}\'\"?#&])"
+        )
         self._ready: ProviderReadiness | None = None
         self._resolved_executable: str | None = None
         self._invocation = 0
@@ -167,8 +173,12 @@ class CodexCliProvider:
 
         prompt = json.dumps(
             {
-                "payload": sanitize_data(payload, self.secrets),
-                "system_prompt": redact_text(system_prompt, self.secrets),
+                "payload": self._redact_target_root_data(
+                    sanitize_data(payload, self.secrets)
+                ),
+                "system_prompt": self._redact_target_root(
+                    redact_text(system_prompt, self.secrets)
+                ),
             },
             sort_keys=True,
         )
@@ -274,11 +284,55 @@ class CodexCliProvider:
         )
 
     def _child_environment(self) -> dict[str, str]:
-        return {
-            key: value
-            for key in _ALLOWED_ENVIRONMENT_KEYS
-            if (value := os.environ.get(key)) is not None
-        }
+        environment: dict[str, str] = {}
+        for key in _ALLOWED_ENVIRONMENT_KEYS:
+            value = os.environ.get(key)
+            if value is None:
+                continue
+            if key == "PATH":
+                safe_entries = [
+                    entry
+                    for entry in value.split(os.pathsep)
+                    if not self._is_target_root_path(entry)
+                ]
+                environment[key] = os.pathsep.join(safe_entries)
+            elif not self._contains_target_root_path(value):
+                environment[key] = value
+        return environment
+
+    def _redact_target_root(self, text: str) -> str:
+        return self._target_root_pattern.sub("[REDACTED]", text)
+
+    def _redact_target_root_data(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._redact_target_root(value)
+        if isinstance(value, Mapping):
+            return {
+                self._redact_target_root(key) if isinstance(key, str) else key: (
+                    self._redact_target_root_data(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, tuple):
+            return tuple(self._redact_target_root_data(item) for item in value)
+        if isinstance(value, list):
+            return [self._redact_target_root_data(item) for item in value]
+        return value
+
+    def _contains_target_root_path(self, value: str) -> bool:
+        return bool(self._target_root_pattern.search(value)) or self._is_target_root_path(
+            value
+        )
+
+    def _is_target_root_path(self, value: str) -> bool:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            return False
+        try:
+            resolved = candidate.resolve(strict=False)
+        except OSError:
+            resolved = candidate
+        return resolved == self._target_root or self._target_root in resolved.parents
 
     def _not_ready(self, reason: str) -> ProviderReadiness:
         return ProviderReadiness(
