@@ -55,7 +55,10 @@ class RoleAgent(Generic[T]):
                 if not error.retryable:
                     raise
                 last_error = error
-        raise ProviderError(f"{self.name} failed structured generation twice") from last_error
+        raise ProviderError(
+            f"{self.name} failed structured generation twice",
+            evidence=last_error.evidence if last_error is not None else None,
+        ) from last_error
 
 
 def _accepts_keyword(callable_object: object, name: str) -> bool:
