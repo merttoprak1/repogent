@@ -8,18 +8,40 @@ Repogent is an open-source, synchronous, approval-gated CLI for narrowly scoped 
 
 Repogent is open-source software released under the [MIT License](LICENSE).
 
-## Setup
+## Install for Codex
 
-Repogent requires Python 3.11 or newer. From this repository, install the package and development tools:
+Repogent requires Python 3.11 or newer. The plugin's MCP configuration launches
+the bare `repogent` command, so the executable must be installed on a persistent
+`PATH` visible to Codex Desktop. A repository-only virtual environment is not a
+runtime installation for the desktop app.
+
+Install [pipx](https://pipx.pypa.io/) with your operating-system package manager,
+then install Repogent in its own persistent environment before adding the
+marketplace:
+
+```bash
+pipx install 'git+https://github.com/merttoprak1/repogent.git'
+pipx ensurepath
+command -v repogent
+codex plugin marketplace add merttoprak1/repogent
+```
+
+`command -v repogent` must print an executable path. If it does not, open a new
+login shell after `pipx ensurepath` and check again. Fully quit and reopen Codex
+Desktop after the PATH change, then install Repogent from the Plugin Directory
+and start a new task. Repogent never downloads or installs its CLI automatically.
+
+## Development setup
+
+For repository development, keep an independent editable environment:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
-codex plugin marketplace add merttoprak1/repogent
 ```
 
-Run the deterministic project gate with `make verify`. Docker is optional for development, but it is the default executor for Repogent runs.
+Run the deterministic project gate with `make verify`. Docker is optional for development, but it is the default executor for Repogent runs. This `.venv` is for terminal development and does not replace the persistent CLI installation required by Codex Desktop.
 
 ## Use Repogent from Codex
 

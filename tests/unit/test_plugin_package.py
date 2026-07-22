@@ -1,6 +1,7 @@
 """Regression coverage for the repository-local Codex plugin package."""
 
 import json
+import tomllib
 from pathlib import Path
 
 PLUGIN_ROOT = Path("plugins/repogent")
@@ -110,3 +111,20 @@ def test_repogent_evals_have_five_positive_and_three_negative_cases() -> None:
     assert len(ids) == len(set(ids))
     assert all(set(case) == {"id", "prompt", "expected"} for case in cases)
     assert all(case["expected"] for case in cases)
+
+
+def test_readme_installs_bare_runtime_command_before_plugin_marketplace() -> None:
+    readme = Path("README.md").read_text()
+    project = tomllib.loads(Path("pyproject.toml").read_text())
+    mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text())
+    runtime_install = "pipx install 'git+https://github.com/merttoprak1/repogent.git'"
+    marketplace_install = "codex plugin marketplace add merttoprak1/repogent"
+
+    assert project["project"]["scripts"]["repogent"] == "repogent.cli:app"
+    assert mcp["mcpServers"]["repogent"]["command"] == "repogent"
+    assert runtime_install in readme
+    assert "pipx ensurepath" in readme
+    assert "command -v repogent" in readme
+    assert "Codex Desktop" in readme
+    assert readme.index(runtime_install) < readme.index(marketplace_install)
+    assert "python -m pip install -e '.[dev]'" in readme
