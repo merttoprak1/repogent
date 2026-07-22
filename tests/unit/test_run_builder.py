@@ -132,7 +132,13 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
         provider_constructed = True
         return object()
 
+    def local_executor_must_not_be_constructed(**_kwargs: object) -> object:
+        raise AssertionError("Docker failure must not fall back to LocalExecutor")
+
     monkeypatch.setattr(run_builder, "DockerExecutor", UnavailableDocker)
+    monkeypatch.setattr(
+        run_builder, "LocalExecutor", local_executor_must_not_be_constructed
+    )
     monkeypatch.setattr(run_builder, "OpenAIProvider", provider_must_not_be_constructed)
 
     with pytest.raises(RunBuildError, match="repository preflight failed") as caught:
@@ -176,21 +182,49 @@ def test_build_run_constructs_scripted_workflow(tmp_path: Path) -> None:
     assert prepared.provider_readiness is None
 
 
-@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(130)])
-def test_build_run_terminalizes_construction_interrupt_as_cancelled(
+@pytest.mark.parametrize("phase", ["preflight", "provider", "construction"])
+@pytest.mark.parametrize("interrupt_type", [KeyboardInterrupt, SystemExit])
+def test_build_run_terminalizes_interrupt_as_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    interrupt: BaseException,
+    phase: str,
+    interrupt_type: type[BaseException],
 ) -> None:
     from repogent import run_builder
 
     target = tmp_path / "target"
     target.mkdir()
 
-    def interrupted_commands(_self: object, _repository: Path) -> object:
-        raise interrupt
+    def interrupt() -> None:
+        raise interrupt_type()
 
-    monkeypatch.setattr(run_builder.ValidationPolicy, "commands", interrupted_commands)
+    class PassingPreflight:
+        def run(self, _repository: Path) -> PreflightReport:
+            return _passing_preflight()
+
+    def interrupted_commands(_self: object, _repository: Path) -> object:
+        interrupt()
+
+    def interrupted_provider(*_args: object, **_kwargs: object) -> object:
+        interrupt()
+
+    def interrupted_approver(_run_id: str) -> FakeApprover:
+        interrupt()
+        raise AssertionError("unreachable")
+
+    def default_approver(_run_id: str) -> FakeApprover:
+        return FakeApprover([Decision.REJECTED])
+
+    approver_factory = default_approver
+    if phase == "preflight":
+        monkeypatch.setattr(run_builder.ValidationPolicy, "commands", interrupted_commands)
+    else:
+        monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+    if phase == "provider":
+        monkeypatch.setattr(run_builder, "OpenAIProvider", interrupted_provider)
+    elif phase == "construction":
+        monkeypatch.setattr(run_builder, "OpenAIProvider", lambda **_kwargs: object())
+        approver_factory = interrupted_approver
 
     with pytest.raises(RunBuildError, match="workflow interrupted by user") as caught:
         build_run(
@@ -200,7 +234,7 @@ def test_build_run_terminalizes_construction_interrupt_as_cancelled(
                 executor="local",
                 output_dir=tmp_path / "runs",
             ),
-            lambda _run_id: FakeApprover([Decision.REJECTED]),
+            approver_factory,
         )
 
     assert caught.value.manifest is not None
