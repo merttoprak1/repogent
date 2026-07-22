@@ -14,6 +14,7 @@ _IMAGE_REMEDIATION = "Build the validator image with make validator-image"
 _COMMAND_REMEDIATION = "Install the required validation command in the selected executor"
 _CODEX_INSTALL_REMEDIATION = "Install the Codex CLI and ensure codex is on PATH"
 _CODEX_LOGIN_REMEDIATION = "Run codex login in your terminal"
+_CODEX_REPAIR_REMEDIATION = "Inspect or reinstall the Codex CLI"
 
 
 class DoctorService:
@@ -128,7 +129,7 @@ class DoctorService:
         elif reason is not None and "not authenticated" in reason.lower():
             message, remediation = "Codex CLI is not authenticated", _CODEX_LOGIN_REMEDIATION
         else:
-            message, remediation = "Codex CLI is not ready", _CODEX_LOGIN_REMEDIATION
+            message, remediation = "Codex CLI is not ready", _CODEX_REPAIR_REMEDIATION
         return DoctorCheck(
             name="provider",
             passed=False,

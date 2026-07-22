@@ -99,14 +99,31 @@ def test_doctor_reports_unavailable_required_command(
 
 
 @pytest.mark.parametrize(
-    ("reason", "remediation"),
+    ("reason", "message", "remediation"),
     [
-        ("Codex CLI executable not found", "Install the Codex CLI and ensure codex is on PATH"),
-        ("Codex CLI is not authenticated", "Run codex login in your terminal"),
+        (
+            "Codex CLI executable not found",
+            "Codex CLI executable not found",
+            "Install the Codex CLI and ensure codex is on PATH",
+        ),
+        (
+            "Codex CLI is not authenticated",
+            "Codex CLI is not authenticated",
+            "Run codex login in your terminal",
+        ),
+        (
+            "Codex CLI readiness check failed",
+            "Codex CLI is not ready",
+            "Inspect or reinstall the Codex CLI",
+        ),
     ],
 )
 def test_doctor_reports_codex_readiness_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str, remediation: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    message: str,
+    remediation: str,
 ) -> None:
     monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
 
@@ -126,6 +143,7 @@ def test_doctor_reports_codex_readiness_failure(
     check = report.checks[-1]
     assert check.name == "provider"
     assert check.passed is False
+    assert check.message == message
     assert check.remediation == remediation
 
 
@@ -135,12 +153,59 @@ def test_doctor_reports_unsupported_python(tmp_path: Path, monkeypatch: pytest.M
     report = DoctorService().run(DoctorRequest(repository=tmp_path, provider="openai"))
 
     assert report.ready is False
-    assert report.checks == [
-        report.checks[0],
-        report.checks[1],
-    ]
+    assert [check.name for check in report.checks] == ["repository", "python"]
     assert report.checks[1].name == "python"
     assert report.checks[1].passed is False
+
+
+def test_doctor_skips_provider_readiness_after_required_preflight_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_example.py").write_text("def test_example(): pass\n")
+
+    class MissingPytest(ReadyExecutor):
+        def available(self, command: object) -> bool:
+            return command.name != "pytest"  # type: ignore[attr-defined]
+
+    def provider_must_not_be_constructed(**_kwargs: object) -> object:
+        raise AssertionError("provider readiness must not run after failed preflight")
+
+    monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: MissingPytest())
+    monkeypatch.setattr(doctor, "CodexCliProvider", provider_must_not_be_constructed)
+
+    DoctorService().run(DoctorRequest(repository=tmp_path, executor="local"))
+
+
+def test_doctor_codex_readiness_uses_only_noninteractive_login_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    executable = tmp_path / "codex"
+    calls = tmp_path / "codex-calls.txt"
+    help_flags = (
+        "--ephemeral --sandbox --ignore-user-config --ignore-rules "
+        "--output-schema --output-last-message -C --model"
+    )
+    executable.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {str(calls)!r}\n"
+        "case \"$*\" in\n"
+        "  --version) echo codex-cli-1.2.3 ;;\n"
+        f"  'exec --help') echo {help_flags!r} ;;\n"
+        "  'login status') echo 'Logged in' ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
+    monkeypatch.setattr("repogent.codex_cli.shutil.which", lambda _: str(executable))
+
+    report = DoctorService().run(DoctorRequest(repository=repository, executor="local"))
+
+    assert report.ready is True
+    assert calls.read_text().splitlines() == ["--version", "exec --help", "login status"]
 
 
 def test_doctor_has_no_evidence_or_remediation_side_effects(

@@ -17,11 +17,13 @@ class FakeExecutor:
     def __init__(self, *, ready: bool, unavailable: set[str] | None = None) -> None:
         self.ready = ready
         self.unavailable = unavailable or set()
+        self.available_calls: list[str] = []
 
     def readiness(self) -> tuple[bool, str | None]:
         return (self.ready, None if self.ready else "validator image unavailable")
 
     def available(self, command: CommandSpec) -> bool:
+        self.available_calls.append(command.name)
         return command.name not in self.unavailable
 
     def run(self, command: CommandSpec, root: Path) -> CheckResult:
@@ -48,25 +50,29 @@ def test_preflight_reports_commit_dirty_state_and_executor(tmp_path: Path) -> No
     repository = initialize_git_repository(tmp_path)
     (repository / "tracked.py").write_text("value = 2\n")
 
-    report = Preflight(FakeExecutor(ready=True), ValidationPolicy()).run(repository)
+    executor = FakeExecutor(ready=True)
+    report = Preflight(executor, ValidationPolicy()).run(repository)
 
     assert report.passed is True
     assert report.git_commit is not None
     assert report.dirty is True
     assert report.repository_fingerprint
-    assert report.checks[-1].name == "executor"
-    assert report.checks[-1].status is ReadinessStatus.PASSED
+    assert [check.name for check in report.checks][:2] == ["git", "executor"]
+    assert report.checks[1].status is ReadinessStatus.PASSED
+    assert executor.available_calls == ["pytest", "ruff", "mypy", "bandit"]
 
 
 def test_preflight_blocks_unavailable_docker_before_provider_creation(tmp_path: Path) -> None:
     repository = initialize_git_repository(tmp_path)
+    executor = FakeExecutor(ready=False)
 
-    report = Preflight(FakeExecutor(ready=False), ValidationPolicy()).run(repository)
+    report = Preflight(executor, ValidationPolicy()).run(repository)
 
     assert report.passed is False
-    assert report.checks[-1].name == "executor"
+    assert [check.name for check in report.checks] == ["git", "executor"]
     assert report.checks[-1].required is True
     assert report.checks[-1].reason == "validator image unavailable"
+    assert executor.available_calls == []
 
 
 def test_preflight_blocks_when_required_validation_command_is_unavailable(tmp_path: Path) -> None:
@@ -122,6 +128,26 @@ def test_docker_preflight_warns_when_optional_module_is_missing_inside_image(
     assert report.passed is True
     assert ruff_check.status is ReadinessStatus.WARNING
     assert ruff_check.reason == "optional validation command unavailable"
+
+
+def test_docker_preflight_does_not_probe_commands_when_image_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = initialize_git_repository(tmp_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+
+    def unavailable_image(argv: list[str], **_kwargs: object) -> object:
+        calls.append(argv)
+        return execution_module._ProcessResult(1, "", "", False)
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", unavailable_image)
+
+    report = Preflight(DockerExecutor(), ValidationPolicy()).run(repository)
+
+    assert report.passed is False
+    assert [check.name for check in report.checks] == ["git", "executor"]
+    assert calls == [["/usr/local/bin/docker", "image", "inspect", "repogent-validator:py311"]]
 
 
 def test_preflight_treats_non_git_directories_as_a_warning(tmp_path: Path) -> None:
