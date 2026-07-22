@@ -14,7 +14,8 @@ from repogent.domain import PendingApproval, RunManifest, RunStatus
 from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
 from repogent.run_builder import PreparedRun, RunOptions, build_run
 
-_SUPPORTS_SECURE_DIR_FD = os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
+_ORIGINAL_OS_OPEN = os.open
+_ORIGINAL_OS_STAT = os.stat
 
 
 class SessionError(RuntimeError):
@@ -93,8 +94,15 @@ class RunSession:
         self._thread.start()
 
     def snapshot(self) -> RunSnapshot:
-        with self._operation_lock:
-            return self._snapshot()
+        while True:
+            with self._operation_lock:
+                manifest = self._result or self.prepared.workflow.manifest
+                if (
+                    manifest.status is RunStatus.RUNNING
+                    or self._root_released.is_set()
+                ):
+                    return self._snapshot(manifest)
+            self._root_released.wait()
 
     def decide(self, decision: RunDecision) -> RunSnapshot:
         with self._operation_lock:
@@ -117,22 +125,22 @@ class RunSession:
 
     def request_cancel(self) -> bool:
         with self._operation_lock:
-            if (
-                self._terminal
-                or self._workflow_finished
-                or self.prepared.workflow.manifest.status is not RunStatus.RUNNING
-            ):
-                return False
-            self._cancel.set()
-            if (
-                self.prepared.workflow.manifest.status is not RunStatus.RUNNING
-                and not self._cancellation_was_observed()
-            ):
-                self._cancel.clear()
-                return False
-            self.approver.close()
-            self._pending = None
-            return True
+            return self._request_cancel_locked()
+
+    def request_shutdown(self, deadline: float) -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            acquired = self._operation_lock.acquire(blocking=False)
+        else:
+            acquired = self._operation_lock.acquire(timeout=remaining)
+        try:
+            if acquired:
+                self._request_cancel_locked()
+        finally:
+            if acquired:
+                self._operation_lock.release()
+        self.approver.close()
+        return acquired and time.monotonic() <= deadline
 
     def close(self) -> None:
         self.approver.close()
@@ -167,7 +175,7 @@ class RunSession:
         return self._done.is_set()
 
     def read_report(self) -> str:
-        if not _SUPPORTS_SECURE_DIR_FD:
+        if not _supports_secure_report_access():
             raise SessionError("secure report access is unavailable on this platform")
         root_descriptor = -1
         report_descriptor = -1
@@ -242,11 +250,8 @@ class RunSession:
                     self._terminal = True
                     self._done.set()
 
-    def _snapshot(self) -> RunSnapshot:
-        manifest = self._result or self.prepared.workflow.manifest
-        if manifest.status is not RunStatus.RUNNING and not self._root_released.is_set():
-            self._root_released.wait()
-            manifest = self._result or self.prepared.workflow.manifest
+    def _snapshot(self, manifest: RunManifest | None = None) -> RunSnapshot:
+        manifest = manifest or self._result or self.prepared.workflow.manifest
         pending = (
             self._pending.model_copy(deep=True) if self._pending is not None else None
         )
@@ -275,6 +280,24 @@ class RunSession:
 
     def _cancellation_was_observed(self) -> bool:
         return isinstance(self._cancel, _CancellationEvent) and self._cancel.was_observed()
+
+    def _request_cancel_locked(self) -> bool:
+        if (
+            self._terminal
+            or self._workflow_finished
+            or self.prepared.workflow.manifest.status is not RunStatus.RUNNING
+        ):
+            return False
+        self._cancel.set()
+        if (
+            self.prepared.workflow.manifest.status is not RunStatus.RUNNING
+            and not self._cancellation_was_observed()
+        ):
+            self._cancel.clear()
+            return False
+        self.approver.close()
+        self._pending = None
+        return True
 
 
 class SessionManager:
@@ -390,16 +413,26 @@ class SessionManager:
         )
 
     def shutdown(self) -> None:
-        with self._lock:
+        deadline = time.monotonic() + max(0.0, self._shutdown_timeout_seconds)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            acquired = self._lock.acquire(blocking=False)
+        else:
+            acquired = self._lock.acquire(timeout=remaining)
+        if not acquired:
+            raise SessionError("session shutdown timeout acquiring manager lock")
+        try:
             self._closed = True
             sessions = list(self._sessions.values())
+        finally:
+            self._lock.release()
+        timed_out = False
         for session in sessions:
-            session.request_cancel()
-            session.close()
-        deadline = time.monotonic() + self._shutdown_timeout_seconds
+            if not session.request_shutdown(deadline):
+                timed_out = True
         for session in sessions:
             session.join(deadline - time.monotonic())
-        if any(session.is_alive() for session in sessions):
+        if timed_out or any(session.is_alive() for session in sessions):
             raise SessionError("session workers did not stop before shutdown timeout")
 
     def _get_session(self, run_id: str) -> RunSession:
@@ -420,7 +453,17 @@ def _identity(metadata: os.stat_result) -> tuple[int, int]:
 
 
 def _read_flags(*, directory: bool = False) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
     if directory:
-        flags |= getattr(os, "O_DIRECTORY", 0)
+        flags |= os.O_DIRECTORY
     return flags
+
+
+def _supports_secure_report_access() -> bool:
+    return (
+        _ORIGINAL_OS_OPEN in os.supports_dir_fd
+        and _ORIGINAL_OS_STAT in os.supports_dir_fd
+        and _ORIGINAL_OS_STAT in os.supports_follow_symlinks
+        and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+    )

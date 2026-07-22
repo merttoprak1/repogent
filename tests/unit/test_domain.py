@@ -297,13 +297,45 @@ def test_run_snapshot_applied_paths_are_bounded_by_count_and_length() -> None:
         RunSnapshot(**{**_snapshot_payload(), "applied_paths": ["x" * 4_097]})
 
 
-def test_run_snapshot_pending_artifact_serialization_is_limited_to_256000_chars() -> None:
-    pending = PendingApproval(
+def test_run_snapshot_pending_artifact_accepts_256000_and_rejects_256001_chars() -> None:
+    exact = PendingApproval(
+        run_id="run-1",
+        kind=ApprovalKind.REQUIREMENTS,
+        digest="a" * 64,
+        artifact="x" * 255_998,
+    )
+    oversized = PendingApproval(
         run_id="run-1",
         kind=ApprovalKind.REQUIREMENTS,
         digest="a" * 64,
         artifact="x" * 255_999,
     )
 
+    accepted = RunSnapshot(**{**_snapshot_payload(), "pending_approval": exact})
+    assert accepted.pending_approval == exact
     with pytest.raises(ValidationError, match="256,000"):
+        RunSnapshot(**{**_snapshot_payload(), "pending_approval": oversized})
+
+
+def test_run_snapshot_rejects_pending_approval_run_id_over_256_chars() -> None:
+    pending = PendingApproval(
+        run_id="r" * 257,
+        kind=ApprovalKind.REQUIREMENTS,
+        digest="a" * 64,
+        artifact={"objective": "change"},
+    )
+
+    with pytest.raises(ValidationError, match="pending approval run ID"):
+        RunSnapshot(**{**_snapshot_payload(), "pending_approval": pending})
+
+
+def test_run_snapshot_rejects_pending_approval_for_another_run() -> None:
+    pending = PendingApproval(
+        run_id="another-run",
+        kind=ApprovalKind.REQUIREMENTS,
+        digest="a" * 64,
+        artifact={"objective": "change"},
+    )
+
+    with pytest.raises(ValidationError, match="does not match"):
         RunSnapshot(**{**_snapshot_payload(), "pending_approval": pending})

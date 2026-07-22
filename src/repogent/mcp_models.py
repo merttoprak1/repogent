@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 
 from repogent.domain import (
     ApprovalKind,
@@ -52,10 +52,14 @@ class RunSnapshot(VersionedModel):
     @field_validator("pending_approval")
     @classmethod
     def bound_pending_artifact(
-        cls, pending: PendingApproval | None
+        cls, pending: PendingApproval | None, info: ValidationInfo
     ) -> PendingApproval | None:
         if pending is None:
             return None
+        if len(pending.run_id) > 256:
+            raise ValueError("pending approval run ID exceeds 256 characters")
+        if pending.run_id != info.data.get("run_id"):
+            raise ValueError("pending approval run ID does not match snapshot run ID")
         try:
             serialized = json.dumps(
                 pending.artifact,
