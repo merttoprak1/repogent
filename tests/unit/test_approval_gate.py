@@ -138,6 +138,32 @@ def test_patch_payload_retains_diff_and_redacts_validation_output() -> None:
     assert "argv" not in serialized
 
 
+def test_gate_patch_payload_retains_bounded_execution_evidence() -> None:
+    artifact = json.dumps(
+        {
+            "execution_mode": "docker",
+            "isolation_level": "isolated",
+            "verification_status": "passed",
+            "selected_candidate": {"proposal": {"diff": "patch-body"}},
+            "selection": {"selected_candidate_id": "candidate-1"},
+            "candidates": [],
+        }
+    )
+    approver = GateApprover("run-1")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(approver.decide, ApprovalKind.PATCH, artifact)
+        _, pending = approver.wait(after_generation=0, timeout_seconds=1)
+        assert pending is not None
+        approver.close()
+        assert future.result(timeout=1).decision is Decision.REJECTED
+
+    assert isinstance(pending.artifact, dict)
+    assert pending.artifact["execution_mode"] == "docker"
+    assert pending.artifact["isolation_level"] == "isolated"
+    assert pending.artifact["verification_status"] == "passed"
+
+
 def test_non_patch_payload_is_recursively_redacted_before_digest_binding() -> None:
     artifact = """{
         "objective": "keep token=sk-proj-1234567890abcdef private",

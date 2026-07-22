@@ -66,8 +66,13 @@ def patch_preview_digest(preview: PatchPreview) -> str:
 
 
 class PatchPreviewer:
-    def __init__(self, patch_policy: PatchPolicy) -> None:
+    def __init__(
+        self,
+        patch_policy: PatchPolicy,
+        explicit_secrets: Sequence[str] = (),
+    ) -> None:
         self.patch_policy = patch_policy
+        self.explicit_secrets = tuple(explicit_secrets)
 
     def preview(
         self,
@@ -83,9 +88,9 @@ class PatchPreviewer:
                 "proposal addresses criteria outside the supplied requirements"
             )
         exact_diff = candidate.proposal.diff
-        if redact_text(exact_diff) != exact_diff:
+        if redact_text(exact_diff, self.explicit_secrets) != exact_diff:
             raise CandidateEvaluationError("preview contains secret-like patch content")
-        sanitized = sanitize_data({"diff": exact_diff})
+        sanitized = sanitize_data({"diff": exact_diff}, self.explicit_secrets)
         if not isinstance(sanitized, dict) or sanitized.get("diff") != exact_diff:
             raise CandidateEvaluationError("preview contains secret-like patch content")
         validated = self.patch_policy.validate(root, candidate.proposal)

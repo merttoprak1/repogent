@@ -268,6 +268,9 @@ class RunSession:
             reason=manifest.reason,
             evidence_path=str(self.prepared.store.root),
             cancellation_requested=self.cancellation_requested(),
+            execution_mode=manifest.execution_mode,
+            isolation_level=manifest.isolation_level,
+            verification_status=manifest.verification_status,
         )
         payload = snapshot.model_dump(mode="json")
         sanitized = sanitize_data(payload)

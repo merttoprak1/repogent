@@ -16,6 +16,7 @@ from repogent.agents import RoleSet
 from repogent.approvals import Approver
 from repogent.artifacts import ArtifactStore
 from repogent.candidates import (
+    CandidateEvaluationError,
     CandidateEvaluator,
     CandidatePolicy,
     CandidateSelector,
@@ -167,11 +168,17 @@ class Workflow:
         default_factory=dict, init=False
     )
     _candidate_previews: dict[str, PatchPreview] = field(default_factory=dict, init=False)
+    _candidate_preview_digests: dict[str, str] = field(default_factory=dict, init=False)
+    _candidate_provider_evidence: dict[str, ProviderCallEvidence | None] = field(
+        default_factory=dict, init=False
+    )
 
     def __post_init__(self) -> None:
         self.symbol_builder = self.symbol_builder or PythonSymbolGraphBuilder()
         self.localizer = self.localizer or PythonLocalizer()
-        self.previewer = self.previewer or PatchPreviewer(self.patch_policy)
+        self.previewer = self.previewer or PatchPreviewer(
+            self.patch_policy, self.artifacts.secrets
+        )
         if self.executor_selector is None:
             if self.validator is None:
                 raise ValueError("executor selector is required when validator is deferred")
@@ -340,11 +347,17 @@ class Workflow:
         selected_executor = self._candidate_executors[selected.candidate_id]
         selected_evaluator = self._candidate_evaluators[selected.candidate_id]
         selected_preview = self._candidate_previews[selected.candidate_id]
+        selected_preview_digest = self._candidate_preview_digests[selected.candidate_id]
+        self._assert_preview_binding(
+            selected_preview,
+            selected,
+            selected_preview_digest,
+        )
         self.manifest = self.manifest.model_copy(
             update={
                 "selected_candidate_id": selected.candidate_id,
                 "repair_attempts": len(self.candidates) - 1,
-                "preview_digest": patch_preview_digest(selected_preview),
+                "preview_digest": selected_preview_digest,
                 "execution_mode": selected_executor.mode,
                 "isolation_level": selected_executor.isolation_level,
                 "verification_status": VerificationStatus.PASSED,
@@ -383,6 +396,7 @@ class Workflow:
         self.advance(RunStage.PATCH_APPROVED)
 
         self.ensure_time()
+        self._assert_preview_binding(selected_preview, selected, selected_preview_digest)
         validated = self.patch_policy.validate(self.root, selected.proposal)
         paths = [path.as_posix() for path in validated.touched_paths]
         pre_apply_baseline = selected_evaluator.capture_baseline(
@@ -542,6 +556,10 @@ class Workflow:
             diff_sha256=hashlib.sha256(result.output.diff.encode()).hexdigest(),
             usage=result.usage,
         )
+        self._candidate_provider_evidence[candidate_id] = result.evidence
+        return candidate
+
+    def _publish_candidate(self, candidate: CandidateRecord) -> None:
         self.candidates.append(candidate)
         self.manifest = self.manifest.model_copy(
             update={
@@ -553,12 +571,15 @@ class Workflow:
         self.artifacts.update_manifest(self.manifest)
         self.write("candidate", candidate)
         self.account(
-            result.usage,
+            candidate.usage,
             generated_artifact="candidate",
-            evidence=result.evidence,
+            evidence=self._candidate_provider_evidence.pop(candidate.candidate_id, None),
         )
-        self.emit(EventKind.CANDIDATE, "candidate generated", candidate_id=candidate_id)
-        return candidate
+        self.emit(
+            EventKind.CANDIDATE,
+            "candidate generated",
+            candidate_id=candidate.candidate_id,
+        )
 
     def _preview_and_select_executor(
         self, candidate: CandidateRecord
@@ -571,10 +592,10 @@ class Workflow:
             candidate,
             self.requirements.acceptance_criteria,
         )
-        self.write("patch-preview", preview)
+        preview_digest = patch_preview_digest(preview)
         self.manifest = self.manifest.model_copy(
             update={
-                "preview_digest": patch_preview_digest(preview),
+                "preview_digest": preview_digest,
                 "verification_status": VerificationStatus.UNVALIDATED,
                 "execution_mode": None,
                 "isolation_level": None,
@@ -582,6 +603,8 @@ class Workflow:
             }
         )
         self.artifacts.update_manifest(self.manifest)
+        self._publish_candidate(candidate)
+        self.write("patch-preview", preview)
         self.advance(RunStage.PATCH_PREVIEWED)
         if self._legacy_validator_selector and isinstance(
             self.executor_selector, FixedExecutorSelector
@@ -602,7 +625,13 @@ class Workflow:
                 )
             )
         selector = cast(ExecutorSelector, self.executor_selector)
-        prepared = selector.select(preview, timeout_seconds=self.remaining_time())
+        selector_preview = preview.model_copy(deep=True)
+        prepared = selector.select(
+            selector_preview, timeout_seconds=self.remaining_time()
+        )
+        if patch_preview_digest(selector_preview) != preview_digest:
+            raise CandidateEvaluationError("patch preview changed after persistence")
+        self._assert_preview_binding(preview, candidate, preview_digest)
         self.manifest = self.manifest.model_copy(
             update={
                 "execution_mode": prepared.mode,
@@ -624,6 +653,8 @@ class Workflow:
         self._candidate_evaluators = {}
         self._candidate_executors = {}
         self._candidate_previews = {}
+        self._candidate_preview_digests = {}
+        self._candidate_provider_evidence = {}
         expansion_reason: str | None = None
         while len(self.candidates) < 3:
             previous = self.candidates[-1] if self.candidates else None
@@ -649,12 +680,18 @@ class Workflow:
             self._candidate_evaluators[candidate.candidate_id] = candidate_evaluator
             self._candidate_executors[candidate.candidate_id] = prepared
             self._candidate_previews[candidate.candidate_id] = preview
+            preview_digest = self.manifest.preview_digest
+            if preview_digest is None:
+                raise CandidateEvaluationError("patch preview digest is unavailable")
+            self._candidate_preview_digests[candidate.candidate_id] = preview_digest
+            self._assert_preview_binding(preview, candidate, preview_digest)
             candidate_evidence = candidate_evaluator.evaluate(
                 self.root,
                 candidate,
                 self.requirements.acceptance_criteria,
                 self.remaining_time(),
             )
+            self._assert_preview_binding(preview, candidate, preview_digest)
             self.candidate_evidence.append(candidate_evidence)
             self.write("candidate-evidence", candidate_evidence)
             self.emit(
@@ -689,6 +726,19 @@ class Workflow:
             if expansion is None:
                 break
             expansion_reason = expansion.value
+
+    @staticmethod
+    def _assert_preview_binding(
+        preview: PatchPreview,
+        candidate: CandidateRecord,
+        expected_digest: str,
+    ) -> None:
+        if (
+            patch_preview_digest(preview) != expected_digest
+            or preview.candidate.model_dump(mode="json")
+            != candidate.model_dump(mode="json")
+        ):
+            raise CandidateEvaluationError("patch preview changed after persistence")
 
     def ensure_time(self) -> None:
         self.remaining_time()

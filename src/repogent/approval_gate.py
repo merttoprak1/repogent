@@ -7,7 +7,15 @@ import time
 
 from pydantic import BaseModel
 
-from repogent.domain import ApprovalKind, ApprovalRecord, Decision, PendingApproval
+from repogent.domain import (
+    ApprovalKind,
+    ApprovalRecord,
+    Decision,
+    ExecutionMode,
+    IsolationLevel,
+    PendingApproval,
+    VerificationStatus,
+)
 from repogent.sanitization import redact_text, sanitize_data
 
 _CHECK_NAME_MAX_CHARS = 128
@@ -62,6 +70,7 @@ def _approval_payload_from_snapshot(
     exact_diff = proposal.get("diff") if isinstance(proposal, dict) else None
     if isinstance(exact_diff, str) and redact_text(exact_diff) != exact_diff:
         raise ApprovalGateError("approval artifact contains secret-like patch content")
+    execution_evidence = _patch_execution_evidence(payload)
     summaries: list[dict[str, object]] = []
     for item in candidates:
         if not isinstance(item, dict):
@@ -116,6 +125,7 @@ def _approval_payload_from_snapshot(
             }
         )
     result = {
+        **execution_evidence,
         "selected_candidate": selected,
         "selection": selection,
         "candidates": summaries,
@@ -137,6 +147,33 @@ def _approval_payload_from_snapshot(
     if isinstance(exact_diff, str) and sanitized_diff != exact_diff:
         raise ApprovalGateError("approval artifact contains secret-like patch content")
     return sanitized_result
+
+
+def _patch_execution_evidence(payload: dict[str, object]) -> dict[str, str]:
+    mode_value = payload.get("execution_mode")
+    isolation_value = payload.get("isolation_level")
+    verification_value = payload.get("verification_status")
+    if mode_value is None and isolation_value is None and verification_value is None:
+        return {}
+    if (
+        not isinstance(mode_value, str)
+        or not isinstance(isolation_value, str)
+        or not isinstance(verification_value, str)
+    ):
+        raise ApprovalGateError("patch approval execution evidence is malformed")
+    try:
+        mode = ExecutionMode(mode_value)
+        isolation = IsolationLevel(isolation_value)
+        verification = VerificationStatus(verification_value)
+    except ValueError as error:
+        raise ApprovalGateError("patch approval execution evidence is malformed") from error
+    if verification is not VerificationStatus.PASSED:
+        raise ApprovalGateError("patch approval execution evidence is not passed")
+    return {
+        "execution_mode": mode.value,
+        "isolation_level": isolation.value,
+        "verification_status": verification.value,
+    }
 
 
 def _bounded_redacted(value: object, limit: int) -> str:
