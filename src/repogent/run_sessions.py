@@ -117,6 +117,7 @@ class RunSession:
     def snapshot(self) -> RunSnapshot:
         while True:
             with self._operation_lock:
+                self._refresh_execution_pending_locked()
                 manifest = self._result or self.prepared.workflow.manifest
                 if (
                     manifest.status is RunStatus.RUNNING
@@ -143,10 +144,12 @@ class RunSession:
         with self._operation_lock:
             if self.executor_gate is None:
                 raise SessionError("no executor selection is pending")
-            try:
-                self.executor_gate.submit(decision)
-            except ExecutionGateError as error:
-                raise SessionError(str(error)) from error
+            executor_gate = self.executor_gate
+        try:
+            executor_gate.submit(decision)
+        except ExecutionGateError as error:
+            raise SessionError(str(error)) from error
+        with self._operation_lock:
             self._pending_execution = None
         return self.wait_for_change()
 
@@ -299,6 +302,8 @@ class RunSession:
             self.close()
             with self._operation_lock:
                 self._workflow_finished = True
+                self._pending = None
+                self._pending_execution = None
             try:
                 self._on_done(self.prepared.manifest.run_id, self._root)
             finally:
@@ -310,14 +315,20 @@ class RunSession:
 
     def _snapshot(self, manifest: RunManifest | None = None) -> RunSnapshot:
         manifest = manifest or self._result or self.prepared.workflow.manifest
-        pending = (
-            self._pending.model_copy(deep=True) if self._pending is not None else None
-        )
-        pending_execution = (
-            self._pending_execution.model_copy(deep=True)
-            if self._pending_execution is not None
-            else None
-        )
+        terminal = manifest.status is not RunStatus.RUNNING
+        pending = None
+        pending_execution = None
+        if not terminal:
+            pending = (
+                self._pending.model_copy(deep=True)
+                if self._pending is not None
+                else None
+            )
+            pending_execution = (
+                self._pending_execution.model_copy(deep=True)
+                if self._pending_execution is not None
+                else None
+            )
         if pending is not None and pending_execution is not None:
             raise SessionError(
                 "content approval and executor selection cannot both be pending"
@@ -367,6 +378,17 @@ class RunSession:
 
     def _cancellation_was_observed(self) -> bool:
         return isinstance(self._cancel, _CancellationEvent) and self._cancel.was_observed()
+
+    def _refresh_execution_pending_locked(self) -> None:
+        if self.executor_gate is None:
+            return
+        generation, pending = self.executor_gate.wait(
+            after_generation=self._execution_generation,
+            timeout_seconds=0,
+        )
+        if generation > self._execution_generation:
+            self._execution_generation = generation
+            self._pending_execution = pending
 
     def _request_cancel_locked(self) -> bool:
         if (

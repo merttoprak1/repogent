@@ -145,6 +145,20 @@ class FalseySessionRegistry(SessionRegistry):
         return False
 
 
+class BlockingSessionRegistry(SessionRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_entered = threading.Event()
+        self.release_prepare = threading.Event()
+
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        self.prepare_entered.set()
+        assert self.release_prepare.wait(timeout=5)
+        return super().prepare(root, mode, policy)
+
+
 class BlockingInspector:
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -168,6 +182,7 @@ def make_builder(
     *,
     inspector: object | None = None,
     before_build: Callable[[], None] | None = None,
+    budget: Budget | None = None,
 ) -> Callable[..., PreparedRun]:
     counter = 0
 
@@ -213,7 +228,7 @@ def make_builder(
             executor_selector=selector,
             artifacts=store,
             inspector=inspector or RepositoryInspector(),  # type: ignore[arg-type]
-            budget=Budget(),
+            budget=budget or Budget(),
             cancel_requested=cancel_requested,
         )
         return PreparedRun(
@@ -278,10 +293,15 @@ def execution_decision_for(
 
 def deferred_manager_waiting_for_executor(
     tmp_path: Path,
+    *,
+    registry: SessionRegistry | None = None,
+    budget: Budget | None = None,
 ):
     target = make_target(tmp_path)
+    selected_registry = registry or SessionRegistry()
     manager = SessionManager(
-        builder=make_builder(), executor_registry=SessionRegistry()  # type: ignore[arg-type]
+        builder=make_builder(budget=budget),
+        executor_registry=selected_registry,  # type: ignore[arg-type]
     )
     request = deferred_request(target, tmp_path / "runs")
     snapshot = manager.start(request)
@@ -328,6 +348,121 @@ def test_executor_selection_releases_waiter_but_not_root_lock(
         with pytest.raises(SessionError, match="repository already has an active run"):
             manager.start(request)
         manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_get_remains_available_while_executor_prepare_is_blocked(
+    tmp_path: Path,
+) -> None:
+    registry = BlockingSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path, registry=registry
+    )
+    selection_results: list[object] = []
+    selection_errors: list[BaseException] = []
+
+    def select_executor() -> None:
+        try:
+            selection_results.append(
+                manager.select_executor(execution_decision_for(snapshot))
+            )
+        except BaseException as error:
+            selection_errors.append(error)
+
+    selector = threading.Thread(target=select_executor)
+    selector.start()
+    getter_results: list[object] = []
+    getter = threading.Thread(
+        target=lambda: getter_results.append(manager.get(snapshot.run_id))
+    )
+    try:
+        assert registry.prepare_entered.wait(timeout=1)
+        getter.start()
+        getter.join(timeout=0.2)
+        assert not getter.is_alive()
+        assert len(getter_results) == 1
+        assert getter_results[0].pending_execution == snapshot.pending_execution  # type: ignore[union-attr]
+    finally:
+        registry.release_prepare.set()
+        selector.join(timeout=2)
+        getter.join(timeout=1)
+        if not manager._sessions[snapshot.run_id].is_done():
+            manager.cancel(snapshot.run_id)
+        manager.shutdown()
+    assert not selector.is_alive()
+    assert selection_errors == []
+    assert len(selection_results) == 1
+
+
+def test_cancel_wins_while_executor_prepare_is_blocked(tmp_path: Path) -> None:
+    registry = BlockingSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path, registry=registry
+    )
+    selection_errors: list[BaseException] = []
+
+    def select_executor() -> None:
+        try:
+            manager.select_executor(execution_decision_for(snapshot))
+        except BaseException as error:
+            selection_errors.append(error)
+
+    selector = threading.Thread(target=select_executor)
+    selector.start()
+    cancellation_results: list[object] = []
+    cancellation_errors: list[BaseException] = []
+
+    def cancel() -> None:
+        try:
+            cancellation_results.append(manager.cancel(snapshot.run_id))
+        except BaseException as error:
+            cancellation_errors.append(error)
+
+    canceller = threading.Thread(target=cancel)
+    try:
+        assert registry.prepare_entered.wait(timeout=1)
+        canceller.start()
+        canceller.join(timeout=0.5)
+        assert not canceller.is_alive()
+        assert cancellation_errors == []
+        assert len(cancellation_results) == 1
+        terminal = cancellation_results[0]
+        assert terminal.status is RunStatus.CANCELLED  # type: ignore[union-attr]
+        assert terminal.pending_approval is None  # type: ignore[union-attr]
+        assert terminal.pending_execution is None  # type: ignore[union-attr]
+        recovered = manager.get(snapshot.run_id)
+        assert recovered.pending_approval is None
+        assert recovered.pending_execution is None
+    finally:
+        registry.release_prepare.set()
+        selector.join(timeout=2)
+        canceller.join(timeout=1)
+        manager.shutdown()
+    assert not selector.is_alive()
+    assert len(selection_errors) == 1
+    assert isinstance(selection_errors[0], SessionError)
+    assert "closed" in str(selection_errors[0])
+
+
+def test_executor_timeout_terminal_snapshot_clears_pending_choice(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path,
+        budget=Budget(timeout_seconds=1),
+    )
+    session = manager._sessions[snapshot.run_id]
+    try:
+        assert snapshot.pending_execution is not None
+        assert session._done.wait(timeout=2)
+
+        terminal = manager.get(snapshot.run_id)
+
+        assert terminal.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+        assert terminal.reason == "executor selection timed out"
+        assert terminal.pending_approval is None
+        assert terminal.pending_execution is None
     finally:
         manager.shutdown()
 
