@@ -246,7 +246,7 @@ async def test_tools_route_typed_requests_and_return_structured_content(
     session, manager, doctor = client_session
     doctor_request = DoctorRequest(repository=Path("/repository"), executor="local")
     start_request = RunStart(
-        repository=Path("/repository"), request="make a bounded change", executor="local"
+        repository=Path("/repository"), request="make a bounded change", executor="deferred"
     )
     requirements = RunDecision(
         run_id="run-1",
