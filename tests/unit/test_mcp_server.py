@@ -568,14 +568,38 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
             assert "subprocess stdout" not in message
 
 
+def _walk_exception_graph(error: BaseException) -> list[BaseException]:
+    pending = [error]
+    visited: set[int] = set()
+    graph: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        graph.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return graph
+
+
 def _assert_sanitized_lifecycle_error(error: BaseException) -> None:
     representation = repr(error)
     rendered = "".join(traceback.format_exception(error))
     lifecycle_error = "session shutdown failed; inspect local Repogent logs"
+    graph = _walk_exception_graph(error)
+    lifecycle_nodes = [node for node in graph if str(node) == lifecycle_error]
 
     assert lifecycle_error in representation
     assert lifecycle_error in rendered
     assert len(lifecycle_error) <= 160
+    assert len(lifecycle_nodes) == 1
+    assert lifecycle_nodes[0].__cause__ is None
+    assert lifecycle_nodes[0].__context__ is None
     for forbidden in (
         "secret-value",
         "/private/secret/path",
@@ -583,6 +607,7 @@ def _assert_sanitized_lifecycle_error(error: BaseException) -> None:
     ):
         assert forbidden not in representation
         assert forbidden not in rendered
+        assert all(forbidden not in repr(node) for node in graph)
 
 
 @pytest.mark.anyio

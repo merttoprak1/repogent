@@ -46,6 +46,14 @@ def _call_service(
         raise RuntimeError(message.value) from None
 
 
+def _shutdown_sessions(sessions: SessionManager) -> bool:
+    try:
+        sessions.shutdown()
+    except Exception:
+        return False
+    return True
+
+
 def create_server(
     manager: SessionManager | None = None,
     doctor: DoctorService | None = None,
@@ -58,10 +66,13 @@ def create_server(
         try:
             yield {"sessions": sessions}
         finally:
-            try:
-                sessions.shutdown()
-            except Exception:
-                raise RuntimeError(_LIFECYCLE_ERROR) from None
+            if not _shutdown_sessions(sessions):
+                lifecycle_error = RuntimeError(_LIFECYCLE_ERROR)
+                try:
+                    raise lifecycle_error
+                finally:
+                    # AnyIO cancellation would otherwise remain linked as context.
+                    lifecycle_error.__context__ = None
 
     server = FastMCP("Repogent", json_response=True, lifespan=lifespan)
 
