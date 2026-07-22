@@ -1,0 +1,20 @@
+{
+  "name": "repogent-local",
+  "interface": {
+    "displayName": "Repogent"
+  },
+  "plugins": [
+    {
+      "name": "repogent",
+      "source": {
+        "source": "local",
+        "path": "./plugins/repogent"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

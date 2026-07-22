@@ -1,0 +1,28 @@
+{
+  "name": "repogent",
+  "version": "0.1.0",
+  "description": "Turn bounded Python changes into independently validated, approval-ready patches.",
+  "author": {
+    "name": "Mert",
+    "url": "https://github.com/merttoprak1/repogent"
+  },
+  "homepage": "https://github.com/merttoprak1/repogent",
+  "repository": "https://github.com/merttoprak1/repogent",
+  "license": "MIT",
+  "keywords": ["python", "verification", "patches", "code-review"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Repogent",
+    "shortDescription": "From issue to independently verified patch",
+    "longDescription": "Analyze a Python change request, validate bounded patch candidates, preserve three explicit approval gates, and retain local evidence.",
+    "developerName": "Mert",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/merttoprak1/repogent",
+    "defaultPrompt": [
+      "Use Repogent to make this Python change safely and show me the exact patch before applying it.",
+      "Prepare an independently validated patch for this issue."
+    ]
+  }
+}
