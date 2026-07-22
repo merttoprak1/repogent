@@ -2,6 +2,26 @@
 
 Repogent is a synchronous, artifact-first local workflow for conventional Python libraries, command-line packages, data transforms, and the bundled FastAPI web-service MVP. Model roles produce typed proposals; deterministic services alone inspect files, validate paths, apply patches, select commands, execute checks, enforce budgets, and change workflow state.
 
+## Codex plugin adapter
+
+The repository-local Codex plugin adds a thin chat-facing adapter around the
+same workflow. Codex loads the Repogent skill and starts `repogent mcp --stdio`
+as a local child process. Typed MCP tools translate chat requests and decisions
+to `DoctorService` and `SessionManager`; they do not duplicate workflow policy,
+patch validation, execution policy, or state transitions. The plugin is not a
+second policy engine.
+
+The stdio process, the local Repogent installation, and its operator-visible
+evidence directory form one local trust boundary. A `SessionManager` owns all
+runs for that process and allows only one active run for a canonical repository
+root. Each requirements, plan, and patch response carries the exact pending
+artifact and digest; the corresponding tool advances only a matching gate.
+When the client disconnects, the MCP lifespan finalizer cooperatively cancels
+active work, closes pending approvals, waits within the bounded shutdown
+deadline, and preserves the resulting manifest and report. A later client must
+inspect persisted evidence rather than assuming a disconnected mutation did or
+did not occur.
+
 ## Runtime flow
 
 The detailed state machine is preserved in `RunStage`. The following are conceptual/user-facing phases, not literal emitted stage labels: **Understand → Localize → Propose → Validate → Decide**.
@@ -26,6 +46,7 @@ The detailed state machine is preserved in `RunStage`. The following are concept
 - `execution.py` and `validation.py`: fixed commands through Docker by default or an explicit local fallback; Docker readiness probes the actual tool inside the configured image and caches the result.
 - `candidates.py` and `workflow.py`: isolated candidate transactions, legal transitions, bounded expansion, evidence selection, budgets, recovery, and terminal outcomes.
 - `events.py`, `artifacts.py`, and `reporting.py`: monotonic event JSONL, structurally sanitized versioned evidence, and final reports.
+- `doctor.py`, `run_sessions.py`, `mcp_models.py`, and `mcp_server.py`: typed readiness and session services, canonical-root locking, digest-bound decisions, bounded report access, and the local stdio MCP adapter.
 
 ## Terminal statuses
 

@@ -13,10 +13,41 @@ Repogent is open-source software released under the [MIT License](LICENSE).
 Repogent requires Python 3.11 or newer. From this repository, install the package and development tools:
 
 ```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
 python -m pip install -e '.[dev]'
+codex plugin marketplace add merttoprak1/repogent
 ```
 
 Run the deterministic project gate with `make verify`. Docker is optional for development, but it is the default executor for Repogent runs.
+
+## Use Repogent from Codex
+
+After adding the marketplace, open the Codex Plugin Directory, install
+**Repogent**, and start a new task so its skill and local MCP server are loaded.
+Invoke it explicitly with `@Repogent`, for example:
+
+```text
+@Repogent safely add a health endpoint to /path/to/repository and show me the
+requirements, plan, and exact patch before changing anything.
+```
+
+You can also ask naturally for a safe, independently validated,
+evidence-backed Python change with approval before apply. Repogent first runs
+`repogent_doctor`, then conducts the workflow in chat. Requirements, the plan,
+and the exact patch each require a separate explicit approval bound to the
+displayed digest. The patch is not applied until the third approval.
+
+Docker is the default execution boundary. If Docker, the fixed validator image,
+the provider, or a required command is unavailable, Repogent stops and presents
+the remediation reported by `repogent_doctor`; it does not silently switch to
+host execution. Terminal results include checkout state, final validation, and
+the local evidence directory containing `run.json`, `events.jsonl`, and
+`report.md` (by default beside the target at `.repogent/runs/run-<id>/`).
+
+The plugin is the chat-facing adapter. The existing standalone
+`repogent analyze` and `repogent run` commands remain available for terminal
+workflows and automation.
 
 ## Analyze a repository
 

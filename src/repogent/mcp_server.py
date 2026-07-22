@@ -194,3 +194,7 @@ def create_server(
 
 def serve_stdio() -> None:
     create_server().run(transport="stdio")
+
+
+if __name__ == "__main__":
+    serve_stdio()

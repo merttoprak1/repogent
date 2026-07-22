@@ -56,10 +56,23 @@ def _approval_payload_from_snapshot(
         evidence = item.get("evidence")
         if not isinstance(candidate, dict) or not isinstance(evidence, dict):
             continue
+        validation = evidence.get("validation")
+        validation_checks = (
+            validation.get("checks", []) if isinstance(validation, dict) else []
+        )
+        checks = [
+            {
+                "status": check.get("status"),
+                "required": check.get("required"),
+            }
+            for check in validation_checks
+            if isinstance(check, dict)
+        ]
         summaries.append(
             {
                 "candidate_id": candidate.get("candidate_id"),
                 "eligible": evidence.get("eligible"),
+                "checks": checks,
                 "required_failures": evidence.get("required_failures", []),
                 "skipped_checks": evidence.get("skipped_checks", []),
                 "changed_files": evidence.get("changed_files"),
