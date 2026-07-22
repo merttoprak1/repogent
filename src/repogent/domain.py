@@ -40,8 +40,11 @@ class RunStage(StrEnum):
     PLANNED = "planned"
     PLAN_APPROVED = "plan_approved"
     PATCH_PROPOSED = "patch_proposed"
+    PATCH_PREVIEWED = "patch_previewed"
     PATCH_APPROVED = "patch_approved"
+    EXECUTOR_SELECTED = "executor_selected"
     PATCH_APPLIED = "patch_applied"
+    VALIDATING = "validating"
     VALIDATED = "validated"
     REPAIRING = "repairing"
     REVIEWED = "reviewed"
@@ -75,6 +78,29 @@ class ApprovalKind(StrEnum):
 class Decision(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class ExecutionMode(StrEnum):
+    DOCKER = "docker"
+    LOCAL = "local"
+
+
+class IsolationLevel(StrEnum):
+    REDUCED_ISOLATION = "reduced_isolation"
+    ISOLATED = "isolated"
+
+
+class VerificationStatus(StrEnum):
+    UNVALIDATED = "unvalidated"
+    VALIDATING = "validating"
+    PASSED = "passed"
+    FAILED = "failed"
+
+
+class TrustLabel(StrEnum):
+    UNVALIDATED = "UNVALIDATED"
+    REDUCED_ISOLATION = "REDUCED ISOLATION"
+    ISOLATED_VERIFIED = "ISOLATED VERIFIED"
 
 
 class MergeRecommendation(StrEnum):
@@ -285,11 +311,7 @@ class CandidateEvidence(VersionedModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def eligible(self) -> bool:
-        return (
-            not self.required_failures
-            and self.restored_to_baseline
-            and self.validation.passed
-        )
+        return not self.required_failures and self.restored_to_baseline and self.validation.passed
 
 
 class CandidateSelection(VersionedModel):
@@ -317,6 +339,10 @@ class RunManifest(VersionedModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     reason: str | None = None
+    execution_mode: ExecutionMode | None = None
+    isolation_level: IsolationLevel | None = None
+    verification_status: VerificationStatus = VerificationStatus.UNVALIDATED
+    preview_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     repository_fingerprint: str | None = None
     configuration_fingerprint: str | None = None
     candidate_ids: list[str] = Field(default_factory=list)
