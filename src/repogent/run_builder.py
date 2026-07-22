@@ -23,10 +23,14 @@ from repogent.domain import (
     RunStatus,
 )
 from repogent.events import EventSink
-from repogent.execution import ValidationPolicy
-from repogent.executor_selection import ExecutorRegistry, ExecutorSelectionError
+from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
+from repogent.executor_selection import (
+    ExecutorRegistry,
+    ExecutorSelectionError,
+    PreparedExecutor,
+)
 from repogent.patching import PatchApplier, PatchPolicy
-from repogent.preflight import PreflightReport, configuration_fingerprint
+from repogent.preflight import Preflight, PreflightReport, configuration_fingerprint
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
@@ -122,15 +126,19 @@ def build_run(
                 )
             }
         )
+        prepared_executor: PreparedExecutor | None = None
         try:
-            prepared_executor = ExecutorRegistry().prepare(
-                repository, ExecutionMode(options.executor), policy
-            )
+            prepared_executor = ExecutorRegistry(
+                docker_factory=DockerExecutor,
+                local_factory=LocalExecutor,
+                preflight_factory=Preflight,
+            ).prepare(repository, ExecutionMode(options.executor), policy)
         except ExecutorSelectionError as error:
-            if error.preflight is not None:
-                store.write_model("preflight", error.preflight)
-            raise
-        preflight = prepared_executor.preflight
+            if error.preflight is None:
+                raise
+            preflight = error.preflight
+        else:
+            preflight = prepared_executor.preflight
         store.write_model("preflight", preflight)
     except (KeyboardInterrupt, SystemExit) as error:
         terminal = terminalize_failure(
@@ -157,6 +165,8 @@ def build_run(
             store=store,
             manifest=terminal,
         )
+    if prepared_executor is None:
+        raise RuntimeError("prepared executor is missing after successful preflight")
 
     readiness: ProviderReadiness | None = None
     try:

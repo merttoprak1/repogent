@@ -98,6 +98,9 @@ def test_build_run_keeps_preflight_before_provider(
             return ProviderReadiness(provider="codex-cli", model="default", ready=True)
 
     class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
         def prepare(
             self, _repository: Path, mode: ExecutionMode, _policy: object
         ) -> PreparedExecutor:
@@ -139,6 +142,9 @@ def test_build_run_prepares_selected_executor_with_registry(
     calls: list[tuple[Path, ExecutionMode]] = []
 
     class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
         def prepare(
             self, root: Path, mode: ExecutionMode, _policy: object
         ) -> PreparedExecutor:
@@ -182,6 +188,9 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
         return object()
 
     class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
         def prepare(
             self, _root: Path, mode: ExecutionMode, _policy: object
         ) -> PreparedExecutor:
@@ -249,6 +258,9 @@ def test_build_run_terminalizes_interrupt_as_cancelled(
         raise interrupt_type()
 
     class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
         def prepare(
             self, _repository: Path, mode: ExecutionMode, _policy: object
         ) -> PreparedExecutor:
