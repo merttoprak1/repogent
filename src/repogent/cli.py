@@ -16,6 +16,7 @@ from repogent.repository import RepositoryInspector
 from repogent.run_builder import (
     RunBuildError,
     RunOptions,
+    _RunConstructionError,
     build_run,
     terminalize_failure,
     validate_run_options,
@@ -94,16 +95,10 @@ def run_command(
         if error.store is None:
             typer.echo(str(error))
             raise typer.Exit(2) from error
-        if str(error) == "repository preflight failed":
-            _echo_preflight_failures(error.store.root)
-        elif (
-            error.manifest is not None
-            and error.manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-            and not str(error).startswith(
-                ("repository preflight failed:", "could not load ")
-            )
-        ):
+        if isinstance(error, _RunConstructionError) and error.manifest is not None:
             typer.echo(f"Run {error.manifest.run_id}: {error.manifest.status.value}")
+        elif str(error) == "repository preflight failed":
+            _echo_preflight_failures(error.store.root)
         elif error.manifest is None or error.manifest.status is not RunStatus.CANCELLED:
             typer.echo(str(error))
         typer.echo(f"Evidence: {error.store.root}")

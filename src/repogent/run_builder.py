@@ -69,6 +69,10 @@ class RunBuildError(RuntimeError):
         self.manifest = manifest
 
 
+class _RunConstructionError(RunBuildError):
+    pass
+
+
 def validate_run_options(options: RunOptions) -> None:
     if options.provider not in {"openai", "codex-cli", "scripted"}:
         raise ValueError("provider must be openai, codex-cli, or scripted")
@@ -216,12 +220,14 @@ def build_run(
             "workflow interrupted by user",
             RunStatus.CANCELLED,
         )
-        raise RunBuildError(
+        raise _RunConstructionError(
             "workflow interrupted by user", store=store, manifest=terminal
         ) from error
     except Exception as error:
         terminal = terminalize_failure(store, manifest, str(error))
-        raise RunBuildError(str(error), store=store, manifest=terminal) from error
+        raise _RunConstructionError(
+            str(error), store=store, manifest=terminal
+        ) from error
 
     return PreparedRun(
         store=store,
