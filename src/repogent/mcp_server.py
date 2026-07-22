@@ -1,8 +1,11 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from enum import StrEnum
+from typing import Annotated, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import WithJsonSchema
 
 from repogent.doctor import DoctorService
 from repogent.domain import ApprovalKind, Decision
@@ -16,13 +19,38 @@ from repogent.mcp_models import (
 )
 from repogent.run_sessions import SessionManager
 
+RunId = Annotated[
+    str,
+    WithJsonSchema({"type": "string", "minLength": 1, "maxLength": 256}),
+]
+
+_ResultT = TypeVar("_ResultT")
+
+
+class _ServiceError(StrEnum):
+    DOCTOR = "readiness check failed; inspect local Repogent logs"
+    START = "run could not be started; inspect local Repogent logs"
+    GET = "run state is unavailable; inspect local Repogent logs"
+    DECISION = "run decision could not be applied; inspect local Repogent logs"
+    CANCEL = "run could not be cancelled; inspect local Repogent logs"
+    REPORT = "run report is unavailable; inspect local Repogent logs"
+
+
+def _call_service(
+    action: Callable[[], _ResultT], message: _ServiceError
+) -> _ResultT:
+    try:
+        return action()
+    except Exception:
+        raise RuntimeError(message.value) from None
+
 
 def create_server(
     manager: SessionManager | None = None,
     doctor: DoctorService | None = None,
 ) -> FastMCP:
-    sessions = manager or SessionManager()
-    readiness = doctor or DoctorService()
+    sessions = manager if manager is not None else SessionManager()
+    readiness = doctor if doctor is not None else DoctorService()
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncIterator[dict[str, object]]:
@@ -43,7 +71,7 @@ def create_server(
         ),
     )
     def repogent_doctor(request: DoctorRequest) -> DoctorReport:
-        return readiness.run(request)
+        return _call_service(lambda: readiness.run(request), _ServiceError.DOCTOR)
 
     @server.tool(
         name="start_run",
@@ -51,11 +79,16 @@ def create_server(
             readOnlyHint=False,
             destructiveHint=False,
             idempotentHint=False,
-            openWorldHint=False,
+            openWorldHint=True,
         ),
     )
     def start_run(request: RunStart) -> RunSnapshot:
-        return sessions.start(request)
+        return _call_service(lambda: sessions.start(request), _ServiceError.START)
+
+    def require_run_id(run_id: RunId) -> str:
+        if not 1 <= len(run_id) <= 256:
+            raise ValueError("run ID must be between 1 and 256 characters")
+        return run_id
 
     @server.tool(
         name="get_run",
@@ -66,8 +99,9 @@ def create_server(
             openWorldHint=False,
         ),
     )
-    def get_run(run_id: str) -> RunSnapshot:
-        return sessions.get(run_id)
+    def get_run(run_id: RunId) -> RunSnapshot:
+        bounded_run_id = require_run_id(run_id)
+        return _call_service(lambda: sessions.get(bounded_run_id), _ServiceError.GET)
 
     def require_kind(decision: RunDecision, expected: ApprovalKind) -> None:
         if decision.kind is not expected:
@@ -79,12 +113,12 @@ def create_server(
             readOnlyHint=False,
             destructiveHint=False,
             idempotentHint=False,
-            openWorldHint=False,
+            openWorldHint=True,
         ),
     )
     def approve_requirements(decision: RunDecision) -> RunSnapshot:
         require_kind(decision, ApprovalKind.REQUIREMENTS)
-        return sessions.decide(decision)
+        return _call_service(lambda: sessions.decide(decision), _ServiceError.DECISION)
 
     @server.tool(
         name="approve_plan",
@@ -92,12 +126,12 @@ def create_server(
             readOnlyHint=False,
             destructiveHint=False,
             idempotentHint=False,
-            openWorldHint=False,
+            openWorldHint=True,
         ),
     )
     def approve_plan(decision: RunDecision) -> RunSnapshot:
         require_kind(decision, ApprovalKind.PLAN)
-        return sessions.decide(decision)
+        return _call_service(lambda: sessions.decide(decision), _ServiceError.DECISION)
 
     @server.tool(
         name="approve_patch",
@@ -112,7 +146,7 @@ def create_server(
         require_kind(decision, ApprovalKind.PATCH)
         if decision.decision is not Decision.APPROVED:
             raise ValueError("approve_patch requires an approved decision")
-        return sessions.decide(decision)
+        return _call_service(lambda: sessions.decide(decision), _ServiceError.DECISION)
 
     @server.tool(
         name="cancel_run",
@@ -123,8 +157,9 @@ def create_server(
             openWorldHint=False,
         ),
     )
-    def cancel_run(run_id: str) -> RunSnapshot:
-        return sessions.cancel(run_id)
+    def cancel_run(run_id: RunId) -> RunSnapshot:
+        bounded_run_id = require_run_id(run_id)
+        return _call_service(lambda: sessions.cancel(bounded_run_id), _ServiceError.CANCEL)
 
     @server.tool(
         name="get_report",
@@ -135,8 +170,9 @@ def create_server(
             openWorldHint=False,
         ),
     )
-    def get_report(run_id: str) -> RunReport:
-        return sessions.get_report(run_id)
+    def get_report(run_id: RunId) -> RunReport:
+        bounded_run_id = require_run_id(run_id)
+        return _call_service(lambda: sessions.get_report(bounded_run_id), _ServiceError.REPORT)
 
     return server
 

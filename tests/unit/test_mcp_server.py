@@ -104,6 +104,52 @@ class FakeDoctor:
         return self.report
 
 
+class FalseyManager(FakeManager):
+    def __bool__(self) -> bool:
+        return False
+
+
+class FalseyDoctor(FakeDoctor):
+    def __bool__(self) -> bool:
+        return False
+
+
+_INTERNAL_FAILURE_DETAIL = (
+    "secret-value at /private/secret/path; subprocess stdout contained credentials"
+)
+
+
+class FailingManager(FakeManager):
+    @staticmethod
+    def _fail() -> None:
+        raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
+
+    def start(self, request: RunStart) -> RunSnapshot:
+        self._fail()
+        raise AssertionError("unreachable")
+
+    def get(self, run_id: str) -> RunSnapshot:
+        self._fail()
+        raise AssertionError("unreachable")
+
+    def decide(self, decision: RunDecision) -> RunSnapshot:
+        self._fail()
+        raise AssertionError("unreachable")
+
+    def cancel(self, run_id: str) -> RunSnapshot:
+        self._fail()
+        raise AssertionError("unreachable")
+
+    def get_report(self, run_id: str) -> RunReport:
+        self._fail()
+        raise AssertionError("unreachable")
+
+
+class FailingDoctor(FakeDoctor):
+    def run(self, request: DoctorRequest) -> DoctorReport:
+        raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
+
+
 @pytest.fixture
 async def client_session() -> AsyncIterator[tuple[ClientSession, FakeManager, FakeDoctor]]:
     manager = FakeManager()
@@ -151,27 +197,39 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
     assert tools["repogent_doctor"].outputSchema == DoctorReport.model_json_schema()
     assert tools["start_run"].outputSchema == RunSnapshot.model_json_schema()
     assert tools["get_report"].outputSchema == RunReport.model_json_schema()
-    assert tools["cancel_run"].inputSchema["properties"] == {
-        "run_id": {"title": "Run Id", "type": "string"}
+    expected_run_id_schema = {
+        "maxLength": 256,
+        "minLength": 1,
+        "title": "Run Id",
+        "type": "string",
     }
+    for name in ("get_run", "cancel_run", "get_report"):
+        assert tools[name].inputSchema["properties"] == {
+            "run_id": expected_run_id_schema
+        }
 
     expected_annotations = {
-        "repogent_doctor": (True, False, True),
-        "start_run": (False, False, False),
-        "get_run": (True, False, True),
-        "approve_requirements": (False, False, False),
-        "approve_plan": (False, False, False),
-        "approve_patch": (False, True, False),
-        "cancel_run": (False, False, True),
-        "get_report": (True, False, True),
+        "repogent_doctor": (True, False, True, False),
+        "start_run": (False, False, False, True),
+        "get_run": (True, False, True, False),
+        "approve_requirements": (False, False, False, True),
+        "approve_plan": (False, False, False, True),
+        "approve_patch": (False, True, False, False),
+        "cancel_run": (False, False, True, False),
+        "get_report": (True, False, True, False),
     }
-    for name, (read_only, destructive, idempotent) in expected_annotations.items():
+    for name, (
+        read_only,
+        destructive,
+        idempotent,
+        open_world,
+    ) in expected_annotations.items():
         annotations = tools[name].annotations
         assert annotations is not None
         assert annotations.readOnlyHint is read_only
         assert annotations.destructiveHint is destructive
         assert annotations.idempotentHint is idempotent
-        assert annotations.openWorldHint is False
+        assert annotations.openWorldHint is open_world
 
 
 @pytest.mark.anyio
@@ -319,3 +377,157 @@ def test_serve_stdio_runs_only_stdio_transport(
     mcp_server.serve_stdio()
 
     assert transports == ["stdio"]
+
+
+@pytest.mark.anyio
+async def test_falsey_injected_dependencies_are_used_and_shut_down() -> None:
+    manager = FalseyManager()
+    doctor = FalseyDoctor()
+    server = create_server(manager=manager, doctor=doctor)
+    doctor_request = DoctorRequest(repository=Path("/repository"), executor="local")
+
+    async with create_connected_server_and_client_session(
+        server, raise_exceptions=True
+    ) as session:
+        doctor_result = await session.call_tool(
+            "repogent_doctor",
+            {"request": doctor_request.model_dump(mode="json")},
+        )
+        run_result = await session.call_tool("get_run", {"run_id": "run-1"})
+
+    assert doctor_result.structuredContent == doctor.report.model_dump(mode="json")
+    assert run_result.structuredContent == manager.snapshot.model_dump(mode="json")
+    assert doctor.calls == [doctor_request]
+    assert manager.calls == [("get", "run-1")]
+    assert manager.shutdown_called is True
+
+
+@pytest.mark.anyio
+async def test_exceptional_server_context_still_shuts_down_injected_manager() -> None:
+    class ContextFailure(RuntimeError):
+        pass
+
+    manager = FalseyManager()
+    server = create_server(manager=manager, doctor=FalseyDoctor())
+
+    with pytest.raises(ExceptionGroup) as raised:
+        async with create_connected_server_and_client_session(
+            server, raise_exceptions=True
+        ):
+            raise ContextFailure
+
+    assert raised.value.subgroup(ContextFailure) is not None
+    assert manager.shutdown_called is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("tool_name", ["get_run", "cancel_run", "get_report"])
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "",
+        "x" * 257,
+        "secret-value" + "x" * 245,
+    ],
+    ids=["empty", "257-characters", "secret-257-characters"],
+)
+async def test_standalone_run_ids_are_bounded_and_redacted_before_routing(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+    tool_name: str,
+    run_id: str,
+) -> None:
+    session, manager, _doctor = client_session
+
+    result = await session.call_tool(tool_name, {"run_id": run_id})
+
+    assert result.isError is True
+    assert result.content[0].text.endswith(
+        "run ID must be between 1 and 256 characters"
+    )
+    assert len(result.content[0].text) <= 160
+    assert "secret-value" not in result.content[0].text
+    assert manager.calls == []
+
+
+@pytest.mark.anyio
+async def test_internal_service_errors_use_bounded_allowlisted_messages() -> None:
+    manager = FailingManager()
+    server = create_server(manager=manager, doctor=FailingDoctor())
+    doctor_request = DoctorRequest(repository=Path("/repository"), executor="local")
+    start_request = RunStart(
+        repository=Path("/repository"), request="make a bounded change", executor="local"
+    )
+    requirements = RunDecision(
+        run_id="run-1",
+        kind=ApprovalKind.REQUIREMENTS,
+        digest="a" * 64,
+        decision=Decision.APPROVED,
+    )
+    plan = RunDecision(
+        run_id="run-1",
+        kind=ApprovalKind.PLAN,
+        digest="b" * 64,
+        decision=Decision.APPROVED,
+    )
+    patch = RunDecision(
+        run_id="run-1",
+        kind=ApprovalKind.PATCH,
+        digest="c" * 64,
+        decision=Decision.APPROVED,
+    )
+    calls = [
+        (
+            "repogent_doctor",
+            {"request": doctor_request.model_dump(mode="json")},
+            "readiness check failed; inspect local Repogent logs",
+        ),
+        (
+            "start_run",
+            {"request": start_request.model_dump(mode="json")},
+            "run could not be started; inspect local Repogent logs",
+        ),
+        (
+            "get_run",
+            {"run_id": "run-1"},
+            "run state is unavailable; inspect local Repogent logs",
+        ),
+        (
+            "approve_requirements",
+            {"decision": requirements.model_dump(mode="json")},
+            "run decision could not be applied; inspect local Repogent logs",
+        ),
+        (
+            "approve_plan",
+            {"decision": plan.model_dump(mode="json")},
+            "run decision could not be applied; inspect local Repogent logs",
+        ),
+        (
+            "approve_patch",
+            {"decision": patch.model_dump(mode="json")},
+            "run decision could not be applied; inspect local Repogent logs",
+        ),
+        (
+            "cancel_run",
+            {"run_id": "run-1"},
+            "run could not be cancelled; inspect local Repogent logs",
+        ),
+        (
+            "get_report",
+            {"run_id": "run-1"},
+            "run report is unavailable; inspect local Repogent logs",
+        ),
+    ]
+
+    async with create_connected_server_and_client_session(
+        server, raise_exceptions=True
+    ) as session:
+        for tool_name, arguments, category in calls:
+            result = await session.call_tool(tool_name, arguments)
+            message = result.content[0].text
+
+            assert result.isError is True
+            assert message == f"Error executing tool {tool_name}: {category}"
+            assert len(message) <= 160
+            assert "secret-value" not in message
+            assert "/private/secret/path" not in message
+            assert "subprocess stdout" not in message
