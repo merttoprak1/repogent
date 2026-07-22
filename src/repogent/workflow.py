@@ -64,6 +64,10 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class WorkflowCancelled(RuntimeError):
+    pass
+
+
 class Validator(Protocol):
     def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport: ...
 
@@ -114,6 +118,7 @@ class Workflow:
     candidate_selector: CandidateSelector | None = None
     events: EventSink | None = None
     context_builder: ProviderContextBuilder | None = None
+    cancel_requested: Callable[[], bool] | None = None
     requirements: RequirementsSpec | None = field(default=None, init=False)
     plan: ImplementationPlan | None = field(default=None, init=False)
     validation: ValidationReport | None = field(default=None, init=False)
@@ -156,6 +161,10 @@ class Workflow:
                 RunStatus.CHANGES_REQUESTED,
             }:
                 self.ensure_time()
+        except WorkflowCancelled:
+            self._mark_post_apply_interrupted()
+            status = RunStatus.CANCELLED
+            reason = "workflow cancellation requested"
         except (KeyboardInterrupt, SystemExit):
             self._mark_post_apply_interrupted()
             status = RunStatus.CANCELLED
@@ -522,6 +531,8 @@ class Workflow:
         self.remaining_time()
 
     def remaining_time(self) -> float:
+        if self.cancel_requested is not None and self.cancel_requested():
+            raise WorkflowCancelled("workflow cancellation requested")
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("workflow timeout exceeded")

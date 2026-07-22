@@ -801,6 +801,59 @@ def test_keyboard_interrupt_is_durably_terminalized_as_cancellation(tmp_path: Pa
     assert _events(workflow)[-1]["kind"] == EventKind.TERMINAL.value
 
 
+def test_requested_cancellation_terminalizes_as_cancelled(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(tmp_path, outputs=[], validation_statuses=[])
+    workflow.cancel_requested = lambda: True
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.CANCELLED
+    assert manifest.reason == "workflow cancellation requested"
+    assert manifest.checkout_state is CheckoutState.NOT_APPLIED
+
+
+def test_cancellation_after_requirements_approval_stops_before_candidate_generation(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT],
+        validation_statuses=[],
+    )
+    workflow.cancel_requested = lambda: bool(workflow.approver.records)
+
+    manifest = workflow.run()
+
+    provider = workflow.roles.requirements.provider
+    assert isinstance(provider, ScriptedProvider)
+    assert manifest.status is RunStatus.CANCELLED
+    assert manifest.reason == "workflow cancellation requested"
+    assert [record.kind for record in workflow.approver.records] == [ApprovalKind.REQUIREMENTS]
+    assert len(provider.calls) == 1
+    assert workflow.candidates == []
+
+
+def test_cancellation_after_durable_apply_reports_applied_checkout(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    workflow.cancel_requested = (
+        lambda: workflow.manifest.checkout_state is CheckoutState.APPLIED
+    )
+
+    manifest = workflow.run()
+    report = (workflow.artifacts.root / "report.md").read_text()
+
+    assert manifest.status is RunStatus.CANCELLED
+    assert manifest.checkout_state is CheckoutState.APPLIED
+    assert manifest.applied_paths == ["app.py"]
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
+    assert "Real checkout patch: remains applied" in report
+    assert "Real checkout patch: not applied" not in report
+
+
 def test_final_validation_failure_reports_real_patch_as_applied(tmp_path: Path) -> None:
     workflow = make_phase2_workflow(
         tmp_path,
