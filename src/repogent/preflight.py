@@ -54,37 +54,36 @@ class Preflight:
         git_commit, dirty_output, git_check = _git_state(repository)
         ready, reason = self.executor.readiness()
         commands = self.policy.commands(repository)
-        checks = [git_check]
-        for command in commands:
-            available = self.executor.available(command)
-            checks.append(
-                PreflightCheck(
-                    name=f"command:{command.name}",
-                    status=(
-                        ReadinessStatus.PASSED
-                        if available
-                        else ReadinessStatus.FAILED
-                        if command.required
-                        else ReadinessStatus.WARNING
-                    ),
-                    required=command.required,
-                    reason=(
-                        None
-                        if available
-                        else "required validation command unavailable"
-                        if command.required
-                        else "optional validation command unavailable"
-                    ),
-                )
-            )
-        checks.append(
-            PreflightCheck(
-                name="executor",
-                status=ReadinessStatus.PASSED if ready else ReadinessStatus.FAILED,
-                required=True,
-                reason=reason,
-            )
+        executor_check = PreflightCheck(
+            name="executor",
+            status=ReadinessStatus.PASSED if ready else ReadinessStatus.FAILED,
+            required=True,
+            reason=reason,
         )
+        checks = [git_check, executor_check]
+        if ready:
+            for command in commands:
+                available = self.executor.available(command)
+                checks.append(
+                    PreflightCheck(
+                        name=f"command:{command.name}",
+                        status=(
+                            ReadinessStatus.PASSED
+                            if available
+                            else ReadinessStatus.FAILED
+                            if command.required
+                            else ReadinessStatus.WARNING
+                        ),
+                        required=command.required,
+                        reason=(
+                            None
+                            if available
+                            else "required validation command unavailable"
+                            if command.required
+                            else "optional validation command unavailable"
+                        ),
+                    )
+                )
         payload = {
             "root": str(repository),
             "commit": git_commit or "no-commit",
