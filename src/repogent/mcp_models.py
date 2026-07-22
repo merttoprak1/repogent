@@ -147,12 +147,16 @@ class RunSnapshot(VersionedModel):
 
     @model_validator(mode="after")
     def derive_trust_label(self) -> "RunSnapshot":
-        if self.execution_mode is None or self.verification_status is not VerificationStatus.PASSED:
-            self.trust_label = TrustLabel.UNVALIDATED
-        elif self.isolation_level is IsolationLevel.ISOLATED:
+        if self.execution_mode is ExecutionMode.LOCAL:
+            self.trust_label = TrustLabel.REDUCED_ISOLATION
+        elif (
+            self.execution_mode is ExecutionMode.DOCKER
+            and self.isolation_level is IsolationLevel.ISOLATED
+            and self.verification_status is VerificationStatus.PASSED
+        ):
             self.trust_label = TrustLabel.ISOLATED_VERIFIED
         else:
-            self.trust_label = TrustLabel.REDUCED_ISOLATION
+            self.trust_label = TrustLabel.UNVALIDATED
         return self
 
 
