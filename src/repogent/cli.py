@@ -26,6 +26,18 @@ from repogent.symbols import PythonSymbolGraphBuilder
 app = typer.Typer(no_args_is_help=True)
 
 
+@app.command("mcp")
+def mcp_command(
+    stdio: Annotated[bool, typer.Option("--stdio")] = False,
+) -> None:
+    """Serve Repogent's local MCP tools over stdio."""
+    if not stdio:
+        raise typer.BadParameter("only --stdio is supported")
+    from repogent.mcp_server import serve_stdio
+
+    serve_stdio()
+
+
 @app.command()
 def analyze(
     repository: Annotated[Path, typer.Argument(exists=True, file_okay=False, resolve_path=True)],
