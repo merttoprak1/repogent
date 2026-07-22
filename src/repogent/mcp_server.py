@@ -25,6 +25,7 @@ RunId = Annotated[
 ]
 
 _ResultT = TypeVar("_ResultT")
+_LIFECYCLE_ERROR = "session shutdown failed; inspect local Repogent logs"
 
 
 class _ServiceError(StrEnum):
@@ -57,7 +58,10 @@ def create_server(
         try:
             yield {"sessions": sessions}
         finally:
-            sessions.shutdown()
+            try:
+                sessions.shutdown()
+            except Exception:
+                raise RuntimeError(_LIFECYCLE_ERROR) from None
 
     server = FastMCP("Repogent", json_response=True, lifespan=lifespan)
 
