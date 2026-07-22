@@ -82,3 +82,40 @@ class RunReport(VersionedModel):
     checkout_state: CheckoutState
     evidence_path: str = Field(max_length=4_096)
     report: str = Field(max_length=64_000)
+
+
+class DoctorRequest(VersionedModel):
+    repository: Path
+    provider: str = "codex-cli"
+    model: str | None = Field(default=None, max_length=256)
+    executor: str = "docker"
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, provider: str) -> str:
+        if provider not in {"openai", "codex-cli", "scripted"}:
+            raise ValueError("provider must be openai, codex-cli, or scripted")
+        return provider
+
+    @field_validator("executor")
+    @classmethod
+    def validate_executor(cls, executor: str) -> str:
+        if executor not in {"docker", "local"}:
+            raise ValueError("executor must be docker or local")
+        return executor
+
+
+class DoctorCheck(VersionedModel):
+    name: str = Field(min_length=1, max_length=128)
+    passed: bool
+    required: bool
+    message: str = Field(min_length=1, max_length=512)
+    remediation: str | None = Field(default=None, max_length=512)
+
+
+class DoctorReport(VersionedModel):
+    ready: bool
+    repository: str = Field(max_length=4_096)
+    provider: str = Field(max_length=32)
+    executor: str = Field(max_length=32)
+    checks: list[DoctorCheck] = Field(max_length=9)
