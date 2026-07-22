@@ -263,11 +263,53 @@ def test_build_run_deferred_uses_only_base_preflight_and_selector_factory(
     )
 
     assert prepared.preflight.passed
+    assert prepared.executor_selector is selector
     assert prepared.workflow.executor_selector is selector
     assert prepared.workflow.validator is None
     assert factory_calls == [
         (prepared.manifest.run_id, target.resolve(), factory_calls[0][2])
     ]
+
+
+def test_deferred_construction_failure_closes_both_decision_channels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    closed: list[str] = []
+
+    class ClosingApprover:
+        def close(self) -> None:
+            closed.append("approval")
+
+    class ClosingSelector:
+        def close(self) -> None:
+            closed.append("execution")
+
+    def fail_workflow(**_kwargs: object) -> object:
+        raise RuntimeError("workflow construction failed")
+
+    monkeypatch.setattr(run_builder, "Workflow", fail_workflow)
+
+    with pytest.raises(RunBuildError, match="workflow construction failed"):
+        build_run(
+            RunOptions(
+                repository=target,
+                request="change",
+                provider="scripted",
+                script=script,
+                executor="deferred",
+                output_dir=tmp_path / "runs",
+            ),
+            lambda _run_id: ClosingApprover(),  # type: ignore[arg-type]
+            executor_selector_factory=lambda *_args: ClosingSelector(),  # type: ignore[arg-type]
+        )
+
+    assert closed == ["execution", "approval"]
 
 
 def test_build_run_deferred_requires_selector_factory(tmp_path: Path) -> None:

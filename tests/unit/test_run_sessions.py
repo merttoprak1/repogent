@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -27,7 +28,15 @@ from repogent.domain import (
     ValidationReport,
     VerificationStatus,
 )
-from repogent.mcp_models import RunDecision, RunStart
+from repogent.execution import ValidationPolicy
+from repogent.executor_selection import LOCAL_RISK_STATEMENT, PreparedExecutor
+from repogent.mcp_models import (
+    ExecutionDecision,
+    ExecutorAvailability,
+    ExecutorOption,
+    RunDecision,
+    RunStart,
+)
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.preflight import PreflightReport
 from repogent.providers import ScriptedProvider
@@ -46,6 +55,15 @@ PLAN_OUTPUT = {
     "steps": [{"id": "change", "description": "Change value"}],
     "tests": ["pytest"],
 }
+VALID_PATCH_OUTPUT = {
+    "summary": "Change value",
+    "diff": (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+        " def value():\n-    return 1\n+    return 2\n"
+    ),
+    "acceptance_criteria_addressed": ["tests pass"],
+    "focused_tests": ["pytest"],
+}
 
 
 class PassingValidator:
@@ -56,6 +74,75 @@ class PassingValidator:
         return ValidationReport(
             checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
         )
+
+
+class SessionRegistry:
+    def __init__(self) -> None:
+        self.prepare_calls: list[ExecutionMode] = []
+
+    def inspect_availability(
+        self, root: Path, policy: ValidationPolicy
+    ) -> list[ExecutorAvailability]:
+        del root, policy
+        return [
+            ExecutorAvailability(
+                mode=ExecutionMode.DOCKER,
+                available=True,
+                isolation_level=IsolationLevel.ISOLATED,
+                message="Docker validation is available",
+            ),
+            ExecutorAvailability(
+                mode=ExecutionMode.LOCAL,
+                available=True,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                message="Local validation is available",
+                risk_statement=LOCAL_RISK_STATEMENT,
+            ),
+        ]
+
+    def build_options(
+        self,
+        run_id: str,
+        preview_digest: str,
+        availability: list[ExecutorAvailability],
+    ) -> list[ExecutorOption]:
+        return [
+            ExecutorOption(
+                mode=item.mode,
+                available=item.available,
+                isolation_level=item.isolation_level,
+                option_digest=hashlib.sha256(
+                    f"{run_id}:{preview_digest}:{item.mode.value}".encode()
+                ).hexdigest(),
+                message=item.message,
+                remediation=item.remediation,
+                risk_statement=item.risk_statement,
+            )
+            for item in availability
+        ]
+
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        del root, policy
+        self.prepare_calls.append(mode)
+        return PreparedExecutor(
+            mode=mode,
+            isolation_level=(
+                IsolationLevel.ISOLATED
+                if mode is ExecutionMode.DOCKER
+                else IsolationLevel.REDUCED_ISOLATION
+            ),
+            preflight=PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repo"
+            ),
+            validator=PassingValidator(),  # type: ignore[arg-type]
+        )
+
+
+class FalseySessionRegistry(SessionRegistry):
+    def __bool__(self) -> bool:
+        return False
 
 
 class BlockingInspector:
@@ -88,6 +175,7 @@ def make_builder(
         options: RunOptions,
         approver_factory: Callable[[str], Approver],
         *,
+        executor_selector_factory=None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> PreparedRun:
         nonlocal counter
@@ -104,17 +192,25 @@ def make_builder(
         )
         approver = approver_factory(run_id)
         manifest = RunManifest(run_id=run_id, request=options.request)
+        selector = (
+            executor_selector_factory(run_id, root, ValidationPolicy())
+            if options.executor == "deferred"
+            else None
+        )
         workflow = Workflow(
             root=root,
             request=options.request,
             manifest=manifest,
             roles=RoleSet.from_provider(
-                ScriptedProvider([REQUIREMENTS_OUTPUT, PLAN_OUTPUT])
+                ScriptedProvider(
+                    [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT]
+                )
             ),
             approver=approver,
             patch_policy=PatchPolicy(),
             patch_applier=PatchApplier(),
-            validator=PassingValidator(),
+            validator=None if selector is not None else PassingValidator(),
+            executor_selector=selector,
             artifacts=store,
             inspector=inspector or RepositoryInspector(),  # type: ignore[arg-type]
             budget=Budget(),
@@ -128,6 +224,7 @@ def make_builder(
             preflight=PreflightReport(
                 checks=[], git_commit=None, dirty=False, repository_fingerprint="repo"
             ),
+            executor_selector=workflow.executor_selector,
         )
 
     return builder
@@ -144,6 +241,12 @@ def start_request(target: Path, output_dir: Path) -> RunStart:
     )
 
 
+def deferred_request(target: Path, output_dir: Path) -> RunStart:
+    return start_request(target, output_dir).model_copy(
+        update={"executor": "deferred"}
+    )
+
+
 def decision_for(snapshot, decision: Decision = Decision.APPROVED) -> RunDecision:
     assert snapshot.pending_approval is not None
     return RunDecision(
@@ -152,6 +255,192 @@ def decision_for(snapshot, decision: Decision = Decision.APPROVED) -> RunDecisio
         digest=snapshot.pending_approval.digest,
         decision=decision,
     )
+
+
+def execution_decision_for(
+    snapshot,
+    *,
+    mode: ExecutionMode = ExecutionMode.LOCAL,
+    decision: Decision = Decision.APPROVED,
+) -> ExecutionDecision:
+    assert snapshot.pending_execution is not None
+    selected = next(
+        item for item in snapshot.pending_execution.options if item.mode is mode
+    )
+    return ExecutionDecision(
+        run_id=snapshot.run_id,
+        preview_digest=snapshot.pending_execution.preview_digest,
+        mode=mode,
+        option_digest=selected.option_digest,
+        decision=decision,
+    )
+
+
+def deferred_manager_waiting_for_executor(
+    tmp_path: Path,
+):
+    target = make_target(tmp_path)
+    manager = SessionManager(
+        builder=make_builder(), executor_registry=SessionRegistry()  # type: ignore[arg-type]
+    )
+    request = deferred_request(target, tmp_path / "runs")
+    snapshot = manager.start(request)
+    snapshot = manager.decide(decision_for(snapshot))
+    snapshot = manager.decide(decision_for(snapshot))
+    return manager, request, snapshot
+
+
+def test_manager_preserves_injected_falsey_executor_registry() -> None:
+    registry = FalseySessionRegistry()
+
+    manager = SessionManager(executor_registry=registry)  # type: ignore[arg-type]
+
+    assert manager._executor_registry is registry
+
+
+def test_deferred_session_surfaces_pending_execution_after_plan(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        assert snapshot.pending_approval is None
+        assert snapshot.pending_execution is not None
+        assert snapshot.verification_status is VerificationStatus.UNVALIDATED
+        assert snapshot.checkout_state is CheckoutState.NOT_APPLIED
+        assert snapshot.selected_patch_applied is False
+    finally:
+        manager.cancel(snapshot.run_id)
+        manager.shutdown()
+
+
+def test_executor_selection_releases_waiter_but_not_root_lock(
+    tmp_path: Path,
+) -> None:
+    manager, request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        selected = manager.select_executor(execution_decision_for(snapshot))
+
+        assert selected.pending_execution is None
+        assert selected.pending_approval is not None
+        assert selected.pending_approval.kind is ApprovalKind.PATCH
+        assert selected.execution_mode is ExecutionMode.LOCAL
+        assert selected.isolation_level is IsolationLevel.REDUCED_ISOLATION
+        with pytest.raises(SessionError, match="repository already has an active run"):
+            manager.start(request)
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_get_reconciles_pending_execution_after_caller_disconnect(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        assert snapshot.pending_execution is not None
+        original = snapshot.pending_execution.model_copy(deep=True)
+        snapshot.pending_execution.preview["changed_files"] = 99
+        snapshot.pending_execution.options[1].option_digest = "f" * 64
+
+        recovered = manager.get(snapshot.run_id)
+
+        assert recovered.pending_execution == original
+        selected = manager.select_executor(execution_decision_for(recovered))
+        assert selected.pending_approval is not None
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_executor_selection_is_rejected_while_content_approval_is_pending(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(
+        builder=make_builder(), executor_registry=SessionRegistry()  # type: ignore[arg-type]
+    )
+    snapshot = manager.start(deferred_request(target, tmp_path / "runs"))
+    try:
+        assert snapshot.pending_approval is not None
+        with pytest.raises(SessionError, match="no executor selection is pending"):
+            manager.select_executor(
+                ExecutionDecision(
+                    run_id=snapshot.run_id,
+                    preview_digest="a" * 64,
+                    mode=ExecutionMode.LOCAL,
+                    option_digest="b" * 64,
+                    decision=Decision.APPROVED,
+                )
+            )
+    finally:
+        manager.cancel(snapshot.run_id)
+        manager.shutdown()
+
+
+def test_stale_execution_decision_does_not_consume_pending_choice(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        decision = execution_decision_for(snapshot)
+        with pytest.raises(SessionError, match="preview digest mismatch"):
+            manager.select_executor(
+                decision.model_copy(update={"preview_digest": "f" * 64})
+            )
+        with pytest.raises(SessionError, match="option digest mismatch"):
+            manager.select_executor(
+                decision.model_copy(update={"option_digest": "e" * 64})
+            )
+
+        recovered = manager.get(snapshot.run_id)
+        assert recovered.pending_execution == snapshot.pending_execution
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_cancel_while_awaiting_executor_closes_both_decision_channels(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+
+    terminal = manager.cancel(snapshot.run_id)
+
+    assert terminal.status is RunStatus.CANCELLED
+    assert terminal.pending_approval is None
+    assert terminal.pending_execution is None
+    assert terminal.checkout_state is CheckoutState.NOT_APPLIED
+    assert terminal.cancellation_requested is True
+    manager.shutdown()
+
+
+def test_rejected_local_selection_terminalizes_before_root_release(
+    tmp_path: Path,
+) -> None:
+    manager, request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        terminal = manager.select_executor(
+            execution_decision_for(snapshot, decision=Decision.REJECTED)
+        )
+
+        assert terminal.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+        assert terminal.pending_execution is None
+        replacement = manager.start(request)
+        manager.cancel(replacement.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_shutdown_closes_gate_waiter_within_shared_deadline(tmp_path: Path) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    started = time.monotonic()
+
+    manager.shutdown()
+
+    assert time.monotonic() - started < 1
+    terminal = manager.get(snapshot.run_id)
+    assert terminal.status is RunStatus.CANCELLED
+    assert terminal.pending_execution is None
 
 
 def test_session_advances_matching_gate_and_releases_root_at_terminal(
