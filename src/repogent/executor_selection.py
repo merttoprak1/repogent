@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from repogent.candidates import PatchPreview
 from repogent.domain import ExecutionMode, IsolationLevel
 from repogent.execution import DockerExecutor, Executor, LocalExecutor, ValidationPolicy
 from repogent.mcp_models import ExecutorAvailability, ExecutorOption
@@ -36,6 +37,24 @@ class PreparedExecutor:
     isolation_level: IsolationLevel
     preflight: PreflightReport
     validator: ValidationPipeline
+
+
+class FixedExecutorSelector:
+    def __init__(self, prepared: PreparedExecutor) -> None:
+        self._prepared = prepared
+
+    def select(
+        self,
+        preview: PatchPreview,
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        del timeout_seconds
+        if preview is None:
+            from repogent.workflow import ExecutorSelectionRejected
+
+            raise ExecutorSelectionRejected("patch preview is required before selection")
+        return self._prepared
 
 
 def option_digest(

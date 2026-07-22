@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import stat
 import tempfile
@@ -10,6 +12,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import Field
+
 from repogent.domain import (
     CandidateEvidence,
     CandidateRecord,
@@ -18,9 +22,12 @@ from repogent.domain import (
     CheckStatus,
     RiskLevel,
     ValidationReport,
+    VerificationStatus,
+    VersionedModel,
 )
 from repogent.localization import LocalizationReport
 from repogent.patching import PatchApplier, PatchPolicy, PatchPolicyError, ValidatedPatch
+from repogent.sanitization import redact_text, sanitize_data
 
 _EVALUATION_COPY_IGNORES = {
     ".git",
@@ -36,6 +43,62 @@ _EVALUATION_COPY_IGNORES = {
 
 class EvaluationTimeout(TimeoutError):
     pass
+
+
+class CandidateEvaluationError(RuntimeError):
+    pass
+
+
+class PatchPreview(VersionedModel):
+    candidate: CandidateRecord
+    touched_paths: list[str] = Field(max_length=20)
+    changed_files: int = Field(ge=0, le=20)
+    changed_lines: int = Field(ge=0)
+    acceptance_criteria_coverage: float = Field(ge=0, le=1)
+    verification_status: VerificationStatus = VerificationStatus.UNVALIDATED
+
+
+def patch_preview_digest(preview: PatchPreview) -> str:
+    canonical = json.dumps(
+        preview.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+class PatchPreviewer:
+    def __init__(self, patch_policy: PatchPolicy) -> None:
+        self.patch_policy = patch_policy
+
+    def preview(
+        self,
+        root: Path,
+        candidate: CandidateRecord,
+        acceptance_criteria: Sequence[str],
+    ) -> PatchPreview:
+        unknown = set(candidate.proposal.acceptance_criteria_addressed) - set(
+            acceptance_criteria
+        )
+        if unknown:
+            raise CandidateEvaluationError(
+                "proposal addresses criteria outside the supplied requirements"
+            )
+        exact_diff = candidate.proposal.diff
+        if redact_text(exact_diff) != exact_diff:
+            raise CandidateEvaluationError("preview contains secret-like patch content")
+        sanitized = sanitize_data({"diff": exact_diff})
+        if not isinstance(sanitized, dict) or sanitized.get("diff") != exact_diff:
+            raise CandidateEvaluationError("preview contains secret-like patch content")
+        validated = self.patch_policy.validate(root, candidate.proposal)
+        return PatchPreview(
+            candidate=candidate,
+            touched_paths=[path.as_posix() for path in validated.touched_paths],
+            changed_files=len(validated.touched_paths),
+            changed_lines=validated.changed_lines,
+            acceptance_criteria_coverage=(
+                len(candidate.proposal.acceptance_criteria_addressed)
+                / max(1, len(acceptance_criteria))
+            ),
+        )
 
 
 def _deadline_after(timeout_seconds: float) -> float:

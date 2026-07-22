@@ -27,17 +27,24 @@ from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
 from repogent.executor_selection import (
     ExecutorRegistry,
     ExecutorSelectionError,
+    FixedExecutorSelector,
     PreparedExecutor,
 )
 from repogent.patching import PatchApplier, PatchPolicy
-from repogent.preflight import Preflight, PreflightReport, configuration_fingerprint
+from repogent.preflight import (
+    Preflight,
+    PreflightReport,
+    configuration_fingerprint,
+    repository_preflight,
+)
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
-from repogent.workflow import Workflow
+from repogent.workflow import ExecutorSelector, Workflow
 
 ProviderName = Literal["openai", "codex-cli", "scripted"]
-ExecutorName = Literal["docker", "local"]
+ExecutorName = Literal["docker", "local", "deferred"]
+ExecutorSelectorFactory = Callable[[str, Path, ValidationPolicy], ExecutorSelector]
 
 
 @dataclass(frozen=True)
@@ -85,8 +92,8 @@ def validate_run_options(options: RunOptions) -> None:
         raise ValueError("--script is required for scripted provider")
     if options.provider != "scripted" and options.script is not None:
         raise ValueError("--script is only supported with --provider scripted")
-    if options.executor not in {"docker", "local"}:
-        raise ValueError("executor must be docker or local")
+    if options.executor not in {"docker", "local", "deferred"}:
+        raise ValueError("executor must be docker or local, or deferred")
     repository = options.repository.resolve(strict=True)
     if repository.parent == repository:
         raise ValueError("filesystem root repositories are unsupported")
@@ -98,10 +105,13 @@ def build_run(
     options: RunOptions,
     approver_factory: Callable[[str], Approver],
     *,
+    executor_selector_factory: ExecutorSelectorFactory | None = None,
     events: EventSink | None = None,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> PreparedRun:
     validate_run_options(options)
+    if options.executor == "deferred" and executor_selector_factory is None:
+        raise ValueError("executor_selector_factory is required for deferred execution")
     repository = options.repository.resolve(strict=True)
     evidence_dir = options.output_dir or repository.parent / ".repogent" / "runs"
     store = ArtifactStore.create(evidence_dir, repository, options.request)
@@ -127,18 +137,21 @@ def build_run(
             }
         )
         prepared_executor: PreparedExecutor | None = None
-        try:
-            prepared_executor = ExecutorRegistry(
-                docker_factory=DockerExecutor,
-                local_factory=LocalExecutor,
-                preflight_factory=Preflight,
-            ).prepare(repository, ExecutionMode(options.executor), policy)
-        except ExecutorSelectionError as error:
-            if error.preflight is None:
-                raise
-            preflight = error.preflight
+        if options.executor == "deferred":
+            preflight = repository_preflight(repository, policy)
         else:
-            preflight = prepared_executor.preflight
+            try:
+                prepared_executor = ExecutorRegistry(
+                    docker_factory=DockerExecutor,
+                    local_factory=LocalExecutor,
+                    preflight_factory=Preflight,
+                ).prepare(repository, ExecutionMode(options.executor), policy)
+            except ExecutorSelectionError as error:
+                if error.preflight is None:
+                    raise
+                preflight = error.preflight
+            else:
+                preflight = prepared_executor.preflight
         store.write_model("preflight", preflight)
     except (KeyboardInterrupt, SystemExit) as error:
         terminal = terminalize_failure(
@@ -165,7 +178,7 @@ def build_run(
             store=store,
             manifest=terminal,
         )
-    if prepared_executor is None:
+    if options.executor != "deferred" and prepared_executor is None:
         raise RuntimeError("prepared executor is missing after successful preflight")
 
     readiness: ProviderReadiness | None = None
@@ -211,6 +224,13 @@ def build_run(
 
     try:
         approver = approver_factory(manifest.run_id)
+        executor_selector = (
+            cast(ExecutorSelectorFactory, executor_selector_factory)(
+                manifest.run_id, repository, policy
+            )
+            if options.executor == "deferred"
+            else FixedExecutorSelector(cast(PreparedExecutor, prepared_executor))
+        )
         workflow = Workflow(
             root=repository,
             request=options.request,
@@ -219,7 +239,10 @@ def build_run(
             approver=approver,
             patch_policy=PatchPolicy(),
             patch_applier=PatchApplier(),
-            validator=prepared_executor.validator,
+            validator=(
+                None if prepared_executor is None else prepared_executor.validator
+            ),
+            executor_selector=executor_selector,
             artifacts=store,
             inspector=RepositoryInspector(),
             retriever=LexicalRetriever(),
