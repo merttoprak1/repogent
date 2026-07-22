@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -65,6 +66,7 @@ class PreparedRun:
     workflow: Workflow
     approver: Approver
     preflight: PreflightReport
+    executor_selector: ExecutorSelector
     provider_readiness: ProviderReadiness | None = None
 
 
@@ -222,6 +224,8 @@ def build_run(
         terminal = terminalize_failure(store, manifest, reason)
         raise RunBuildError(reason, store=store, manifest=terminal) from error
 
+    approver: Approver | None = None
+    executor_selector: ExecutorSelector | None = None
     try:
         approver = approver_factory(manifest.run_id)
         executor_selector = (
@@ -251,6 +255,7 @@ def build_run(
             cancel_requested=cancel_requested,
         )
     except (KeyboardInterrupt, SystemExit) as error:
+        _close_decision_channels(executor_selector, approver)
         terminal = terminalize_failure(
             store,
             manifest,
@@ -261,6 +266,7 @@ def build_run(
             "workflow interrupted by user", store=store, manifest=terminal
         ) from error
     except Exception as error:
+        _close_decision_channels(executor_selector, approver)
         terminal = terminalize_failure(store, manifest, str(error))
         raise _RunConstructionError(
             str(error), store=store, manifest=terminal
@@ -272,8 +278,20 @@ def build_run(
         workflow=workflow,
         approver=approver,
         preflight=preflight,
+        executor_selector=executor_selector,
         provider_readiness=readiness,
     )
+
+
+def _close_decision_channels(
+    executor_selector: ExecutorSelector | None,
+    approver: Approver | None,
+) -> None:
+    for channel in (executor_selector, approver):
+        close = getattr(channel, "close", None)
+        if callable(close):
+            with suppress(Exception):
+                close()
 
 
 def terminalize_failure(
