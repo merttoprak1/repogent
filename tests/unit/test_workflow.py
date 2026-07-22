@@ -849,6 +849,11 @@ def test_cancellation_after_durable_apply_reports_applied_checkout(tmp_path: Pat
     assert manifest.status is RunStatus.CANCELLED
     assert manifest.checkout_state is CheckoutState.APPLIED
     assert manifest.applied_paths == ["app.py"]
+    assert manifest.final_validation_status is FinalValidationStatus.INTERRUPTED
+    assert manifest.recovery_guidance is not None
+    assert "run every required validation command" in manifest.recovery_guidance
+    assert "revert the approved patch manually" in manifest.recovery_guidance
+    assert "rolled back" not in manifest.recovery_guidance
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
     assert "Real checkout patch: remains applied" in report
     assert "Real checkout patch: not applied" not in report
