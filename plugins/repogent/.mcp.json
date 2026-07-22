@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "repogent": {
+      "command": "repogent",
+      "args": ["mcp", "--stdio"]
+    }
+  }
+}
