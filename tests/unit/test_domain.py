@@ -10,6 +10,7 @@ from repogent.domain import (
     CheckoutState,
     CheckResult,
     CheckStatus,
+    Decision,
     FinalValidationStatus,
     ImplementationPlan,
     PendingApproval,
@@ -24,6 +25,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
 )
+from repogent.mcp_models import RunDecision, RunSnapshot, RunStart
 
 
 def test_pending_approval_requires_sha256_digest() -> None:
@@ -183,4 +185,51 @@ def test_run_event_message_is_limited_to_4096_characters() -> None:
             sequence=1,
             kind="stage",
             message="x" * 4097,
+        )
+
+
+def test_mcp_run_start_and_decision_are_versioned_and_typed(tmp_path) -> None:
+    target = tmp_path / "target"
+    script = tmp_path / "script.json"
+    start = RunStart(
+        repository=target,
+        request="Add health endpoint",
+        provider="scripted",
+        script=script,
+        executor="local",
+        output_dir=tmp_path / "runs",
+    )
+    decision = RunDecision(
+        run_id="run-1",
+        kind=ApprovalKind.REQUIREMENTS,
+        digest="a" * 64,
+        decision=Decision.APPROVED,
+    )
+
+    assert start.repository == target
+    assert start.schema_version == "1"
+    assert decision.feedback is None
+
+
+def test_mcp_models_enforce_input_and_output_bounds(tmp_path) -> None:
+    with pytest.raises(ValidationError, match="at most 10000"):
+        RunStart(repository=tmp_path, request="x" * 10_001)
+    with pytest.raises(ValidationError, match="digest"):
+        RunDecision(
+            run_id="run-1",
+            kind=ApprovalKind.PLAN,
+            digest="A" * 64,
+            decision="approved",
+        )
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RunSnapshot(
+            run_id="run-1",
+            status=RunStatus.RUNNING,
+            stage=RunStage.CREATED,
+            checkout_state=CheckoutState.NOT_APPLIED,
+            selected_patch_applied=False,
+            applied_paths=[],
+            final_validation_status=FinalValidationStatus.NOT_STARTED,
+            evidence_path="/evidence/run-1",
+            validation_stdout="secret output",
         )

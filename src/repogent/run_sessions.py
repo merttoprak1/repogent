@@ -1,0 +1,301 @@
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Protocol, cast
+
+from repogent.approval_gate import ApprovalGateError, GateApprover
+from repogent.approvals import Approver
+from repogent.domain import PendingApproval, RunManifest
+from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
+from repogent.run_builder import PreparedRun, RunOptions, build_run
+
+
+class SessionError(RuntimeError):
+    pass
+
+
+class RunBuilder(Protocol):
+    def __call__(
+        self,
+        options: RunOptions,
+        approver_factory: Callable[[str], Approver],
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> PreparedRun: ...
+
+
+class RunSession:
+    _WAIT_INTERVAL_SECONDS = 0.05
+
+    def __init__(
+        self,
+        prepared: PreparedRun,
+        approver: GateApprover,
+        cancel_event: threading.Event,
+        on_done: Callable[[str, Path], None],
+    ) -> None:
+        self.prepared = prepared
+        self.approver = approver
+        self._cancel = cancel_event
+        self._on_done = on_done
+        self._root = prepared.workflow.root.resolve(strict=True)
+        self._done = threading.Event()
+        self._result: RunManifest | None = None
+        self._terminal = False
+        self._pending: PendingApproval | None = None
+        self._generation = 0
+        self._operation_lock = threading.RLock()
+        self._wait_lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"repogent-session-{prepared.manifest.run_id}",
+            daemon=True,
+        )
+
+    def cancellation_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def start(self) -> RunSnapshot:
+        self.start_worker()
+        return self.wait_for_change()
+
+    def start_worker(self) -> None:
+        self._thread.start()
+
+    def snapshot(self) -> RunSnapshot:
+        with self._operation_lock:
+            return self._snapshot()
+
+    def decide(self, decision: RunDecision) -> RunSnapshot:
+        with self._operation_lock:
+            try:
+                self.approver.submit(
+                    decision.kind,
+                    decision.digest,
+                    decision.decision,
+                    decision.feedback,
+                )
+            except ApprovalGateError as error:
+                raise SessionError(str(error)) from error
+            self._pending = None
+        return self.wait_for_change()
+
+    def cancel(self) -> RunSnapshot:
+        if not self.request_cancel():
+            raise SessionError("run is already terminal")
+        return self.wait_for_change()
+
+    def request_cancel(self) -> bool:
+        with self._operation_lock:
+            if self._terminal:
+                return False
+            self._cancel.set()
+            self.approver.close()
+            self._pending = None
+            return True
+
+    def wait_for_change(self) -> RunSnapshot:
+        with self._wait_lock:
+            while not self._done.is_set():
+                with self._operation_lock:
+                    generation = self._generation
+                generation, pending = self.approver.wait(
+                    after_generation=generation,
+                    timeout_seconds=self._WAIT_INTERVAL_SECONDS,
+                )
+                with self._operation_lock:
+                    if generation > self._generation:
+                        self._generation = generation
+                        self._pending = pending
+                        if pending is not None:
+                            return self._snapshot()
+                self._done.wait(self._WAIT_INTERVAL_SECONDS)
+            with self._operation_lock:
+                self._pending = None
+                return self._snapshot()
+
+    def join(self, timeout_seconds: float) -> None:
+        self._thread.join(timeout=max(0.0, timeout_seconds))
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def is_done(self) -> bool:
+        return self._done.is_set()
+
+    def _run(self) -> None:
+        result: RunManifest | None = None
+        try:
+            result = self.prepared.workflow.run()
+        finally:
+            with self._operation_lock:
+                self._result = result
+                self._terminal = True
+            try:
+                self._on_done(self.prepared.manifest.run_id, self._root)
+            finally:
+                self._done.set()
+
+    def _snapshot(self) -> RunSnapshot:
+        manifest = self._result or self.prepared.workflow.manifest
+        pending = (
+            self._pending.model_copy(deep=True) if self._pending is not None else None
+        )
+        return RunSnapshot(
+            run_id=manifest.run_id,
+            status=manifest.status,
+            stage=manifest.stage,
+            pending_approval=pending,
+            checkout_state=manifest.checkout_state,
+            selected_patch_applied=manifest.selected_patch_applied,
+            applied_paths=list(manifest.applied_paths),
+            final_validation_status=manifest.final_validation_status,
+            reason=manifest.reason,
+            evidence_path=str(self.prepared.store.root),
+            cancellation_requested=self.cancellation_requested(),
+        )
+
+
+class SessionManager:
+    def __init__(
+        self,
+        *,
+        builder: RunBuilder = build_run,
+        shutdown_timeout_seconds: float = 10.0,
+    ) -> None:
+        self._builder = builder
+        self._shutdown_timeout_seconds = shutdown_timeout_seconds
+        self._lock = threading.RLock()
+        self._sessions: dict[str, RunSession] = {}
+        self._active_roots: dict[Path, str | None] = {}
+        self._closed = False
+
+    def start(self, request: RunStart) -> RunSnapshot:
+        root = request.repository.resolve(strict=True)
+        with self._lock:
+            if self._closed:
+                raise SessionError("session manager has been shut down")
+            if root in self._active_roots:
+                active_run = self._active_roots[root]
+                if active_run is None:
+                    raise SessionError(
+                        "another run is being prepared for this repository"
+                    )
+                raise SessionError(
+                    f"repository already has an active run: {active_run}"
+                )
+            self._active_roots[root] = None
+
+        registered = False
+        session: RunSession | None = None
+        try:
+            cancel_event = threading.Event()
+            prepared = self._builder(
+                RunOptions(
+                    repository=root,
+                    request=request.request,
+                    provider=request.provider,
+                    model=request.model,
+                    script=request.script,
+                    executor=request.executor,
+                    output_dir=request.output_dir,
+                ),
+                GateApprover,
+                cancel_requested=cancel_event.is_set,
+            )
+            prepared_root = prepared.workflow.root.resolve(strict=True)
+            if prepared_root != root:
+                raise SessionError("prepared run repository does not match requested repository")
+            approver = cast(GateApprover, prepared.approver)
+            session = RunSession(
+                prepared,
+                approver,
+                cancel_event,
+                self._release_root,
+            )
+            run_id = prepared.manifest.run_id
+            with self._lock:
+                if self._closed:
+                    raise SessionError("session manager has been shut down")
+                if run_id in self._sessions:
+                    raise SessionError(f"run already exists: {run_id}")
+                self._active_roots[root] = run_id
+                self._sessions[run_id] = session
+                try:
+                    session.start_worker()
+                except BaseException:
+                    self._sessions.pop(run_id, None)
+                    self._active_roots.pop(root, None)
+                    raise
+                registered = True
+            return session.wait_for_change()
+        except BaseException:
+            if registered and session is not None:
+                session.request_cancel()
+                session.join(self._shutdown_timeout_seconds)
+                with self._lock:
+                    if self._sessions.get(session.prepared.manifest.run_id) is session:
+                        self._sessions.pop(session.prepared.manifest.run_id, None)
+            raise
+        finally:
+            if not registered:
+                with self._lock:
+                    if self._active_roots.get(root) is None:
+                        self._active_roots.pop(root, None)
+
+    def get(self, run_id: str) -> RunSnapshot:
+        return self._get_session(run_id).snapshot()
+
+    def decide(self, decision: RunDecision) -> RunSnapshot:
+        return self._get_session(decision.run_id).decide(decision)
+
+    def cancel(self, run_id: str) -> RunSnapshot:
+        return self._get_session(run_id).cancel()
+
+    def get_report(self, run_id: str) -> RunReport:
+        session = self._get_session(run_id)
+        if not session.is_done():
+            raise SessionError("run is not terminal")
+        snapshot = session.snapshot()
+        report_path = session.prepared.store.root / "report.md"
+        try:
+            with report_path.open(encoding="utf-8") as handle:
+                report = handle.read(64_001)
+        except OSError as error:
+            raise SessionError(f"run report is unavailable: {error}") from error
+        if len(report) > 64_000:
+            raise SessionError("run report exceeds 64,000 characters")
+        return RunReport(
+            run_id=run_id,
+            status=snapshot.status,
+            checkout_state=snapshot.checkout_state,
+            evidence_path=snapshot.evidence_path,
+            report=report,
+        )
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._closed = True
+            sessions = list(self._sessions.values())
+        for session in sessions:
+            session.request_cancel()
+        deadline = time.monotonic() + self._shutdown_timeout_seconds
+        for session in sessions:
+            session.join(deadline - time.monotonic())
+        if any(session.is_alive() for session in sessions):
+            raise SessionError("session workers did not stop before shutdown timeout")
+
+    def _get_session(self, run_id: str) -> RunSession:
+        with self._lock:
+            try:
+                return self._sessions[run_id]
+            except KeyError as error:
+                raise SessionError(f"unknown run: {run_id}") from error
+
+    def _release_root(self, run_id: str, root: Path) -> None:
+        with self._lock:
+            if self._active_roots.get(root) == run_id:
+                self._active_roots.pop(root, None)
