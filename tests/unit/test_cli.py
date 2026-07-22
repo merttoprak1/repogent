@@ -713,8 +713,17 @@ def test_run_terminalizes_unexpected_openai_initialization_failure(
     assert "provider configuration invalid" in manifest["reason"]
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "workflow construction failed",
+        "repository preflight failed",
+        "repository preflight failed: collision",
+        "could not load collision",
+    ],
+)
 def test_run_reports_workflow_construction_failure_like_pre_refactor_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, message: str
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -727,7 +736,7 @@ def test_run_reports_workflow_construction_failure_like_pre_refactor_cli(
             )
 
     def fail_workflow_construction(**_kwargs: object) -> object:
-        raise RuntimeError("workflow construction failed")
+        raise RuntimeError(message)
 
     monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
     monkeypatch.setattr(run_builder, "OpenAIProvider", lambda **_kwargs: object())
@@ -755,7 +764,7 @@ def test_run_reports_workflow_construction_failure_like_pre_refactor_cli(
         f"Evidence: {run_directory}\n"
     )
     manifest = json.loads((run_directory / "run.json").read_text())
-    assert manifest["reason"] == "workflow construction failed"
+    assert manifest["reason"] == message
 
 
 def test_run_rejects_explicit_default_path_inside_target(
