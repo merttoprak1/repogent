@@ -19,9 +19,13 @@ from repogent.domain import (
     CheckResult,
     CheckStatus,
     Decision,
+    ExecutionMode,
+    IsolationLevel,
     RunManifest,
     RunStatus,
+    TrustLabel,
     ValidationReport,
+    VerificationStatus,
 )
 from repogent.mcp_models import RunDecision, RunStart
 from repogent.patching import PatchApplier, PatchPolicy
@@ -216,6 +220,33 @@ def test_returned_snapshot_cannot_mutate_pending_gate_integrity(tmp_path: Path) 
         )
         assert advanced.pending_approval is not None
         assert advanced.pending_approval.kind is ApprovalKind.PLAN
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_session_snapshot_surfaces_manifest_execution_trust_evidence(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start(start_request(target, tmp_path / "runs"))
+        session = manager._sessions[snapshot.run_id]
+        session.prepared.workflow.manifest = session.prepared.workflow.manifest.model_copy(
+            update={
+                "execution_mode": ExecutionMode.DOCKER,
+                "isolation_level": IsolationLevel.ISOLATED,
+                "verification_status": VerificationStatus.PASSED,
+            }
+        )
+
+        refreshed = manager.get(snapshot.run_id)
+
+        assert refreshed.execution_mode is ExecutionMode.DOCKER
+        assert refreshed.isolation_level is IsolationLevel.ISOLATED
+        assert refreshed.verification_status is VerificationStatus.PASSED
+        assert refreshed.trust_label is TrustLabel.ISOLATED_VERIFIED
         manager.cancel(snapshot.run_id)
     finally:
         manager.shutdown()

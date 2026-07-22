@@ -83,6 +83,15 @@ BROADER_PATCH_OUTPUT = {
         " def value():\n-    return 1\n+    changed = True\n+    return 3\n"
     ),
 }
+CUSTOM_SECRET = "opaque-zebra-741"  # noqa: S105 - deliberate sanitizer canary
+CUSTOM_SECRET_PATCH_OUTPUT = {
+    **VALID_PATCH_OUTPUT,
+    "summary": "Return configured secret",
+    "diff": (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+        " def value():\n-    return 1\n+    return 'opaque-zebra-741'\n"
+    ),
+}
 INVALID_PATCH_OUTPUT = {
     **VALID_PATCH_OUTPUT,
     "summary": "First candidate fails its focused test",
@@ -142,6 +151,16 @@ class RecordingExecutorSelector:
         )
 
 
+class MutatingExecutorSelector(RecordingExecutorSelector):
+    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+        preview.candidate.proposal.diff = (  # type: ignore[attr-defined]
+            "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+            " def value():\n-    return 1\n+    return 99\n"
+        )
+        return prepared
+
+
 class FailingEventStore:
     def __init__(self) -> None:
         self.calls = 0
@@ -160,11 +179,18 @@ def make_phase2_workflow(
     candidate_policy: CandidatePolicy | None = None,
     events: EventSink | None = None,
     budget: Budget | None = None,
+    artifact_secrets: list[str] | None = None,
 ) -> Workflow:
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("def value():\n    return 1\n")
-    store = ArtifactStore.create(tmp_path / "runs", target, "change", run_id="run-1")
+    store = ArtifactStore.create(
+        tmp_path / "runs",
+        target,
+        "change",
+        run_id="run-1",
+        secrets=artifact_secrets,
+    )
     validator = SequenceValidator(validation_statuses)
     patch_policy = PatchPolicy()
     patch_applier = PatchApplier()
@@ -245,6 +271,78 @@ def test_workflow_persists_unvalidated_preview_before_executor_selection(
     )
     assert preview["verification_status"] == "unvalidated"
     assert preview["candidate"]["candidate_id"] == "candidate-1"
+
+
+def test_configured_secret_fails_before_candidate_artifact_or_selection(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+        artifact_secrets=[CUSTOM_SECRET],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = RecordingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "preview contains secret-like patch content"
+    assert selector.previews == []
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert not list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))
+    assert not list(workflow.artifacts.root.glob("patch-preview-*.json"))
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+
+
+def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    persisted_digests: list[str | None] = []
+    original_write = workflow.artifacts.write_model
+
+    def record_manifest_binding(name: str, model: object) -> Path:
+        if name == "candidate":
+            manifest = json.loads((workflow.artifacts.root / "run.json").read_text())
+            persisted_digests.append(manifest["preview_digest"])
+        return original_write(name, model)  # type: ignore[arg-type]
+
+    workflow.artifacts.write_model = record_manifest_binding  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
+    assert persisted_digests == [manifest.preview_digest]
+
+
+def test_selector_mutation_fails_before_candidate_evaluation(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = MutatingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "patch preview changed after persistence"
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert workflow.candidate_evidence == []
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
 
 
 def test_each_repair_gets_a_new_preview_and_executor_selection(tmp_path: Path) -> None:
