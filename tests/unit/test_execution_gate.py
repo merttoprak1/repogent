@@ -137,6 +137,31 @@ class UnexpectedOnceRegistry(RecordingRegistry):
         return super().prepare(root, mode, policy)
 
 
+class OverlappingPrepareRegistry(RecordingRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self._call_lock = threading.Lock()
+        self._calls = 0
+        self.old_entered = threading.Event()
+        self.release_old = threading.Event()
+        self.new_entered = threading.Event()
+        self.release_new = threading.Event()
+
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        with self._call_lock:
+            self._calls += 1
+            call = self._calls
+        if call == 1:
+            self.old_entered.set()
+            assert self.release_old.wait(timeout=5)
+        elif call == 2:
+            self.new_entered.set()
+            assert self.release_new.wait(timeout=5)
+        return super().prepare(root, mode, policy)
+
+
 def preview(*, replacement: str = "value = 2") -> PatchPreview:
     diff = (
         "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n"
@@ -368,7 +393,9 @@ def test_close_wakes_selector_and_public_waiters(tmp_path: Path) -> None:
 
     with pytest.raises(WorkflowCancelled, match="closed"):
         outcome.result(timeout=1)
-    assert gate.wait(after_generation=0, timeout_seconds=1) == (1, None)
+    generation, pending = gate.wait(after_generation=0, timeout_seconds=1)
+    assert generation == 2
+    assert pending is None
     worker.join(timeout=1)
     assert not worker.is_alive()
 
@@ -443,3 +470,142 @@ def test_resolved_generation_rejects_duplicate_or_stale_decision(
             gate.submit(decision)
     finally:
         close_and_join(gate, worker)
+
+
+def test_identical_preview_rejects_decision_from_earlier_generation(
+    tmp_path: Path,
+) -> None:
+    gate = GateExecutorSelector(
+        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
+    )
+    first_worker, first_outcome = start_selection(gate, preview())
+    first_generation, first_pending = gate.wait(
+        after_generation=0, timeout_seconds=1
+    )
+    assert first_pending is not None
+    first_local = option(first_pending, ExecutionMode.LOCAL)
+    stale_approval = local_decision(first_pending, first_local)
+    gate.submit(
+        local_decision(
+            first_pending,
+            first_local,
+            decision=Decision.REJECTED,
+        )
+    )
+    with pytest.raises(ExecutorSelectionRejected, match="rejected"):
+        first_outcome.result(timeout=1)
+    first_worker.join(timeout=1)
+    assert not first_worker.is_alive()
+
+    second_worker, second_outcome = start_selection(gate, preview())
+    second_generation, second_pending = gate.wait(
+        after_generation=first_generation,
+        timeout_seconds=1,
+    )
+    assert second_generation > first_generation
+    assert second_pending is not None
+    second_local = option(second_pending, ExecutionMode.LOCAL)
+    try:
+        with pytest.raises(ExecutionGateError, match="option digest mismatch"):
+            gate.submit(stale_approval)
+        assert second_local.option_digest != first_local.option_digest
+
+        gate.submit(local_decision(second_pending, second_local))
+
+        assert second_outcome.result(timeout=1).mode is ExecutionMode.LOCAL
+    finally:
+        close_and_join(gate, second_worker)
+
+
+def test_obsolete_prepare_cannot_clear_newer_generation_reservation(
+    tmp_path: Path,
+) -> None:
+    registry = OverlappingPrepareRegistry()
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), registry)
+    old_worker, old_outcome = start_selection(
+        gate, preview(), timeout_seconds=0.1
+    )
+    old_generation, old_pending = gate.wait(
+        after_generation=0, timeout_seconds=1
+    )
+    assert old_pending is not None
+    old_local = option(old_pending, ExecutionMode.LOCAL)
+    old_errors: list[BaseException] = []
+    old_done = threading.Event()
+
+    def submit_old() -> None:
+        try:
+            gate.submit(local_decision(old_pending, old_local))
+        except BaseException as error:
+            old_errors.append(error)
+        finally:
+            old_done.set()
+
+    old_submitter = threading.Thread(target=submit_old)
+    old_submitter.start()
+    assert registry.old_entered.wait(timeout=1)
+    with pytest.raises(ExecutorSelectionRejected, match="timed out"):
+        old_outcome.result(timeout=1)
+    old_worker.join(timeout=1)
+    assert not old_worker.is_alive()
+
+    new_worker, new_outcome = start_selection(gate, preview())
+    new_generation, new_pending = gate.wait(
+        after_generation=old_generation,
+        timeout_seconds=1,
+    )
+    assert new_generation > old_generation
+    assert new_pending is not None
+    new_local = option(new_pending, ExecutionMode.LOCAL)
+    new_errors: list[BaseException] = []
+
+    def submit_new() -> None:
+        try:
+            gate.submit(local_decision(new_pending, new_local))
+        except BaseException as error:
+            new_errors.append(error)
+
+    new_submitter = threading.Thread(target=submit_new)
+    new_submitter.start()
+    try:
+        assert registry.new_entered.wait(timeout=1)
+        registry.release_old.set()
+        assert old_done.wait(timeout=1)
+        with pytest.raises(ExecutionGateError, match="already been submitted"):
+            gate.submit(local_decision(new_pending, new_local))
+
+        registry.release_new.set()
+        assert new_outcome.result(timeout=1).mode is ExecutionMode.LOCAL
+    finally:
+        registry.release_old.set()
+        registry.release_new.set()
+        old_submitter.join(timeout=1)
+        new_submitter.join(timeout=1)
+        close_and_join(gate, new_worker)
+    assert len(old_errors) == 1
+    assert isinstance(old_errors[0], ExecutionGateError)
+    assert "generation changed" in str(old_errors[0])
+    assert new_errors == []
+
+
+def test_timeout_advances_generation_to_publish_pending_removal(
+    tmp_path: Path,
+) -> None:
+    gate = GateExecutorSelector(
+        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
+    )
+    worker, outcome = start_selection(gate, preview(), timeout_seconds=0.1)
+    generation, pending = gate.wait(after_generation=0, timeout_seconds=1)
+    assert pending is not None
+
+    with pytest.raises(ExecutorSelectionRejected, match="timed out"):
+        outcome.result(timeout=1)
+    removal_generation, removed = gate.wait(
+        after_generation=generation,
+        timeout_seconds=0.2,
+    )
+
+    assert removal_generation > generation
+    assert removed is None
+    worker.join(timeout=1)
+    assert not worker.is_alive()

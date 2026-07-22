@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from pathlib import Path
@@ -55,27 +57,38 @@ class GateExecutorSelector:
             raise ExecutionGateError("patch preview is unsafe to display")
         digest = patch_preview_digest(preview)
         availability = self._registry.inspect_availability(self._root, self._policy)
-        options = self._registry.build_options(self.run_id, digest, availability)
+        base_options = self._registry.build_options(
+            self.run_id, digest, availability
+        )
         if (
-            len(options) != 2
-            or {item.mode for item in options}
+            len(base_options) != 2
+            or {item.mode for item in base_options}
             != {ExecutionMode.DOCKER, ExecutionMode.LOCAL}
         ):
             raise ExecutionGateError("executor registry must provide exactly two options")
-        pending = PendingExecutionChoice(
-            run_id=self.run_id,
-            preview_digest=digest,
-            preview=sanitized,
-            options=options,
-        )
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         with self._condition:
             if self._closed:
                 raise WorkflowCancelled("executor selection gate is closed")
             if self._pending is not None:
                 raise ExecutionGateError("another executor selection is already pending")
-            self._generation += 1
-            generation = self._generation
+            generation = self._generation + 1
+            pending = PendingExecutionChoice(
+                run_id=self.run_id,
+                preview_digest=digest,
+                preview=sanitized,
+                options=[
+                    option.model_copy(
+                        update={
+                            "option_digest": _generation_option_digest(
+                                option.option_digest, generation
+                            )
+                        }
+                    )
+                    for option in base_options
+                ],
+            )
+            self._generation = generation
             self._pending = pending
             self._pending_generation = generation
             self._prepared = None
@@ -168,10 +181,12 @@ class GateExecutorSelector:
             raise
         with self._condition:
             if self._closed:
-                self._preparing_generation = None
+                if self._preparing_generation == generation:
+                    self._preparing_generation = None
                 raise ExecutionGateError("executor selection gate is closed")
             if generation != self._pending_generation:
-                self._preparing_generation = None
+                if self._preparing_generation == generation:
+                    self._preparing_generation = None
                 raise ExecutionGateError("executor selection generation changed")
             if self._preparing_generation != generation:
                 raise ExecutionGateError("executor selection generation changed")
@@ -206,9 +221,9 @@ class GateExecutorSelector:
     def close(self) -> None:
         with self._condition:
             self._closed = True
-            self._pending = None
-            self._pending_generation = None
-            self._preparing_generation = None
+            generation = self._pending_generation
+            if generation is not None:
+                self._clear_generation(generation)
             self._condition.notify_all()
 
     def _clear_generation(self, generation: int) -> None:
@@ -219,9 +234,20 @@ class GateExecutorSelector:
                 self._preparing_generation = None
             self._prepared = None
             self._rejection = None
+            self._generation += 1
+            self._condition.notify_all()
 
     def _release_preparing_generation(self, generation: int) -> None:
         with self._condition:
             if self._preparing_generation == generation:
                 self._preparing_generation = None
                 self._condition.notify_all()
+
+
+def _generation_option_digest(option_digest: str, generation: int) -> str:
+    canonical = json.dumps(
+        {"generation": generation, "option_digest": option_digest},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
