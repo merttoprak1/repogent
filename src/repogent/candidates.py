@@ -65,6 +65,17 @@ def patch_preview_digest(preview: PatchPreview) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def ensure_exact_diff_safe(
+    exact_diff: str,
+    explicit_secrets: Sequence[str] = (),
+) -> None:
+    if redact_text(exact_diff, explicit_secrets) != exact_diff:
+        raise CandidateEvaluationError("preview contains secret-like patch content")
+    sanitized = sanitize_data({"diff": exact_diff}, explicit_secrets)
+    if not isinstance(sanitized, dict) or sanitized.get("diff") != exact_diff:
+        raise CandidateEvaluationError("preview contains secret-like patch content")
+
+
 class PatchPreviewer:
     def __init__(
         self,
@@ -88,11 +99,7 @@ class PatchPreviewer:
                 "proposal addresses criteria outside the supplied requirements"
             )
         exact_diff = candidate.proposal.diff
-        if redact_text(exact_diff, self.explicit_secrets) != exact_diff:
-            raise CandidateEvaluationError("preview contains secret-like patch content")
-        sanitized = sanitize_data({"diff": exact_diff}, self.explicit_secrets)
-        if not isinstance(sanitized, dict) or sanitized.get("diff") != exact_diff:
-            raise CandidateEvaluationError("preview contains secret-like patch content")
+        ensure_exact_diff_safe(exact_diff, self.explicit_secrets)
         validated = self.patch_policy.validate(root, candidate.proposal)
         return PatchPreview(
             candidate=candidate,
