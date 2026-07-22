@@ -1,3 +1,5 @@
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -115,7 +117,8 @@ def test_patch_payload_retains_diff_and_redacts_validation_output() -> None:
                 "changed_lines": 2,
                 "acceptance_criteria_coverage": 1,
                 "validation": {"checks": [{
-                    "argv": ["pytest"], "status": "passed", "required": true,
+                    "name": "pytest", "argv": ["pytest"],
+                    "status": "passed", "required": true,
                     "stdout": "secret", "stderr": "error"
                 }]}
             },
@@ -127,12 +130,117 @@ def test_patch_payload_retains_diff_and_redacts_validation_output() -> None:
 
     assert payload["selected_candidate"]["proposal"]["diff"] == "patch-body"  # type: ignore[index]
     assert payload["candidates"][0]["checks"] == [  # type: ignore[index]
-        {"status": "passed", "required": True}
+        {"name": "pytest", "status": "passed", "required": True}
     ]
     serialized = str(payload)
     assert "secret" not in serialized
     assert "error" not in serialized
-    assert "pytest" not in serialized
+    assert "argv" not in serialized
+
+
+def test_non_patch_payload_is_recursively_redacted_before_digest_binding() -> None:
+    artifact = """{
+        "objective": "keep token=sk-proj-1234567890abcdef private",
+        "nested": {"password": "correct-horse-battery-staple"}
+    }"""
+    approver = GateApprover("run-1")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(approver.decide, ApprovalKind.REQUIREMENTS, artifact)
+        _, pending = approver.wait(after_generation=0, timeout_seconds=1)
+        assert pending is not None
+        approver.close()
+        assert future.result(timeout=1).decision is Decision.REJECTED
+
+    assert "sk-proj-1234567890abcdef" not in str(pending.artifact)
+    assert "correct-horse-battery-staple" not in str(pending.artifact)
+    assert pending.digest == approval_digest(
+        ApprovalKind.REQUIREMENTS,
+        json.dumps(pending.artifact),
+    )
+
+
+def test_patch_payload_redacts_bounded_check_metadata_without_raw_process_data() -> None:
+    safe_diff = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+    sensitive_name = "lint token=sk-proj-1234567890abcdef " + "x" * 256
+    sensitive_reason = "password=do-not-show " + "y" * 5_000
+    artifact = {
+        "selected_candidate": {
+            "candidate_id": "candidate-1",
+            "proposal": {"diff": safe_diff, "summary": "token=private-value"},
+        },
+        "selection": {"selected_candidate_id": "candidate-1"},
+        "candidates": [
+            {
+                "candidate": {"candidate_id": "candidate-1"},
+                "evidence": {
+                    "eligible": True,
+                    "required_failures": [],
+                    "skipped_checks": [sensitive_name],
+                    "changed_files": 1,
+                    "changed_lines": 2,
+                    "acceptance_criteria_coverage": 1,
+                    "validation": {
+                        "checks": [
+                            {
+                                "name": sensitive_name,
+                                "argv": ["ruff", "--token", "raw-argv-secret"],
+                                "status": "skipped",
+                                "required": False,
+                                "reason": sensitive_reason,
+                                "stdout": "raw-stdout-secret",
+                                "stderr": "raw-stderr-secret",
+                            }
+                        ]
+                    },
+                },
+                "selected": True,
+            }
+        ],
+    }
+
+    payload = approval_payload(ApprovalKind.PATCH, json.dumps(artifact))
+
+    assert isinstance(payload, dict)
+    assert payload["selected_candidate"]["proposal"]["diff"] == safe_diff  # type: ignore[index]
+    summary = payload["candidates"][0]  # type: ignore[index]
+    assert set(summary["checks"][0]) == {"name", "status", "required"}  # type: ignore[index]
+    assert len(summary["checks"][0]["name"]) <= 128  # type: ignore[index]
+    assert summary["skipped_checks"] == [  # type: ignore[index]
+        {
+            "name": summary["checks"][0]["name"],  # type: ignore[index]
+            "reason": "password=[REDACTED] " + "y" * (4_096 - 20),
+        }
+    ]
+    serialized = str(payload)
+    for forbidden in (
+        "sk-proj-1234567890abcdef",
+        "do-not-show",
+        "raw-argv-secret",
+        "raw-stdout-secret",
+        "raw-stderr-secret",
+    ):
+        assert forbidden not in serialized
+    assert approval_digest(ApprovalKind.PATCH, json.dumps(artifact)) == (
+        hashlib.sha256(safe_diff.encode()).hexdigest()
+    )
+
+
+def test_patch_payload_fails_closed_when_redaction_would_change_exact_diff() -> None:
+    unsafe_diff = (
+        "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n"
+        "+token=sk-proj-1234567890abcdef\n"
+    )
+    artifact = json.dumps(
+        {
+            "selected_candidate": {"proposal": {"diff": unsafe_diff}},
+            "selection": {"selected_candidate_id": "candidate-1"},
+            "candidates": [],
+        }
+    )
+
+    with pytest.raises(ApprovalGateError, match="secret-like patch content"):
+        approval_payload(ApprovalKind.PATCH, artifact)
 
 
 def test_close_is_terminal_and_cannot_be_overridden_by_a_matching_submit() -> None:

@@ -33,6 +33,20 @@ def test_doctor_reports_ready_local_repository(
     assert [check.name for check in report.checks][:2] == ["repository", "python"]
 
 
+def test_doctor_rejects_regular_file_as_repository(tmp_path: Path) -> None:
+    repository = tmp_path / "not-a-repository.py"
+    repository.write_text("print('not a directory')\n")
+
+    report = DoctorService().run(
+        DoctorRequest(repository=repository, provider="openai", executor="local")
+    )
+
+    assert report.ready is False
+    assert [check.name for check in report.checks] == ["repository"]
+    assert report.checks[0].passed is False
+    assert report.checks[0].message == "repository must be a directory"
+
+
 def test_doctor_never_falls_back_from_docker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

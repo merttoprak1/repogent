@@ -1,11 +1,11 @@
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from enum import StrEnum
-from typing import Annotated, TypeVar
+from typing import Annotated, TypeVar, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import WithJsonSchema
+from pydantic import BaseModel, WithJsonSchema
 
 from repogent.doctor import DoctorService
 from repogent.domain import ApprovalKind, Decision
@@ -18,6 +18,7 @@ from repogent.mcp_models import (
     RunStart,
 )
 from repogent.run_sessions import SessionManager
+from repogent.sanitization import sanitize_data
 
 RunId = Annotated[
     str,
@@ -41,7 +42,21 @@ def _call_service(
     action: Callable[[], _ResultT], message: _ServiceError
 ) -> _ResultT:
     try:
-        return action()
+        result = action()
+        if not isinstance(result, BaseModel):
+            return result
+        payload = sanitize_data(result.model_dump(mode="json"))
+        if not isinstance(payload, dict):
+            raise ValueError("structured response sanitization failed")
+        if isinstance(result, RunSnapshot) and result.pending_approval is not None:
+            pending = payload.get("pending_approval")
+            if (
+                not isinstance(pending, dict)
+                or pending.get("artifact") != result.pending_approval.artifact
+            ):
+                raise ValueError("approval artifact is unsafe to return")
+        model_type = cast(type[BaseModel], type(result))
+        return cast(_ResultT, model_type.model_validate(payload))
     except Exception:
         raise RuntimeError(message.value) from None
 

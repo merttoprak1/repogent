@@ -12,6 +12,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from repogent.approval_gate import approval_digest
 from repogent.domain import (
     ApprovalKind,
     CheckoutState,
@@ -48,12 +49,18 @@ def _copy_demo(tmp_path: Path, name: str = "target") -> Path:
     return target
 
 
-def _start_request(target: Path, output_dir: Path, *, executor: str = "local") -> RunStart:
+def _start_request(
+    target: Path,
+    output_dir: Path,
+    *,
+    executor: str = "local",
+    script: Path | None = None,
+) -> RunStart:
     return RunStart(
         repository=target,
         request='Add a health endpoint that returns {"status": "ok"}',
         provider="scripted",
-        script=Path("examples/scripted_run.json").resolve(),
+        script=script or Path("examples/scripted_run.json").resolve(),
         executor=executor,
         output_dir=output_dir,
     )
@@ -122,8 +129,18 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
             item for item in patch_artifact["candidates"] if item["selected"]
         )
         checks = selected_summary["checks"]
-        assert len(checks) == 4
-        assert {check["status"] for check in checks} == {CheckStatus.PASSED.value}
+        assert checks == [
+            {"name": "pytest", "status": CheckStatus.PASSED.value, "required": True},
+            {"name": "ruff", "status": CheckStatus.PASSED.value, "required": False},
+            {"name": "mypy", "status": CheckStatus.PASSED.value, "required": False},
+            {"name": "bandit", "status": CheckStatus.PASSED.value, "required": False},
+        ]
+        assert selected_summary["skipped_checks"] == []
+        serialized_summary = json.dumps(selected_summary)
+        assert all(
+            raw_field not in serialized_summary
+            for raw_field in ('"argv"', '"stdout"', '"stderr"')
+        )
 
         snapshot = await _snapshot_call(session, "approve_patch", _approval(snapshot))
 
@@ -135,6 +152,52 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
     manifest = _manifest(snapshot)
     assert manifest["checkout_state"] == CheckoutState.APPLIED.value
     assert manifest["final_validation_status"] == FinalValidationStatus.PASSED.value
+
+
+@pytest.mark.anyio
+async def test_stdio_success_redacts_requirements_and_plan_before_digest_binding(
+    tmp_path: Path,
+) -> None:
+    target = _copy_demo(tmp_path)
+    scripted = json.loads(Path("examples/scripted_run.json").read_text())
+    scripted[0]["objective"] = "keep token=sk-proj-1234567890abcdef private"
+    scripted[0]["assumptions"] = ["password=correct-horse-battery-staple"]
+    scripted[1]["security_considerations"] = [
+        "password=do-not-show must stay private"
+    ]
+    script = tmp_path / "secret-script.json"
+    script.write_text(json.dumps(scripted))
+
+    async with _stdio_session() as session:
+        requirements = await _snapshot_call(
+            session,
+            "start_run",
+            {
+                "request": _start_request(
+                    target, tmp_path / "runs", script=script
+                ).model_dump(mode="json")
+            },
+        )
+        pending = requirements.pending_approval
+        assert pending is not None
+        serialized = json.dumps(pending.artifact)
+        assert "sk-proj-1234567890abcdef" not in serialized
+        assert "correct-horse-battery-staple" not in serialized
+        assert pending.digest == approval_digest(
+            ApprovalKind.REQUIREMENTS, json.dumps(pending.artifact)
+        )
+
+        plan = await _snapshot_call(
+            session, "approve_requirements", _approval(requirements)
+        )
+        pending = plan.pending_approval
+        assert pending is not None
+        serialized = json.dumps(pending.artifact)
+        assert "do-not-show" not in serialized
+        assert pending.digest == approval_digest(
+            ApprovalKind.PLAN, json.dumps(pending.artifact)
+        )
+        await _snapshot_call(session, "cancel_run", {"run_id": plan.run_id})
 
 
 @pytest.mark.anyio

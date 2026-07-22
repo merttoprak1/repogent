@@ -221,6 +221,31 @@ def test_returned_snapshot_cannot_mutate_pending_gate_integrity(tmp_path: Path) 
         manager.shutdown()
 
 
+def test_terminal_session_snapshot_recursively_redacts_manifest_reason(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start(start_request(target, tmp_path / "runs"))
+        terminal = manager.cancel(snapshot.run_id)
+        session = manager._sessions[terminal.run_id]
+        assert session._result is not None
+        session._result = session._result.model_copy(
+            update={
+                "reason": "provider token=sk-proj-1234567890abcdef password=do-not-show"
+            }
+        )
+
+        observed = manager.get(terminal.run_id)
+
+        assert observed.reason == "provider token=[REDACTED] password=[REDACTED]"
+        assert "sk-proj-1234567890abcdef" not in observed.model_dump_json()
+        assert "do-not-show" not in observed.model_dump_json()
+    finally:
+        manager.shutdown()
+
+
 def test_unknown_runs_are_rejected(tmp_path: Path) -> None:
     manager = SessionManager(builder=make_builder())
     try:
