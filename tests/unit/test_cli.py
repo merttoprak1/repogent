@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -746,3 +747,33 @@ def test_run_rejects_filesystem_root_before_creating_artifacts(
     assert result.exit_code == 2
     assert "filesystem root" in result.output
     assert "Traceback" not in result.output
+
+
+def test_documented_scripted_demo_completes(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    shutil.copytree(Path("examples/fastapi_demo"), target)
+    evidence = tmp_path / "runs"
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "Add a health endpoint",
+            "--provider",
+            "scripted",
+            "--script",
+            "examples/scripted_run.json",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+        input="y\ny\ny\n",
+    )
+
+    assert result.exit_code == 0
+    assert "completed" in result.output
+    assert '@app.get("/health")' in (target / "app.py").read_text()
