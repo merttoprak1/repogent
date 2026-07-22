@@ -3,9 +3,13 @@
 import json
 from pathlib import Path
 
+PLUGIN_ROOT = Path("plugins/repogent")
+SKILL_PATH = PLUGIN_ROOT / "skills/repogent/SKILL.md"
+EVALS_PATH = Path("tests/plugin/evals.json")
+
 
 def test_plugin_manifest_and_mcp_command() -> None:
-    root = Path("plugins/repogent")
+    root = PLUGIN_ROOT
     manifest = json.loads((root / ".codex-plugin/plugin.json").read_text())
     mcp = json.loads((root / ".mcp.json").read_text())
 
@@ -41,3 +45,68 @@ def test_repository_marketplace_uses_local_install_policy() -> None:
         "authentication": "ON_INSTALL",
     }
     assert plugin["category"] == "Developer Tools"
+
+
+def test_repogent_skill_declares_triggers_tools_and_three_gates() -> None:
+    skill = SKILL_PATH.read_text()
+
+    assert skill.startswith("---\nname: repogent\n")
+    for trigger in (
+        "@Repogent",
+        "$repogent",
+        "safe",
+        "verified",
+        "evidence-backed",
+        "independently validated",
+        "approval-before-apply",
+    ):
+        assert trigger in skill
+
+    for tool_name in (
+        "repogent_doctor",
+        "start_run",
+        "get_run",
+        "approve_requirements",
+        "approve_plan",
+        "approve_patch",
+        "cancel_run",
+        "get_report",
+    ):
+        assert f"`{tool_name}`" in skill
+
+    for gate_name in ("requirements", "plan", "patch"):
+        assert f"{gate_name} gate" in skill.lower()
+    assert "digest" in skill.lower()
+
+
+def test_repogent_skill_closes_baseline_safety_loopholes() -> None:
+    skill = SKILL_PATH.read_text().lower()
+
+    required_safety_language = (
+        "never auto-approve",
+        "ordinary codex edits",
+        "host execution",
+        "docker",
+        '"okay"',
+        '"continue"',
+        '"i approve this patch; apply it"',
+        "non-idempotent",
+        "never retry `approve_patch` blindly",
+        "subagent delegation",
+    )
+    for requirement in required_safety_language:
+        assert requirement in skill
+
+
+def test_repogent_evals_have_five_positive_and_three_negative_cases() -> None:
+    evals = json.loads(EVALS_PATH.read_text())
+
+    assert set(evals) == {"positive", "negative"}
+    assert len(evals["positive"]) == 5
+    assert len(evals["negative"]) == 3
+
+    cases = [*evals["positive"], *evals["negative"]]
+    ids = [case["id"] for case in cases]
+    assert len(ids) == len(set(ids))
+    assert all(set(case) == {"id", "prompt", "expected"} for case in cases)
+    assert all(case["expected"] for case in cases)

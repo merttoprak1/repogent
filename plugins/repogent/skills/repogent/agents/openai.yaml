@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repogent"
+  short_description: "Safely validate and approve Python patches"
+  default_prompt: "Use $repogent to prepare and show a verified Python patch before applying it."
