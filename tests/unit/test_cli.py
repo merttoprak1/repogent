@@ -1,6 +1,9 @@
+import importlib
 import json
 import shutil
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from openai import OpenAIError
@@ -917,3 +920,34 @@ def test_documented_scripted_demo_completes(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "completed" in result.output
     assert '@app.get("/health")' in (target / "app.py").read_text()
+
+
+def test_mcp_stdio_dispatches_to_lazy_server_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[None] = []
+    fake_module = ModuleType("repogent.mcp_server")
+    fake_module.serve_stdio = lambda: calls.append(None)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "repogent.mcp_server", fake_module)
+
+    result = runner.invoke(app, ["mcp", "--stdio"])
+
+    assert result.exit_code == 0
+    assert calls == [None]
+
+
+def test_mcp_without_stdio_exits_two() -> None:
+    result = runner.invoke(app, ["mcp"])
+
+    assert result.exit_code == 2
+    assert "only --stdio is supported" in result.output
+
+
+def test_cli_import_does_not_eagerly_load_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(sys.modules, "repogent.mcp_server", raising=False)
+
+    importlib.reload(cli)
+
+    assert "repogent.mcp_server" not in sys.modules
