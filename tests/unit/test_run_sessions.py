@@ -434,6 +434,11 @@ def test_terminal_snapshot_waits_until_root_release_completes(
         getter.start()
         getter.join(timeout=0.1)
         assert getter.is_alive()
+        operation_lock_available = manager._sessions[
+            snapshot.run_id
+        ]._operation_lock.acquire(blocking=False)
+        assert operation_lock_available is True
+        manager._sessions[snapshot.run_id]._operation_lock.release()
         with pytest.raises(SessionError, match="active run"):
             manager.start(request)
 
@@ -678,6 +683,33 @@ def test_report_rejects_lstat_open_replacement_race(
         manager.shutdown()
 
 
+@pytest.mark.parametrize(
+    "missing_capability",
+    ["dir_fd", "follow_symlinks", "O_NOFOLLOW", "O_DIRECTORY"],
+)
+def test_report_fails_closed_when_secure_platform_capability_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_capability: str,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start(start_request(target, tmp_path / "runs"))
+        terminal = manager.cancel(snapshot.run_id)
+        if missing_capability == "dir_fd":
+            monkeypatch.setattr(os, "supports_dir_fd", set())
+        elif missing_capability == "follow_symlinks":
+            monkeypatch.setattr(os, "supports_follow_symlinks", set())
+        else:
+            monkeypatch.delattr(os, missing_capability)
+
+        with pytest.raises(SessionError, match="secure report access is unavailable"):
+            manager.get_report(terminal.run_id)
+    finally:
+        manager.shutdown()
+
+
 def test_shutdown_cancels_closes_and_joins_all_workers(tmp_path: Path) -> None:
     first = make_target(tmp_path, "first")
     second = make_target(tmp_path, "second")
@@ -716,6 +748,52 @@ def test_shutdown_timeout_is_bounded_before_uncooperative_work_releases(
         manager.shutdown()
         assert not starter.is_alive()
         assert all(not session._thread.is_alive() for session in manager._sessions.values())
+
+
+def test_shutdown_deadline_includes_operation_lock_cancellation_phase(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder(), shutdown_timeout_seconds=0.05)
+    snapshot = manager.start(start_request(target, tmp_path / "runs"))
+    session = manager._sessions[snapshot.run_id]
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_operation_lock() -> None:
+        with session._operation_lock:
+            lock_held.set()
+            assert release_lock.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_operation_lock)
+    holder.start()
+    shutdown_errors: list[BaseException] = []
+
+    def stop_manager() -> None:
+        try:
+            manager.shutdown()
+        except BaseException as error:
+            shutdown_errors.append(error)
+
+    stopper = threading.Thread(target=stop_manager)
+    try:
+        assert lock_held.wait(timeout=5)
+        started = time.monotonic()
+        stopper.start()
+        stopper.join(timeout=0.5)
+        assert not stopper.is_alive()
+        assert time.monotonic() - started < 0.5
+        assert len(shutdown_errors) == 1
+        assert isinstance(shutdown_errors[0], SessionError)
+        assert "timeout" in str(shutdown_errors[0])
+    finally:
+        release_lock.set()
+        holder.join(timeout=5)
+        stopper.join(timeout=5)
+        manager.shutdown()
+        assert not holder.is_alive()
+        assert not stopper.is_alive()
+        assert all(not item._thread.is_alive() for item in manager._sessions.values())
 
 
 def test_shutdown_during_preparation_prevents_late_worker_start(tmp_path: Path) -> None:
