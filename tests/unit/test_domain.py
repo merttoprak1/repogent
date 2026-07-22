@@ -25,7 +25,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
 )
-from repogent.mcp_models import RunDecision, RunSnapshot, RunStart
+from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
 
 
 def test_pending_approval_requires_sha256_digest() -> None:
@@ -233,3 +233,77 @@ def test_mcp_models_enforce_input_and_output_bounds(tmp_path) -> None:
             evidence_path="/evidence/run-1",
             validation_stdout="secret output",
         )
+
+
+def _snapshot_payload() -> dict[str, object]:
+    return {
+        "run_id": "run-1",
+        "status": RunStatus.RUNNING,
+        "stage": RunStage.CREATED,
+        "checkout_state": CheckoutState.NOT_APPLIED,
+        "selected_patch_applied": False,
+        "applied_paths": [],
+        "final_validation_status": FinalValidationStatus.NOT_STARTED,
+        "evidence_path": "/evidence/run-1",
+    }
+
+
+@pytest.mark.parametrize("model", ["decision", "snapshot", "report"])
+def test_mcp_response_run_ids_are_limited_to_256_characters(model: str) -> None:
+    run_id = "r" * 257
+    with pytest.raises(ValidationError, match="at most 256"):
+        if model == "decision":
+            RunDecision(
+                run_id=run_id,
+                kind=ApprovalKind.PLAN,
+                digest="a" * 64,
+                decision=Decision.APPROVED,
+            )
+        elif model == "snapshot":
+            RunSnapshot(**{**_snapshot_payload(), "run_id": run_id})
+        else:
+            RunReport(
+                run_id=run_id,
+                status=RunStatus.COMPLETED,
+                checkout_state=CheckoutState.NOT_APPLIED,
+                evidence_path="/evidence/run-1",
+                report="done",
+            )
+
+
+@pytest.mark.parametrize("field", ["reason", "evidence_path"])
+def test_run_snapshot_text_fields_are_limited_to_4096_characters(field: str) -> None:
+    with pytest.raises(ValidationError, match="at most 4096"):
+        RunSnapshot(**{**_snapshot_payload(), field: "x" * 4_097})
+
+
+def test_run_report_evidence_path_is_limited_to_4096_characters() -> None:
+    with pytest.raises(ValidationError, match="at most 4096"):
+        RunReport(
+            run_id="run-1",
+            status=RunStatus.COMPLETED,
+            checkout_state=CheckoutState.NOT_APPLIED,
+            evidence_path="x" * 4_097,
+            report="done",
+        )
+
+
+def test_run_snapshot_applied_paths_are_bounded_by_count_and_length() -> None:
+    with pytest.raises(ValidationError, match="at most 20"):
+        RunSnapshot(
+            **{**_snapshot_payload(), "applied_paths": [f"file-{index}" for index in range(21)]}
+        )
+    with pytest.raises(ValidationError, match="at most 4096"):
+        RunSnapshot(**{**_snapshot_payload(), "applied_paths": ["x" * 4_097]})
+
+
+def test_run_snapshot_pending_artifact_serialization_is_limited_to_256000_chars() -> None:
+    pending = PendingApproval(
+        run_id="run-1",
+        kind=ApprovalKind.REQUIREMENTS,
+        digest="a" * 64,
+        artifact="x" * 255_999,
+    )
+
+    with pytest.raises(ValidationError, match="256,000"):
+        RunSnapshot(**{**_snapshot_payload(), "pending_approval": pending})

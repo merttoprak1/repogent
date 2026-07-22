@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from repogent.agents import RoleSet
+from repogent.approval_gate import ApprovalGateError
 from repogent.approvals import Approver
 from repogent.artifacts import ArtifactStore
 from repogent.domain import (
@@ -379,6 +381,183 @@ def test_terminal_session_rejects_cancel_and_shutdown_preserves_history(
         manager.cancel(terminal.run_id)
 
 
+def test_shutdown_closes_terminal_approver_without_cancelling_history(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    snapshot = manager.start(start_request(target, tmp_path / "runs"))
+    snapshot = manager.decide(decision_for(snapshot))
+    terminal = manager.decide(decision_for(snapshot, Decision.REJECTED))
+    session = manager._sessions[terminal.run_id]
+
+    manager.shutdown()
+
+    assert manager.get(terminal.run_id).cancellation_requested is False
+    with pytest.raises(ApprovalGateError, match="closed"):
+        session.approver.submit(
+            ApprovalKind.PLAN,
+            "a" * 64,
+            Decision.APPROVED,
+            None,
+        )
+
+
+def test_terminal_snapshot_waits_until_root_release_completes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    release_entered = threading.Event()
+    allow_release = threading.Event()
+    original_release = manager._release_root
+
+    def blocked_release(run_id: str, root: Path) -> None:
+        release_entered.set()
+        assert allow_release.wait(timeout=5)
+        original_release(run_id, root)
+
+    monkeypatch.setattr(manager, "_release_root", blocked_release)
+    request = start_request(target, tmp_path / "runs")
+    snapshot = manager.start(request)
+    snapshot = manager.decide(decision_for(snapshot))
+    results: list[object] = []
+    terminalizer = threading.Thread(
+        target=lambda: results.append(
+            manager.decide(decision_for(snapshot, Decision.REJECTED))
+        )
+    )
+    terminalizer.start()
+    getter = threading.Thread(target=lambda: results.append(manager.get(snapshot.run_id)))
+    try:
+        assert release_entered.wait(timeout=5)
+        getter.start()
+        getter.join(timeout=0.1)
+        assert getter.is_alive()
+        with pytest.raises(SessionError, match="active run"):
+            manager.start(request)
+
+        allow_release.set()
+        terminalizer.join(timeout=5)
+        getter.join(timeout=5)
+        assert not terminalizer.is_alive()
+        assert not getter.is_alive()
+        assert len(results) == 2
+        assert all(result.status is RunStatus.CANCELLED for result in results)  # type: ignore[union-attr]
+
+        replacement = manager.start(request)
+        manager.cancel(replacement.run_id)
+    finally:
+        allow_release.set()
+        terminalizer.join(timeout=5)
+        getter.join(timeout=5)
+        manager.shutdown()
+
+
+def test_cancel_rejects_after_workflow_returns_before_terminal_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    release_entered = threading.Event()
+    allow_release = threading.Event()
+    original_release = manager._release_root
+
+    def blocked_release(run_id: str, root: Path) -> None:
+        release_entered.set()
+        assert allow_release.wait(timeout=5)
+        original_release(run_id, root)
+
+    monkeypatch.setattr(manager, "_release_root", blocked_release)
+    snapshot = manager.start(start_request(target, tmp_path / "runs"))
+    snapshot = manager.decide(decision_for(snapshot))
+    terminalizer = threading.Thread(
+        target=lambda: manager.decide(decision_for(snapshot, Decision.REJECTED))
+    )
+    terminalizer.start()
+    cancel_errors: list[BaseException] = []
+
+    def cancel_run() -> None:
+        try:
+            manager.cancel(snapshot.run_id)
+        except BaseException as error:
+            cancel_errors.append(error)
+
+    canceller = threading.Thread(target=cancel_run)
+    try:
+        assert release_entered.wait(timeout=5)
+        canceller.start()
+        canceller.join(timeout=0.1)
+        assert not canceller.is_alive()
+        assert len(cancel_errors) == 1
+        assert isinstance(cancel_errors[0], SessionError)
+        assert "terminal" in str(cancel_errors[0])
+        assert manager._sessions[snapshot.run_id].cancellation_requested() is False
+    finally:
+        allow_release.set()
+        terminalizer.join(timeout=5)
+        canceller.join(timeout=5)
+        manager.shutdown()
+
+
+def test_cancel_rechecks_when_workflow_returns_between_check_and_event_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    snapshot = manager.start(start_request(target, tmp_path / "runs"))
+    snapshot = manager.decide(decision_for(snapshot))
+    assert snapshot.pending_approval is not None
+    session = manager._sessions[snapshot.run_id]
+    set_entered = threading.Event()
+    allow_set = threading.Event()
+    original_set = session._cancel.set
+
+    def blocked_set() -> None:
+        set_entered.set()
+        assert allow_set.wait(timeout=5)
+        original_set()
+
+    monkeypatch.setattr(session._cancel, "set", blocked_set)
+    cancel_errors: list[BaseException] = []
+
+    def cancel_run() -> None:
+        try:
+            manager.cancel(snapshot.run_id)
+        except BaseException as error:
+            cancel_errors.append(error)
+
+    canceller = threading.Thread(target=cancel_run)
+    canceller.start()
+    try:
+        assert set_entered.wait(timeout=5)
+        session.approver.submit(
+            snapshot.pending_approval.kind,
+            snapshot.pending_approval.digest,
+            Decision.REJECTED,
+            None,
+        )
+        deadline = time.monotonic() + 5
+        while (
+            session.prepared.workflow.manifest.status is RunStatus.RUNNING
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert session.prepared.workflow.manifest.status is RunStatus.CANCELLED
+
+        allow_set.set()
+        canceller.join(timeout=5)
+        assert not canceller.is_alive()
+        assert len(cancel_errors) == 1
+        assert isinstance(cancel_errors[0], SessionError)
+        assert "terminal" in str(cancel_errors[0])
+        assert session.cancellation_requested() is False
+    finally:
+        allow_set.set()
+        canceller.join(timeout=5)
+        manager.shutdown()
+
+
 def test_report_reader_requests_only_the_bounded_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -389,7 +568,8 @@ def test_report_reader_requests_only_the_bounded_prefix(
         terminal = manager.cancel(snapshot.run_id)
         report_path = Path(terminal.evidence_path) / "report.md"
         report_path.write_text("x" * 100_000)
-        real_open = Path.open
+        real_fdopen = os.fdopen
+        guarded = False
 
         class GuardedReader:
             def __init__(self, handle) -> None:
@@ -406,13 +586,94 @@ def test_report_reader_requests_only_the_bounded_prefix(
                 assert size == 64_001
                 return self.handle.read(size)
 
-        def guarded_open(path: Path, *args, **kwargs):
-            handle = real_open(path, *args, **kwargs)
-            return GuardedReader(handle) if path == report_path else handle
+        def guarded_fdopen(*args, **kwargs):
+            nonlocal guarded
+            guarded = True
+            return GuardedReader(real_fdopen(*args, **kwargs))
 
-        monkeypatch.setattr(Path, "open", guarded_open)
+        monkeypatch.setattr(os, "fdopen", guarded_fdopen)
         with pytest.raises(SessionError, match="64,000"):
             manager.get_report(snapshot.run_id)
+        assert guarded is True
+    finally:
+        manager.shutdown()
+
+
+def test_report_rejects_symlink_outside_evidence(tmp_path: Path) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start(start_request(target, tmp_path / "runs"))
+        terminal = manager.cancel(snapshot.run_id)
+        report_path = Path(terminal.evidence_path) / "report.md"
+        secret = tmp_path / "outside-secret.md"
+        secret.write_text("outside evidence")
+        report_path.unlink()
+        report_path.symlink_to(secret)
+
+        with pytest.raises(SessionError, match="report"):
+            manager.get_report(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_report_rejects_non_regular_fifo(tmp_path: Path) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    writer_errors: list[OSError] = []
+    writer: threading.Thread | None = None
+    report_path: Path | None = None
+    try:
+        snapshot = manager.start(start_request(target, tmp_path / "runs"))
+        terminal = manager.cancel(snapshot.run_id)
+        report_path = Path(terminal.evidence_path) / "report.md"
+        report_path.unlink()
+        os.mkfifo(report_path)
+
+        def write_fifo() -> None:
+            try:
+                report_path.write_text("not a regular report")
+            except OSError as error:
+                writer_errors.append(error)
+
+        writer = threading.Thread(target=write_fifo)
+        writer.start()
+        with pytest.raises(SessionError, match="regular"):
+            manager.get_report(snapshot.run_id)
+    finally:
+        if writer is not None and writer.is_alive() and report_path is not None:
+            descriptor = os.open(report_path, os.O_RDONLY | os.O_NONBLOCK)
+            os.close(descriptor)
+        if writer is not None:
+            writer.join(timeout=5)
+        manager.shutdown()
+
+
+def test_report_rejects_lstat_open_replacement_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start(start_request(target, tmp_path / "runs"))
+        terminal = manager.cancel(snapshot.run_id)
+        report_path = Path(terminal.evidence_path) / "report.md"
+        original_path = report_path.with_name("original-report.md")
+        real_os_open = os.open
+        replaced = False
+
+        def replacing_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal replaced
+            if path == "report.md" and dir_fd is not None and not replaced:
+                replaced = True
+                report_path.replace(original_path)
+                report_path.write_text("replacement report")
+            return real_os_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "open", replacing_open)
+        with pytest.raises(SessionError, match="changed"):
+            manager.get_report(snapshot.run_id)
+        assert replaced is True
     finally:
         manager.shutdown()
 
