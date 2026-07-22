@@ -1,3 +1,4 @@
+import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -147,6 +148,12 @@ class FailingManager(FakeManager):
 
 class FailingDoctor(FakeDoctor):
     def run(self, request: DoctorRequest) -> DoctorReport:
+        raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
+
+
+class FailingShutdownManager(FakeManager):
+    def shutdown(self) -> None:
+        self.shutdown_called = True
         raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
 
 
@@ -450,6 +457,34 @@ async def test_standalone_run_ids_are_bounded_and_redacted_before_routing(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "manager_method"),
+    [
+        ("get_run", "get"),
+        ("cancel_run", "cancel"),
+        ("get_report", "get_report"),
+    ],
+)
+@pytest.mark.parametrize(
+    "run_id",
+    ["x", "x" * 256],
+    ids=["one-character", "256-characters"],
+)
+async def test_standalone_run_id_boundaries_route_to_manager(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+    tool_name: str,
+    manager_method: str,
+    run_id: str,
+) -> None:
+    session, manager, _doctor = client_session
+
+    result = await session.call_tool(tool_name, {"run_id": run_id})
+
+    assert result.isError is False
+    assert manager.calls == [(manager_method, run_id)]
+
+
+@pytest.mark.anyio
 async def test_internal_service_errors_use_bounded_allowlisted_messages() -> None:
     manager = FailingManager()
     server = create_server(manager=manager, doctor=FailingDoctor())
@@ -531,3 +566,54 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
             assert "secret-value" not in message
             assert "/private/secret/path" not in message
             assert "subprocess stdout" not in message
+
+
+def _assert_sanitized_lifecycle_error(error: BaseException) -> None:
+    representation = repr(error)
+    rendered = "".join(traceback.format_exception(error))
+    lifecycle_error = "session shutdown failed; inspect local Repogent logs"
+
+    assert lifecycle_error in representation
+    assert lifecycle_error in rendered
+    assert len(lifecycle_error) <= 160
+    for forbidden in (
+        "secret-value",
+        "/private/secret/path",
+        "subprocess stdout",
+    ):
+        assert forbidden not in representation
+        assert forbidden not in rendered
+
+
+@pytest.mark.anyio
+async def test_shutdown_failure_is_bounded_and_redacted_on_normal_exit() -> None:
+    manager = FailingShutdownManager()
+    server = create_server(manager=manager, doctor=FakeDoctor())
+
+    with pytest.raises(ExceptionGroup) as raised:
+        async with create_connected_server_and_client_session(
+            server, raise_exceptions=True
+        ):
+            pass
+
+    _assert_sanitized_lifecycle_error(raised.value)
+    assert manager.shutdown_called is True
+
+
+@pytest.mark.anyio
+async def test_shutdown_failure_preserves_existing_context_error_without_leaks() -> None:
+    class ContextFailure(RuntimeError):
+        pass
+
+    manager = FailingShutdownManager()
+    server = create_server(manager=manager, doctor=FakeDoctor())
+
+    with pytest.raises(ExceptionGroup) as raised:
+        async with create_connected_server_and_client_session(
+            server, raise_exceptions=True
+        ):
+            raise ContextFailure("body failure remains distinguishable")
+
+    _assert_sanitized_lifecycle_error(raised.value)
+    assert raised.value.subgroup(ContextFailure) is not None
+    assert manager.shutdown_called is True
