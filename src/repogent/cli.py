@@ -96,6 +96,14 @@ def run_command(
             raise typer.Exit(2) from error
         if str(error) == "repository preflight failed":
             _echo_preflight_failures(error.store.root)
+        elif (
+            error.manifest is not None
+            and error.manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+            and not str(error).startswith(
+                ("repository preflight failed:", "could not load ")
+            )
+        ):
+            typer.echo(f"Run {error.manifest.run_id}: {error.manifest.status.value}")
         elif error.manifest is None or error.manifest.status is not RunStatus.CANCELLED:
             typer.echo(str(error))
         typer.echo(f"Evidence: {error.store.root}")

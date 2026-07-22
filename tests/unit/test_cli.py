@@ -713,6 +713,51 @@ def test_run_terminalizes_unexpected_openai_initialization_failure(
     assert "provider configuration invalid" in manifest["reason"]
 
 
+def test_run_reports_workflow_construction_failure_like_pre_refactor_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+
+    class PassingPreflight:
+        def run(self, _repository: Path) -> PreflightReport:
+            return PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repository"
+            )
+
+    def fail_workflow_construction(**_kwargs: object) -> object:
+        raise RuntimeError("workflow construction failed")
+
+    monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(run_builder, "OpenAIProvider", lambda **_kwargs: object())
+    monkeypatch.setattr(run_builder, "Workflow", fail_workflow_construction)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    run_directory = next(evidence.iterdir())
+    assert result.exit_code == 2
+    assert result.output == (
+        f"Run {run_directory.name}: human_intervention_required\n"
+        f"Evidence: {run_directory}\n"
+    )
+    manifest = json.loads((run_directory / "run.json").read_text())
+    assert manifest["reason"] == "workflow construction failed"
+
+
 def test_run_rejects_explicit_default_path_inside_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
