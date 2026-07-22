@@ -164,6 +164,22 @@ def test_gate_patch_payload_retains_bounded_execution_evidence() -> None:
     assert pending.artifact["verification_status"] == "passed"
 
 
+def test_patch_payload_rejects_inconsistent_execution_isolation_pair() -> None:
+    artifact = json.dumps(
+        {
+            "execution_mode": "local",
+            "isolation_level": "isolated",
+            "verification_status": "passed",
+            "selected_candidate": {"proposal": {"diff": "patch-body"}},
+            "selection": {"selected_candidate_id": "candidate-1"},
+            "candidates": [],
+        }
+    )
+
+    with pytest.raises(ApprovalGateError, match="isolation level"):
+        approval_payload(ApprovalKind.PATCH, artifact)
+
+
 def test_non_patch_payload_is_recursively_redacted_before_digest_binding() -> None:
     artifact = """{
         "objective": "keep token=sk-proj-1234567890abcdef private",

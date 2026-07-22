@@ -24,6 +24,7 @@ from repogent.candidates import (
     PatchPreview,
     PatchPreviewer,
     RepositoryIntegritySnapshot,
+    ensure_exact_diff_safe,
     patch_preview_digest,
 )
 from repogent.domain import (
@@ -55,7 +56,11 @@ from repogent.domain import (
     utc_now,
 )
 from repogent.events import EventSink
-from repogent.executor_selection import FixedExecutorSelector, PreparedExecutor
+from repogent.executor_selection import (
+    FixedExecutorSelector,
+    PreparedExecutor,
+    validate_executor_isolation,
+)
 from repogent.localization import LocalizationReport, PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.preflight import PreflightReport
@@ -570,15 +575,17 @@ class Workflow:
         )
         self.artifacts.update_manifest(self.manifest)
         self.write("candidate", candidate)
-        self.account(
-            candidate.usage,
-            generated_artifact="candidate",
-            evidence=self._candidate_provider_evidence.pop(candidate.candidate_id, None),
-        )
         self.emit(
             EventKind.CANDIDATE,
             "candidate generated",
             candidate_id=candidate.candidate_id,
+        )
+
+    def _account_candidate_generation(self, candidate: CandidateRecord) -> None:
+        self.account(
+            candidate.usage,
+            generated_artifact="candidate",
+            evidence=self._candidate_provider_evidence.pop(candidate.candidate_id, None),
         )
 
     def _preview_and_select_executor(
@@ -587,11 +594,16 @@ class Workflow:
         if self.requirements is None:
             raise RuntimeError("requirements must exist before patch preview")
         previewer = cast(PatchPreviewer, self.previewer)
-        preview = previewer.preview(
-            self.root,
-            candidate,
-            self.requirements.acceptance_criteria,
-        )
+        try:
+            ensure_exact_diff_safe(candidate.proposal.diff, self.artifacts.secrets)
+            preview = previewer.preview(
+                self.root,
+                candidate,
+                self.requirements.acceptance_criteria,
+            )
+        except (Exception, KeyboardInterrupt, SystemExit):
+            self._account_candidate_generation(candidate)
+            raise
         preview_digest = patch_preview_digest(preview)
         self.manifest = self.manifest.model_copy(
             update={
@@ -604,6 +616,7 @@ class Workflow:
         )
         self.artifacts.update_manifest(self.manifest)
         self._publish_candidate(candidate)
+        self._account_candidate_generation(candidate)
         self.write("patch-preview", preview)
         self.advance(RunStage.PATCH_PREVIEWED)
         if self._legacy_validator_selector and isinstance(
@@ -632,6 +645,7 @@ class Workflow:
         if patch_preview_digest(selector_preview) != preview_digest:
             raise CandidateEvaluationError("patch preview changed after persistence")
         self._assert_preview_binding(preview, candidate, preview_digest)
+        validate_executor_isolation(prepared.mode, prepared.isolation_level)
         self.manifest = self.manifest.model_copy(
             update={
                 "execution_mode": prepared.mode,

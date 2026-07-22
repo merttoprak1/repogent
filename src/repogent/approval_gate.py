@@ -16,6 +16,7 @@ from repogent.domain import (
     PendingApproval,
     VerificationStatus,
 )
+from repogent.executor_selection import validate_executor_isolation
 from repogent.sanitization import redact_text, sanitize_data
 
 _CHECK_NAME_MAX_CHARS = 128
@@ -167,6 +168,10 @@ def _patch_execution_evidence(payload: dict[str, object]) -> dict[str, str]:
         verification = VerificationStatus(verification_value)
     except ValueError as error:
         raise ApprovalGateError("patch approval execution evidence is malformed") from error
+    try:
+        validate_executor_isolation(mode, isolation)
+    except ValueError as error:
+        raise ApprovalGateError(str(error)) from error
     if verification is not VerificationStatus.PASSED:
         raise ApprovalGateError("patch approval execution evidence is not passed")
     return {

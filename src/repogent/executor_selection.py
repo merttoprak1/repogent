@@ -57,6 +57,19 @@ class FixedExecutorSelector:
         return self._prepared
 
 
+def validate_executor_isolation(
+    mode: ExecutionMode,
+    isolation_level: IsolationLevel,
+) -> None:
+    expected = (
+        IsolationLevel.ISOLATED
+        if mode is ExecutionMode.DOCKER
+        else IsolationLevel.REDUCED_ISOLATION
+    )
+    if isolation_level is not expected:
+        raise ValueError("executor isolation level does not match execution mode")
+
+
 def option_digest(
     run_id: str,
     preview_digest: str,
