@@ -8,6 +8,10 @@ import time
 from pydantic import BaseModel
 
 from repogent.domain import ApprovalKind, ApprovalRecord, Decision, PendingApproval
+from repogent.sanitization import redact_text, sanitize_data
+
+_CHECK_NAME_MAX_CHARS = 128
+_CHECK_REASON_MAX_CHARS = 4_096
 
 
 class ApprovalGateError(RuntimeError):
@@ -40,14 +44,24 @@ def _approval_payload_from_snapshot(
     kind: ApprovalKind, payload: dict[str, object] | str
 ) -> dict[str, object] | str:
     if not isinstance(payload, dict):
-        return payload
+        sanitized_text = sanitize_data(payload)
+        if not isinstance(sanitized_text, str):
+            raise ApprovalGateError("approval artifact sanitization failed")
+        return sanitized_text
     if kind is not ApprovalKind.PATCH:
-        return payload
+        sanitized_payload = sanitize_data(payload)
+        if not isinstance(sanitized_payload, dict):
+            raise ApprovalGateError("approval artifact sanitization failed")
+        return sanitized_payload
     selected = payload.get("selected_candidate")
     selection = payload.get("selection")
     candidates = payload.get("candidates", [])
     if not isinstance(selected, dict) or not isinstance(candidates, list):
         raise ApprovalGateError("patch approval artifact is malformed")
+    proposal = selected.get("proposal")
+    exact_diff = proposal.get("diff") if isinstance(proposal, dict) else None
+    if isinstance(exact_diff, str) and redact_text(exact_diff) != exact_diff:
+        raise ApprovalGateError("approval artifact contains secret-like patch content")
     summaries: list[dict[str, object]] = []
     for item in candidates:
         if not isinstance(item, dict):
@@ -60,21 +74,39 @@ def _approval_payload_from_snapshot(
         validation_checks = (
             validation.get("checks", []) if isinstance(validation, dict) else []
         )
-        checks = [
-            {
-                "status": check.get("status"),
-                "required": check.get("required"),
-            }
-            for check in validation_checks
-            if isinstance(check, dict)
-        ]
+        checks: list[dict[str, object]] = []
+        skipped_checks: list[dict[str, str]] = []
+        for check in validation_checks:
+            if not isinstance(check, dict):
+                continue
+            name = _bounded_redacted(check.get("name"), _CHECK_NAME_MAX_CHARS)
+            checks.append(
+                {
+                    "name": name,
+                    "status": check.get("status"),
+                    "required": check.get("required"),
+                }
+            )
+            if check.get("status") == "skipped":
+                skipped_checks.append(
+                    {
+                        "name": name,
+                        "reason": _bounded_redacted(
+                            check.get("reason"), _CHECK_REASON_MAX_CHARS
+                        ),
+                    }
+                )
         summaries.append(
             {
                 "candidate_id": candidate.get("candidate_id"),
                 "eligible": evidence.get("eligible"),
                 "checks": checks,
-                "required_failures": evidence.get("required_failures", []),
-                "skipped_checks": evidence.get("skipped_checks", []),
+                "required_failures": [
+                    _bounded_redacted(name, _CHECK_NAME_MAX_CHARS)
+                    for name in evidence.get("required_failures", [])
+                    if isinstance(name, str)
+                ],
+                "skipped_checks": skipped_checks,
                 "changed_files": evidence.get("changed_files"),
                 "changed_lines": evidence.get("changed_lines"),
                 "acceptance_criteria_coverage": evidence.get(
@@ -83,11 +115,34 @@ def _approval_payload_from_snapshot(
                 "selected": item.get("selected", False),
             }
         )
-    return {
+    result = {
         "selected_candidate": selected,
         "selection": selection,
         "candidates": summaries,
     }
+    sanitized_result = sanitize_data(result)
+    if not isinstance(sanitized_result, dict):
+        raise ApprovalGateError("approval artifact sanitization failed")
+    sanitized_selected = sanitized_result.get("selected_candidate")
+    sanitized_proposal = (
+        sanitized_selected.get("proposal")
+        if isinstance(sanitized_selected, dict)
+        else None
+    )
+    sanitized_diff = (
+        sanitized_proposal.get("diff")
+        if isinstance(sanitized_proposal, dict)
+        else None
+    )
+    if isinstance(exact_diff, str) and sanitized_diff != exact_diff:
+        raise ApprovalGateError("approval artifact contains secret-like patch content")
+    return sanitized_result
+
+
+def _bounded_redacted(value: object, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return redact_text(value)[:limit]
 
 
 def approval_digest(kind: ApprovalKind, artifact: BaseModel | str) -> str:

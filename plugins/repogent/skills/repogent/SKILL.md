@@ -65,6 +65,10 @@ to local or host execution, and never offer host execution as a fallback.
    Plain "okay", "continue", prior requirements/plan approval, or approval of a
    different digest does not count.
 
+   Treat the bounded patch evidence contract exactly as `checks`: `{name, status, required}`
+   and `skipped_checks`: `{name, reason}`. Never render or infer raw command
+   arguments, stdout, or stderr.
+
 Every gate is a separate, explicit, digest-bound user decision. Never auto-approve
 requirements, plan, or patch, even when the user asks to approve every stage
 automatically.

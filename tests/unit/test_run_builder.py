@@ -50,6 +50,14 @@ def test_validate_run_options_rejects_filesystem_root() -> None:
         validate_run_options(RunOptions(repository=Path("/"), request="change"))
 
 
+def test_validate_run_options_rejects_regular_file_repository(tmp_path: Path) -> None:
+    repository = tmp_path / "repository.py"
+    repository.write_text("value = 1\n")
+
+    with pytest.raises(ValueError, match="repository must be a directory"):
+        validate_run_options(RunOptions(repository=repository, request="change"))
+
+
 def test_build_run_rejects_evidence_inside_repository(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()

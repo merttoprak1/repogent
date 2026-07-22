@@ -85,6 +85,8 @@ def validate_run_options(options: RunOptions) -> None:
     repository = options.repository.resolve(strict=True)
     if repository.parent == repository:
         raise ValueError("filesystem root repositories are unsupported")
+    if not repository.is_dir():
+        raise ValueError("repository must be a directory")
 
 
 def build_run(

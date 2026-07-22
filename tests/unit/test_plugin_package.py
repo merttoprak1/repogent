@@ -98,6 +98,9 @@ def test_repogent_skill_closes_baseline_safety_loopholes() -> None:
     for requirement in required_safety_language:
         assert requirement in skill
 
+    assert "`checks`: `{name, status, required}`" in skill
+    assert "`skipped_checks`: `{name, reason}`" in skill
+
 
 def test_repogent_evals_have_five_positive_and_three_negative_cases() -> None:
     evals = json.loads(EVALS_PATH.read_text())
@@ -128,3 +131,9 @@ def test_readme_installs_bare_runtime_command_before_plugin_marketplace() -> Non
     assert "Codex Desktop" in readme
     assert readme.index(runtime_install) < readme.index(marketplace_install)
     assert "python -m pip install -e '.[dev]'" in readme
+
+
+def test_ci_wheel_inspection_requires_mcp_server_module() -> None:
+    workflow = Path(".github/workflows/ci.yml").read_text()
+
+    assert "assert 'repogent/mcp_server.py' in names" in workflow

@@ -20,7 +20,7 @@ _QUOTED_ASSIGNMENT = re.compile(
 )
 _UNQUOTED_ASSIGNMENT = re.compile(
     rf"(?i){_ASSIGNMENT_PREFIX}"
-    r"(?P<value>[^\s,;)}\]'\"]+)"
+    rf"(?P<value>{re.escape(REDACTED)}|[^\s,;)}}\]'\"]+)"
 )
 _SENSITIVE_FIELDS = {
     "accesskey",

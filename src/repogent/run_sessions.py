@@ -13,6 +13,7 @@ from repogent.approvals import Approver
 from repogent.domain import PendingApproval, RunManifest, RunStatus
 from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
 from repogent.run_builder import PreparedRun, RunOptions, build_run
+from repogent.sanitization import redact_text, sanitize_data
 
 _ORIGINAL_OS_OPEN = os.open
 _ORIGINAL_OS_STAT = os.stat
@@ -255,7 +256,7 @@ class RunSession:
         pending = (
             self._pending.model_copy(deep=True) if self._pending is not None else None
         )
-        return RunSnapshot(
+        snapshot = RunSnapshot(
             run_id=manifest.run_id,
             status=manifest.status,
             stage=manifest.stage,
@@ -268,6 +269,18 @@ class RunSession:
             evidence_path=str(self.prepared.store.root),
             cancellation_requested=self.cancellation_requested(),
         )
+        payload = snapshot.model_dump(mode="json")
+        sanitized = sanitize_data(payload)
+        if not isinstance(sanitized, dict):
+            raise SessionError("run snapshot sanitization failed")
+        if pending is not None:
+            sanitized_pending = sanitized.get("pending_approval")
+            if (
+                not isinstance(sanitized_pending, dict)
+                or sanitized_pending.get("artifact") != pending.artifact
+            ):
+                raise SessionError("run approval artifact is unsafe to display")
+        return RunSnapshot.model_validate(sanitized)
 
     def _capture_evidence_identity(self) -> tuple[int, int]:
         try:
@@ -316,6 +329,8 @@ class SessionManager:
 
     def start(self, request: RunStart) -> RunSnapshot:
         root = request.repository.resolve(strict=True)
+        if not root.is_dir():
+            raise SessionError("repository must be a directory")
         with self._lock:
             if self._closed:
                 raise SessionError("session manager has been shut down")
@@ -409,7 +424,7 @@ class SessionManager:
             status=snapshot.status,
             checkout_state=snapshot.checkout_state,
             evidence_path=snapshot.evidence_path,
-            report=report,
+            report=redact_text(report),
         )
 
     def shutdown(self) -> None:

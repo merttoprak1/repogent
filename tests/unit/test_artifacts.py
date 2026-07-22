@@ -69,6 +69,12 @@ def test_explicit_secret_redaction_does_not_duplicate_placeholder_delimiters() -
     assert redact("token=named-secret", ["named-secret"]) == "token=[REDACTED]"
 
 
+def test_redaction_is_idempotent_for_existing_placeholders() -> None:
+    sanitized = redact("token=sk-proj-1234567890abcdef", [])
+
+    assert redact(sanitized, []) == sanitized
+
+
 @pytest.mark.parametrize("name", ["/" + "tmp/escape", "../escape"])
 def test_text_write_rejects_unsafe_artifact_names(tmp_path: Path, name: str) -> None:
     target = tmp_path / "target"

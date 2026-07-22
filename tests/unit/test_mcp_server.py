@@ -298,6 +298,88 @@ async def test_tools_route_typed_requests_and_return_structured_content(
 
 
 @pytest.mark.anyio
+async def test_successful_structured_results_are_recursively_redacted() -> None:
+    manager = FakeManager()
+    manager.snapshot = manager.snapshot.model_copy(
+        update={"reason": "token=sk-proj-1234567890abcdef password=do-not-show"}
+    )
+    manager.report = manager.report.model_copy(
+        update={"report": "credential token=sk-proj-1234567890abcdef"}
+    )
+    doctor = FakeDoctor()
+    doctor.report = doctor.report.model_copy(
+        update={"repository": "/bounded/token=sk-proj-1234567890abcdef"}
+    )
+    server = create_server(manager=manager, doctor=doctor)
+
+    async with create_connected_server_and_client_session(
+        server, raise_exceptions=True
+    ) as session:
+        results = [
+            await session.call_tool("get_run", {"run_id": "run-1"}),
+            await session.call_tool("get_report", {"run_id": "run-1"}),
+            await session.call_tool(
+                "repogent_doctor",
+                {
+                    "request": DoctorRequest(
+                        repository=Path("/repository"), executor="local"
+                    ).model_dump(mode="json")
+                },
+            ),
+        ]
+
+    assert [result.isError for result in results] == [False, False, False]
+    serialized = str([result.structuredContent for result in results])
+    assert "sk-proj-1234567890abcdef" not in serialized
+    assert "do-not-show" not in serialized
+    assert serialized.count("[REDACTED]") >= 4
+
+
+@pytest.mark.anyio
+async def test_mcp_doctor_and_start_reject_regular_file_repository(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository.py"
+    repository.write_text("value = 1\n")
+    server = create_server()
+
+    async with create_connected_server_and_client_session(
+        server, raise_exceptions=True
+    ) as session:
+        doctor_result = await session.call_tool(
+            "repogent_doctor",
+            {
+                "request": DoctorRequest(
+                    repository=repository,
+                    provider="openai",
+                    executor="local",
+                ).model_dump(mode="json")
+            },
+        )
+        start_result = await session.call_tool(
+            "start_run",
+            {
+                "request": RunStart(
+                    repository=repository,
+                    request="change the file",
+                    provider="openai",
+                    executor="local",
+                ).model_dump(mode="json")
+            },
+        )
+
+    assert doctor_result.isError is False
+    assert doctor_result.structuredContent is not None
+    report = DoctorReport.model_validate(doctor_result.structuredContent)
+    assert report.ready is False
+    assert report.checks[0].message == "repository must be a directory"
+    assert start_result.isError is True
+    assert start_result.content[0].text.endswith(
+        "run could not be started; inspect local Repogent logs"
+    )
+
+
+@pytest.mark.anyio
 async def test_server_lifespan_always_shuts_down_sessions() -> None:
     manager = FakeManager()
     server = create_server(manager=manager, doctor=FakeDoctor())

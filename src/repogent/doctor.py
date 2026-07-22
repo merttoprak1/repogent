@@ -91,6 +91,17 @@ class DoctorService:
                 )
             )
             return None
+        if not resolved.is_dir():
+            checks.append(
+                DoctorCheck(
+                    name="repository",
+                    passed=False,
+                    required=True,
+                    message="repository must be a directory",
+                    remediation="Choose an accessible repository directory",
+                )
+            )
+            return None
         checks.append(
             DoctorCheck(
                 name="repository",
