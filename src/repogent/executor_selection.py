@@ -61,9 +61,11 @@ class ExecutorRegistry:
         *,
         docker_factory: Callable[[], Executor] = DockerExecutor,
         local_factory: Callable[..., Executor] = LocalExecutor,
+        preflight_factory: Callable[[Executor, ValidationPolicy], Preflight] = Preflight,
     ) -> None:
         self._docker_factory = docker_factory
         self._local_factory = local_factory
+        self._preflight_factory = preflight_factory
 
     def inspect_availability(
         self,
@@ -149,7 +151,7 @@ class ExecutorRegistry:
             executor = self._local_factory(
                 allowed={command.name: command.argv for command in commands}
             )
-        return executor, Preflight(executor, policy).run(root)
+        return executor, self._preflight_factory(executor, policy).run(root)
 
 
 def _isolation_level(mode: ExecutionMode) -> IsolationLevel:
