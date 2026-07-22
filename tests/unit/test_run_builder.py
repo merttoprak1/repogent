@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 
 from repogent.approvals import FakeApprover
-from repogent.domain import Decision, ProviderReadiness, RunStatus
+from repogent.domain import Decision, ExecutionMode, IsolationLevel, ProviderReadiness, RunStatus
+from repogent.executor_selection import ExecutorSelectionError, PreparedExecutor
 from repogent.preflight import PreflightReport
 from repogent.run_builder import (
     RunBuildError,
@@ -96,12 +97,19 @@ def test_build_run_keeps_preflight_before_provider(
         def check_ready(self) -> ProviderReadiness:
             return ProviderReadiness(provider="codex-cli", model="default", ready=True)
 
-    class PassingPreflight:
-        def run(self, _repository: Path) -> PreflightReport:
+    class Registry:
+        def prepare(
+            self, _repository: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
             order.append("preflight")
-            return _passing_preflight()
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
 
-    monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
     monkeypatch.setattr(run_builder, "CodexCliProvider", ReadyCodex)
 
     prepared = build_run(
@@ -119,6 +127,46 @@ def test_build_run_keeps_preflight_before_provider(
     assert prepared.workflow.root == target.resolve()
 
 
+def test_build_run_prepares_selected_executor_with_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    calls: list[tuple[Path, ExecutionMode]] = []
+
+    class Registry:
+        def prepare(
+            self, root: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            calls.append((root, mode))
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
+
+    build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="scripted",
+            script=script,
+            executor="local",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+    )
+
+    assert calls == [(target.resolve(), ExecutionMode.LOCAL)]
+
+
 def test_build_run_does_not_fallback_when_docker_preflight_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -128,25 +176,19 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
     target.mkdir()
     provider_constructed = False
 
-    class UnavailableDocker:
-        def readiness(self) -> tuple[bool, str]:
-            return False, "docker unavailable"
-
-        def available(self, _command: object) -> bool:
-            return False
-
     def provider_must_not_be_constructed(*_args: object, **_kwargs: object) -> object:
         nonlocal provider_constructed
         provider_constructed = True
         return object()
 
-    def local_executor_must_not_be_constructed(**_kwargs: object) -> object:
-        raise AssertionError("Docker failure must not fall back to LocalExecutor")
+    class Registry:
+        def prepare(
+            self, _root: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            assert mode is ExecutionMode.DOCKER
+            raise ExecutorSelectionError("selected executor is unavailable")
 
-    monkeypatch.setattr(run_builder, "DockerExecutor", UnavailableDocker)
-    monkeypatch.setattr(
-        run_builder, "LocalExecutor", local_executor_must_not_be_constructed
-    )
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
     monkeypatch.setattr(run_builder, "OpenAIProvider", provider_must_not_be_constructed)
 
     with pytest.raises(RunBuildError, match="repository preflight failed") as caught:
@@ -206,9 +248,16 @@ def test_build_run_terminalizes_interrupt_as_cancelled(
     def interrupt() -> None:
         raise interrupt_type()
 
-    class PassingPreflight:
-        def run(self, _repository: Path) -> PreflightReport:
-            return _passing_preflight()
+    class Registry:
+        def prepare(
+            self, _repository: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
 
     def interrupted_commands(_self: object, _repository: Path) -> object:
         interrupt()
@@ -227,7 +276,7 @@ def test_build_run_terminalizes_interrupt_as_cancelled(
     if phase == "preflight":
         monkeypatch.setattr(run_builder.ValidationPolicy, "commands", interrupted_commands)
     else:
-        monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+        monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
     if phase == "provider":
         monkeypatch.setattr(run_builder, "OpenAIProvider", interrupted_provider)
     elif phase == "construction":
