@@ -10,6 +10,7 @@ from repogent.preflight import (
     Preflight,
     ReadinessStatus,
     configuration_fingerprint,
+    repository_preflight,
 )
 
 
@@ -159,6 +160,15 @@ def test_preflight_treats_non_git_directories_as_a_warning(tmp_path: Path) -> No
     assert report.passed is True
     assert report.git_commit is None
     assert report.checks[0].status is ReadinessStatus.WARNING
+
+
+def test_repository_preflight_only_performs_base_checks(tmp_path: Path) -> None:
+    repository = initialize_git_repository(tmp_path)
+
+    report = repository_preflight(repository, ValidationPolicy())
+
+    assert [check.name for check in report.checks] == ["git"]
+    assert report.passed is True
 
 
 def test_configuration_fingerprint_is_canonical_and_order_independent() -> None:

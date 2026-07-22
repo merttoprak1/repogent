@@ -184,8 +184,8 @@ class DoctorRequest(VersionedModel):
     @field_validator("executor")
     @classmethod
     def validate_executor(cls, executor: str) -> str:
-        if executor not in {"docker", "local"}:
-            raise ValueError("executor must be docker or local")
+        if executor not in {"docker", "local", "deferred"}:
+            raise ValueError("executor must be docker, local, or deferred")
         return executor
 
 
@@ -203,3 +203,4 @@ class DoctorReport(VersionedModel):
     provider: str = Field(max_length=32)
     executor: str = Field(max_length=32)
     checks: list[DoctorCheck] = Field(max_length=9)
+    executors: list[ExecutorAvailability] = Field(default_factory=list, max_length=2)

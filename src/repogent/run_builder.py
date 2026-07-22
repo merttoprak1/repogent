@@ -15,6 +15,7 @@ from repogent.codex_cli import CodexCliProvider
 from repogent.domain import (
     Budget,
     EventKind,
+    ExecutionMode,
     ProviderReadiness,
     RunEvent,
     RunManifest,
@@ -22,13 +23,13 @@ from repogent.domain import (
     RunStatus,
 )
 from repogent.events import EventSink
-from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
+from repogent.execution import ValidationPolicy
+from repogent.executor_selection import ExecutorRegistry, ExecutorSelectionError
 from repogent.patching import PatchApplier, PatchPolicy
-from repogent.preflight import Preflight, PreflightReport, configuration_fingerprint
+from repogent.preflight import PreflightReport, configuration_fingerprint
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
-from repogent.validation import ValidationPipeline
 from repogent.workflow import Workflow
 
 ProviderName = Literal["openai", "codex-cli", "scripted"]
@@ -121,14 +122,15 @@ def build_run(
                 )
             }
         )
-        command_executor = (
-            DockerExecutor()
-            if options.executor == "docker"
-            else LocalExecutor(
-                allowed={command.name: command.argv for command in commands}
+        try:
+            prepared_executor = ExecutorRegistry().prepare(
+                repository, ExecutionMode(options.executor), policy
             )
-        )
-        preflight = Preflight(command_executor, policy).run(repository)
+        except ExecutorSelectionError as error:
+            if error.preflight is not None:
+                store.write_model("preflight", error.preflight)
+            raise
+        preflight = prepared_executor.preflight
         store.write_model("preflight", preflight)
     except (KeyboardInterrupt, SystemExit) as error:
         terminal = terminalize_failure(
@@ -207,7 +209,7 @@ def build_run(
             approver=approver,
             patch_policy=PatchPolicy(),
             patch_applier=PatchApplier(),
-            validator=ValidationPipeline(command_executor, policy),
+            validator=prepared_executor.validator,
             artifacts=store,
             inspector=RepositoryInspector(),
             retriever=LexicalRetriever(),
