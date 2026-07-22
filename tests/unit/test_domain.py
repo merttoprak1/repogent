@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from repogent.domain import (
+    ApprovalKind,
     Budget,
     CandidateEvidence,
     CheckoutState,
@@ -11,6 +12,7 @@ from repogent.domain import (
     CheckStatus,
     FinalValidationStatus,
     ImplementationPlan,
+    PendingApproval,
     PlanStep,
     ProviderCallEvidence,
     ProviderCallStatus,
@@ -22,6 +24,16 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
 )
+
+
+def test_pending_approval_requires_sha256_digest() -> None:
+    pending = PendingApproval(
+        run_id="run-1",
+        kind=ApprovalKind.PLAN,
+        digest="a" * 64,
+        artifact={"steps": []},
+    )
+    assert pending.schema_version == "1"
 
 
 def test_provider_call_evidence_requires_a_positive_invocation() -> None:

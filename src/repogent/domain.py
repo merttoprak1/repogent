@@ -203,6 +203,13 @@ class ApprovalRecord(VersionedModel):
     decided_at: datetime = Field(default_factory=utc_now)
 
 
+class PendingApproval(VersionedModel):
+    run_id: str = Field(min_length=1)
+    kind: ApprovalKind
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact: dict[str, object] | str
+
+
 class ProviderUsage(VersionedModel):
     model: str
     input_tokens: int = Field(default=0, ge=0)
