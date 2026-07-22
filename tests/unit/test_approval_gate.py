@@ -115,7 +115,8 @@ def test_patch_payload_retains_diff_and_redacts_validation_output() -> None:
                 "changed_lines": 2,
                 "acceptance_criteria_coverage": 1,
                 "validation": {"checks": [{
-                    "argv": ["pytest"], "stdout": "secret", "stderr": "error"
+                    "argv": ["pytest"], "status": "passed", "required": true,
+                    "stdout": "secret", "stderr": "error"
                 }]}
             },
             "selected": true
@@ -125,6 +126,9 @@ def test_patch_payload_retains_diff_and_redacts_validation_output() -> None:
     payload = approval_payload(ApprovalKind.PATCH, artifact)
 
     assert payload["selected_candidate"]["proposal"]["diff"] == "patch-body"  # type: ignore[index]
+    assert payload["candidates"][0]["checks"] == [  # type: ignore[index]
+        {"status": "passed", "required": True}
+    ]
     serialized = str(payload)
     assert "secret" not in serialized
     assert "error" not in serialized

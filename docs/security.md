@@ -4,6 +4,26 @@ Repository content and tests are untrusted. Repogent reduces authority; it does 
 
 ## Controls
 
+- The Codex plugin is a local stdio adapter, not a second policy engine. It
+  delegates readiness, workflow state, patch policy, validation, and evidence
+  to Repogent's existing deterministic services. The local Codex process,
+  installed `repogent` executable, target checkout, and evidence directory are
+  inside the operator's local trust boundary; no remote Repogent control plane
+  is introduced.
+- MCP requirements, plan, and patch approvals are independent and
+  digest-bound. A stale digest or wrong gate kind cannot advance a run, and the
+  patch digest binds directly to the exact displayed diff. The patch approval
+  tool is non-idempotent and must not be retried blindly after uncertain
+  delivery.
+- A canonical repository root has at most one active MCP run. Aliases resolve
+  to the same lock, and the reservation is released only when terminal state is
+  safely publishable. This prevents two chat requests from racing mutations in
+  one checkout.
+- MCP disconnect invokes bounded, cooperative session shutdown. Pending gates
+  are closed and active runs are asked to cancel, while durable `checkout_state`
+  remains authoritative: `not_applied` is reported only when non-mutation is
+  known, `applied` when the approved patch is durable, and `recovery_unknown`
+  when manual inspection is required.
 - Repository instructions are delimited as untrusted data in every role prompt.
 - Traversal does not follow repository symlinks, excludes common credential paths, and fails closed on fixed file-count, aggregate-byte, directory-entry, depth, and elapsed-time limits. Patch paths must remain below the resolved root.
 - Binary, protected-path, malformed, oversized, absolute, and traversal patches are rejected.
