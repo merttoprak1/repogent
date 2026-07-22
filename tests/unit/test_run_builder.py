@@ -5,7 +5,11 @@ import pytest
 
 from repogent.approvals import FakeApprover
 from repogent.domain import Decision, ExecutionMode, IsolationLevel, ProviderReadiness, RunStatus
-from repogent.executor_selection import ExecutorSelectionError, PreparedExecutor
+from repogent.executor_selection import (
+    ExecutorSelectionError,
+    FixedExecutorSelector,
+    PreparedExecutor,
+)
 from repogent.preflight import PreflightReport
 from repogent.run_builder import (
     RunBuildError,
@@ -57,6 +61,15 @@ def test_validate_run_options_rejects_regular_file_repository(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="repository must be a directory"):
         validate_run_options(RunOptions(repository=repository, request="change"))
+
+
+def test_validate_run_options_accepts_deferred_executor(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    validate_run_options(
+        RunOptions(repository=repository, request="change", executor="deferred")
+    )
 
 
 def test_build_run_rejects_evidence_inside_repository(tmp_path: Path) -> None:
@@ -171,6 +184,110 @@ def test_build_run_prepares_selected_executor_with_registry(
     )
 
     assert calls == [(target.resolve(), ExecutionMode.LOCAL)]
+
+
+def test_build_run_wraps_explicit_executor_in_fixed_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def prepare(
+            self, _root: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
+
+    prepared = build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="scripted",
+            script=script,
+            executor="local",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+    )
+
+    assert isinstance(prepared.workflow.executor_selector, FixedExecutorSelector)
+
+
+def test_build_run_deferred_uses_only_base_preflight_and_selector_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    selector = object()
+    factory_calls: list[tuple[str, Path, object]] = []
+
+    class RegistryMustNotBeConstructed:
+        def __init__(self, **_kwargs: object) -> None:
+            raise AssertionError("executor registry must remain deferred")
+
+    def selector_factory(run_id: str, root: Path, policy: object) -> object:
+        factory_calls.append((run_id, root, policy))
+        return selector
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", RegistryMustNotBeConstructed)
+
+    prepared = build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="scripted",
+            script=script,
+            executor="deferred",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+        executor_selector_factory=selector_factory,  # type: ignore[arg-type]
+    )
+
+    assert prepared.preflight.passed
+    assert prepared.workflow.executor_selector is selector
+    assert prepared.workflow.validator is None
+    assert factory_calls == [
+        (prepared.manifest.run_id, target.resolve(), factory_calls[0][2])
+    ]
+
+
+def test_build_run_deferred_requires_selector_factory(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+
+    with pytest.raises(ValueError, match="executor_selector_factory"):
+        build_run(
+            RunOptions(
+                repository=target,
+                request="change",
+                provider="scripted",
+                script=script,
+                executor="deferred",
+                output_dir=tmp_path / "runs",
+            ),
+            lambda _run_id: FakeApprover([Decision.REJECTED]),
+        )
 
 
 def test_build_run_does_not_fallback_when_docker_preflight_fails(
