@@ -124,6 +124,17 @@ def test_snapshot_derives_trust_label_from_verified_isolation() -> None:
     assert reduced.trust_label is domain.TrustLabel.REDUCED_ISOLATION
 
 
+def test_snapshot_local_mode_never_reports_isolated_verified() -> None:
+    local = mcp_models.RunSnapshot(
+        **snapshot_payload(),
+        execution_mode=domain.ExecutionMode.LOCAL,
+        isolation_level=domain.IsolationLevel.ISOLATED,
+        verification_status=domain.VerificationStatus.PASSED,
+    )
+
+    assert local.trust_label is domain.TrustLabel.REDUCED_ISOLATION
+
+
 def test_snapshot_bounds_pending_execution_preview_by_canonical_json_size() -> None:
     assert "pending_execution" in mcp_models.RunSnapshot.model_fields
     preview_model = mcp_models.PendingExecutionChoice
