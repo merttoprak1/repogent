@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -8,13 +10,33 @@ from typing import Protocol, cast
 
 from repogent.approval_gate import ApprovalGateError, GateApprover
 from repogent.approvals import Approver
-from repogent.domain import PendingApproval, RunManifest
+from repogent.domain import PendingApproval, RunManifest, RunStatus
 from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
 from repogent.run_builder import PreparedRun, RunOptions, build_run
+
+_SUPPORTS_SECURE_DIR_FD = os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
 
 
 class SessionError(RuntimeError):
     pass
+
+
+class _CancellationEvent(threading.Event):
+    def __init__(self) -> None:
+        super().__init__()
+        self._observed = threading.Event()
+
+    def is_set(self) -> bool:
+        requested = super().is_set()
+        if requested:
+            self._observed.set()
+        return requested
+
+    def requested(self) -> bool:
+        return super().is_set()
+
+    def was_observed(self) -> bool:
+        return self._observed.is_set()
 
 
 class RunBuilder(Protocol):
@@ -42,8 +64,11 @@ class RunSession:
         self._cancel = cancel_event
         self._on_done = on_done
         self._root = prepared.workflow.root.resolve(strict=True)
+        self._evidence_identity = self._capture_evidence_identity()
         self._done = threading.Event()
+        self._root_released = threading.Event()
         self._result: RunManifest | None = None
+        self._workflow_finished = False
         self._terminal = False
         self._pending: PendingApproval | None = None
         self._generation = 0
@@ -56,6 +81,8 @@ class RunSession:
         )
 
     def cancellation_requested(self) -> bool:
+        if isinstance(self._cancel, _CancellationEvent):
+            return self._cancel.requested()
         return self._cancel.is_set()
 
     def start(self) -> RunSnapshot:
@@ -90,12 +117,25 @@ class RunSession:
 
     def request_cancel(self) -> bool:
         with self._operation_lock:
-            if self._terminal:
+            if (
+                self._terminal
+                or self._workflow_finished
+                or self.prepared.workflow.manifest.status is not RunStatus.RUNNING
+            ):
                 return False
             self._cancel.set()
+            if (
+                self.prepared.workflow.manifest.status is not RunStatus.RUNNING
+                and not self._cancellation_was_observed()
+            ):
+                self._cancel.clear()
+                return False
             self.approver.close()
             self._pending = None
             return True
+
+    def close(self) -> None:
+        self.approver.close()
 
     def wait_for_change(self) -> RunSnapshot:
         with self._wait_lock:
@@ -126,21 +166,87 @@ class RunSession:
     def is_done(self) -> bool:
         return self._done.is_set()
 
+    def read_report(self) -> str:
+        if not _SUPPORTS_SECURE_DIR_FD:
+            raise SessionError("secure report access is unavailable on this platform")
+        root_descriptor = -1
+        report_descriptor = -1
+        try:
+            inspected_root = os.stat(
+                self.prepared.store.root,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(inspected_root.st_mode):
+                raise SessionError("run evidence path is not a directory")
+            if _identity(inspected_root) != self._evidence_identity:
+                raise SessionError("run evidence directory changed after preparation")
+
+            root_descriptor = os.open(
+                self.prepared.store.root,
+                _read_flags(directory=True),
+            )
+            opened_root = os.fstat(root_descriptor)
+            if not stat.S_ISDIR(opened_root.st_mode):
+                raise SessionError("opened run evidence path is not a directory")
+            if _identity(opened_root) != _identity(inspected_root):
+                raise SessionError("run evidence directory changed while it was opened")
+
+            inspected_report = os.stat(
+                "report.md",
+                dir_fd=root_descriptor,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(inspected_report.st_mode):
+                raise SessionError("run report must be a regular file")
+            report_descriptor = os.open(
+                "report.md",
+                _read_flags(),
+                dir_fd=root_descriptor,
+            )
+            opened_report = os.fstat(report_descriptor)
+            if not stat.S_ISREG(opened_report.st_mode):
+                raise SessionError("opened run report is not a regular file")
+            if _identity(opened_report) != _identity(inspected_report):
+                raise SessionError("run report changed while it was opened")
+
+            with os.fdopen(
+                report_descriptor,
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                report_descriptor = -1
+                return handle.read(64_001)
+        except SessionError:
+            raise
+        except (OSError, UnicodeError) as error:
+            raise SessionError(f"run report is unavailable: {error}") from error
+        finally:
+            if report_descriptor >= 0:
+                os.close(report_descriptor)
+            if root_descriptor >= 0:
+                os.close(root_descriptor)
+
     def _run(self) -> None:
         result: RunManifest | None = None
         try:
             result = self.prepared.workflow.run()
         finally:
             with self._operation_lock:
-                self._result = result
-                self._terminal = True
+                self._workflow_finished = True
             try:
                 self._on_done(self.prepared.manifest.run_id, self._root)
             finally:
-                self._done.set()
+                self._root_released.set()
+                with self._operation_lock:
+                    self._result = result
+                    self._terminal = True
+                    self._done.set()
 
     def _snapshot(self) -> RunSnapshot:
         manifest = self._result or self.prepared.workflow.manifest
+        if manifest.status is not RunStatus.RUNNING and not self._root_released.is_set():
+            self._root_released.wait()
+            manifest = self._result or self.prepared.workflow.manifest
         pending = (
             self._pending.model_copy(deep=True) if self._pending is not None else None
         )
@@ -157,6 +263,18 @@ class RunSession:
             evidence_path=str(self.prepared.store.root),
             cancellation_requested=self.cancellation_requested(),
         )
+
+    def _capture_evidence_identity(self) -> tuple[int, int]:
+        try:
+            evidence = os.stat(self.prepared.store.root, follow_symlinks=False)
+        except OSError as error:
+            raise SessionError(f"run evidence directory is unavailable: {error}") from error
+        if not stat.S_ISDIR(evidence.st_mode):
+            raise SessionError("run evidence path is not a directory")
+        return _identity(evidence)
+
+    def _cancellation_was_observed(self) -> bool:
+        return isinstance(self._cancel, _CancellationEvent) and self._cancel.was_observed()
 
 
 class SessionManager:
@@ -192,7 +310,7 @@ class SessionManager:
         registered = False
         session: RunSession | None = None
         try:
-            cancel_event = threading.Event()
+            cancel_event = _CancellationEvent()
             prepared = self._builder(
                 RunOptions(
                     repository=root,
@@ -260,12 +378,7 @@ class SessionManager:
         if not session.is_done():
             raise SessionError("run is not terminal")
         snapshot = session.snapshot()
-        report_path = session.prepared.store.root / "report.md"
-        try:
-            with report_path.open(encoding="utf-8") as handle:
-                report = handle.read(64_001)
-        except OSError as error:
-            raise SessionError(f"run report is unavailable: {error}") from error
+        report = session.read_report()
         if len(report) > 64_000:
             raise SessionError("run report exceeds 64,000 characters")
         return RunReport(
@@ -282,6 +395,7 @@ class SessionManager:
             sessions = list(self._sessions.values())
         for session in sessions:
             session.request_cancel()
+            session.close()
         deadline = time.monotonic() + self._shutdown_timeout_seconds
         for session in sessions:
             session.join(deadline - time.monotonic())
@@ -299,3 +413,14 @@ class SessionManager:
         with self._lock:
             if self._active_roots.get(root) == run_id:
                 self._active_roots.pop(root, None)
+
+
+def _identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _read_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
