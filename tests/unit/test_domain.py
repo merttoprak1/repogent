@@ -36,6 +36,17 @@ def test_pending_approval_requires_sha256_digest() -> None:
     assert pending.schema_version == "1"
 
 
+@pytest.mark.parametrize("digest", ["A" * 64, "a" * 63, "g" * 64])
+def test_pending_approval_rejects_invalid_sha256_digests(digest: str) -> None:
+    with pytest.raises(ValidationError, match="digest"):
+        PendingApproval(
+            run_id="run-1",
+            kind=ApprovalKind.PLAN,
+            digest=digest,
+            artifact={"steps": []},
+        )
+
+
 def test_provider_call_evidence_requires_a_positive_invocation() -> None:
     evidence = ProviderCallEvidence(
         provider="codex-cli",

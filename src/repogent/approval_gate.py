@@ -17,19 +17,35 @@ class ApprovalGateError(RuntimeError):
 def approval_payload(
     kind: ApprovalKind, artifact: BaseModel | str
 ) -> dict[str, object] | str:
+    return _approval_payload_from_snapshot(kind, _artifact_snapshot(artifact))
+
+
+def _artifact_snapshot(artifact: BaseModel | str) -> dict[str, object] | str:
     if isinstance(artifact, BaseModel):
-        return artifact.model_dump(mode="json")
+        payload = artifact.model_dump(mode="json")
+        snapshot = json.loads(json.dumps(payload))
+        if not isinstance(snapshot, dict):
+            raise ApprovalGateError("approval artifact must serialize to an object")
+        return snapshot
     try:
         parsed = json.loads(artifact)
     except json.JSONDecodeError:
         return artifact
     if not isinstance(parsed, dict):
         return artifact
+    return parsed
+
+
+def _approval_payload_from_snapshot(
+    kind: ApprovalKind, payload: dict[str, object] | str
+) -> dict[str, object] | str:
+    if not isinstance(payload, dict):
+        return payload
     if kind is not ApprovalKind.PATCH:
-        return parsed
-    selected = parsed.get("selected_candidate")
-    selection = parsed.get("selection")
-    candidates = parsed.get("candidates", [])
+        return payload
+    selected = payload.get("selected_candidate")
+    selection = payload.get("selection")
+    candidates = payload.get("candidates", [])
     if not isinstance(selected, dict) or not isinstance(candidates, list):
         raise ApprovalGateError("patch approval artifact is malformed")
     summaries: list[dict[str, object]] = []
@@ -62,7 +78,12 @@ def approval_payload(
 
 
 def approval_digest(kind: ApprovalKind, artifact: BaseModel | str) -> str:
-    payload = approval_payload(kind, artifact)
+    return _approval_digest_from_payload(kind, approval_payload(kind, artifact))
+
+
+def _approval_digest_from_payload(
+    kind: ApprovalKind, payload: dict[str, object] | str
+) -> str:
     if kind is ApprovalKind.PATCH and isinstance(payload, dict):
         selected = payload.get("selected_candidate")
         if isinstance(selected, dict):
@@ -89,11 +110,13 @@ class GateApprover:
             return self._generation
 
     def decide(self, kind: ApprovalKind, artifact: BaseModel | str) -> ApprovalRecord:
+        snapshot = _artifact_snapshot(artifact)
+        payload = _approval_payload_from_snapshot(kind, snapshot)
         pending = PendingApproval(
             run_id=self.run_id,
             kind=kind,
-            digest=approval_digest(kind, artifact),
-            artifact=approval_payload(kind, artifact),
+            digest=_approval_digest_from_payload(kind, payload),
+            artifact=payload,
         )
         with self._condition:
             if self._closed:
@@ -121,11 +144,15 @@ class GateApprover:
     ) -> tuple[int, PendingApproval | None]:
         deadline = time.monotonic() + timeout_seconds
         with self._condition:
+            if self._closed:
+                return self._generation, None
             while self._generation <= after_generation and not self._closed:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return self._generation, None
                 self._condition.wait(remaining)
+            if self._closed:
+                return self._generation, None
             return self._generation, self._pending
 
     def submit(
@@ -136,6 +163,8 @@ class GateApprover:
         feedback: str | None,
     ) -> None:
         with self._condition:
+            if self._closed:
+                raise ApprovalGateError("approval gate is closed")
             pending = self._pending
             if pending is None:
                 raise ApprovalGateError("no approval is pending")
@@ -153,4 +182,10 @@ class GateApprover:
     def close(self) -> None:
         with self._condition:
             self._closed = True
+            if self._pending is not None:
+                self._decision = ApprovalRecord(
+                    kind=self._pending.kind,
+                    decision=Decision.REJECTED,
+                    feedback="run session closed",
+                )
             self._condition.notify_all()
