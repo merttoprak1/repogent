@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from pydantic import BaseModel
 
 from repogent.approval_gate import (
     ApprovalGateError,
@@ -128,3 +129,88 @@ def test_patch_payload_retains_diff_and_redacts_validation_output() -> None:
     assert "secret" not in serialized
     assert "error" not in serialized
     assert "pytest" not in serialized
+
+
+def test_close_is_terminal_and_cannot_be_overridden_by_a_matching_submit() -> None:
+    approver = GateApprover("run-1")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(approver.decide, ApprovalKind.PLAN, '{"steps": []}')
+        _, pending = approver.wait(after_generation=0, timeout_seconds=1)
+        assert pending is not None
+        approver.close()
+        with pytest.raises(ApprovalGateError, match="closed"):
+            approver.submit(ApprovalKind.PLAN, pending.digest, Decision.APPROVED, None)
+        assert future.result(timeout=1).decision is Decision.REJECTED
+
+
+def test_closed_wait_does_not_replay_the_current_pending_gate() -> None:
+    approver = GateApprover("run-1")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(approver.decide, ApprovalKind.PLAN, '{"steps": []}')
+        generation, pending = approver.wait(after_generation=0, timeout_seconds=1)
+        assert pending is not None
+        approver.close()
+        assert approver.wait(after_generation=generation, timeout_seconds=1) == (
+            generation,
+            None,
+        )
+        assert future.result(timeout=1).decision is Decision.REJECTED
+
+
+class PatchArtifact(BaseModel):
+    selected_candidate: dict[str, object]
+    selection: dict[str, object]
+    candidates: list[dict[str, object]]
+
+
+def test_model_patch_payload_redacts_validation_output() -> None:
+    artifact = PatchArtifact(
+        selected_candidate={"proposal": {"diff": "patch-body"}},
+        selection={"selected_candidate_id": "candidate-1"},
+        candidates=[
+            {
+                "candidate": {"candidate_id": "candidate-1"},
+                "evidence": {
+                    "eligible": True,
+                    "validation": {
+                        "checks": [
+                            {
+                                "argv": ["pytest"],
+                                "stdout": "secret",
+                                "stderr": "error",
+                            }
+                        ]
+                    },
+                },
+            }
+        ],
+    )
+
+    serialized = str(approval_payload(ApprovalKind.PATCH, artifact))
+    assert "secret" not in serialized
+    assert "error" not in serialized
+    assert "pytest" not in serialized
+
+
+class DriftingArtifact(BaseModel):
+    value: str = "before"
+
+    def model_dump(self, **kwargs: object) -> dict[str, object]:
+        payload = super().model_dump(**kwargs)
+        self.value = "after"
+        return payload
+
+
+def test_gate_binds_digest_and_display_to_one_detached_snapshot() -> None:
+    approver = GateApprover("run-1")
+    artifact = DriftingArtifact()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(approver.decide, ApprovalKind.REQUIREMENTS, artifact)
+        _, pending = approver.wait(after_generation=0, timeout_seconds=1)
+        assert pending is not None
+        approver.close()
+        assert future.result(timeout=1).decision is Decision.REJECTED
+        assert pending.artifact == {"value": "before"}
+        assert pending.digest == approval_digest(
+            ApprovalKind.REQUIREMENTS, '{"value":"before"}'
+        )
