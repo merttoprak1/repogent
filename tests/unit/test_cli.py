@@ -6,12 +6,92 @@ import pytest
 from openai import OpenAIError
 from typer.testing import CliRunner
 
-from repogent import cli
+from repogent import cli, run_builder
 from repogent.cli import app
-from repogent.domain import ProviderReadiness, RunStatus
+from repogent.domain import EventKind, ProviderReadiness, RunEvent, RunStage, RunStatus
 from repogent.preflight import PreflightReport
+from repogent.run_builder import RunOptions
 
 runner = CliRunner()
+
+
+def test_run_delegates_construction_to_shared_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+    captured: dict[str, object] = {}
+    durable_events: list[RunEvent] = []
+
+    class FakeWorkflow:
+        def __init__(self, events: object) -> None:
+            self.events = events
+
+        def run(self) -> object:
+            self.events.emit(
+                RunEvent(
+                    run_id="run-test",
+                    sequence=1,
+                    kind=EventKind.WARNING,
+                    stage=RunStage.CREATED.value,
+                    message="builder event",
+                )
+            )
+            return type(
+                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
+            )()
+
+    class FakeStore:
+        root = evidence / "run-test"
+        secrets: list[str] = []
+
+        def event_store(self) -> object:
+            return type(
+                "Sink",
+                (),
+                {"emit": lambda _self, event: durable_events.append(event)},
+            )()
+
+    def fake_build_run(
+        options: RunOptions,
+        approver_factory: object,
+        *,
+        events: object,
+    ) -> object:
+        captured["options"] = options
+        captured["approver_factory"] = approver_factory
+        captured["events"] = events
+        return type(
+            "Prepared", (), {"workflow": FakeWorkflow(events), "store": FakeStore()}
+        )()
+
+    monkeypatch.setattr(cli, "build_run", fake_build_run, raising=False)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["options"] == RunOptions(
+        repository=target.resolve(),
+        request="change",
+        executor="local",
+        output_dir=evidence,
+    )
+    assert [event.message for event in durable_events] == ["builder event"]
+    assert "[warning] builder event" in result.output
 
 
 def test_analyze_prints_inventory_and_ranked_localization(tmp_path: Path) -> None:
@@ -205,11 +285,11 @@ def test_run_constructs_ready_codex_after_preflight_and_records_default_model(
         captured["fingerprint"] = (provider, model, executor, commands)
         return "fingerprint"
 
-    monkeypatch.setattr(cli, "CodexCliProvider", ReadyCodex, raising=False)
-    monkeypatch.setattr(cli, "Preflight", lambda *_args: PassingPreflight())
-    monkeypatch.setattr(cli, "configuration_fingerprint", record_fingerprint)
-    monkeypatch.setattr(cli.RoleSet, "from_provider", lambda provider: provider)
-    monkeypatch.setattr(cli, "Workflow", FakeWorkflow)
+    monkeypatch.setattr(run_builder, "CodexCliProvider", ReadyCodex)
+    monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(run_builder, "configuration_fingerprint", record_fingerprint)
+    monkeypatch.setattr(run_builder.RoleSet, "from_provider", lambda provider: provider)
+    monkeypatch.setattr(run_builder, "Workflow", FakeWorkflow)
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(
@@ -273,9 +353,9 @@ def test_run_terminalizes_not_ready_codex_without_constructing_workflow(
     def workflow_must_not_be_constructed(**_kwargs: object) -> object:
         raise AssertionError("Workflow must not be constructed when Codex is not ready")
 
-    monkeypatch.setattr(cli, "CodexCliProvider", NotReadyCodex, raising=False)
-    monkeypatch.setattr(cli, "Preflight", lambda *_args: PassingPreflight())
-    monkeypatch.setattr(cli, "Workflow", workflow_must_not_be_constructed)
+    monkeypatch.setattr(run_builder, "CodexCliProvider", NotReadyCodex)
+    monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(run_builder, "Workflow", workflow_must_not_be_constructed)
 
     result = runner.invoke(
         app,
@@ -380,9 +460,9 @@ def test_run_uses_external_default_evidence_directory(
                 {"run_id": "run-test", "status": RunStatus.COMPLETED},
             )()
 
-    monkeypatch.setattr(cli.ArtifactStore, "create", fake_create)
+    monkeypatch.setattr(run_builder.ArtifactStore, "create", fake_create)
     monkeypatch.setattr(
-        cli,
+        run_builder,
         "Preflight",
         lambda *_args: type(
             "Ready",
@@ -410,10 +490,10 @@ def test_run_uses_external_default_evidence_directory(
         captured["fingerprint"] = (provider, model, executor, commands)
         return "fingerprint"
 
-    monkeypatch.setattr(cli, "OpenAIProvider", fake_openai_provider)
-    monkeypatch.setattr(cli, "configuration_fingerprint", record_fingerprint)
-    monkeypatch.setattr(cli.RoleSet, "from_provider", lambda _provider: object())
-    monkeypatch.setattr(cli, "Workflow", FakeWorkflow)
+    monkeypatch.setattr(run_builder, "OpenAIProvider", fake_openai_provider)
+    monkeypatch.setattr(run_builder, "configuration_fingerprint", record_fingerprint)
+    monkeypatch.setattr(run_builder.RoleSet, "from_provider", lambda _provider: object())
+    monkeypatch.setattr(run_builder, "Workflow", FakeWorkflow)
 
     result = runner.invoke(app, ["run", "--repository", ".", "--request", "change"])
 
@@ -453,10 +533,12 @@ def test_run_fingerprints_scripted_provider_with_scripted_model(
         captured["fingerprint"] = (provider, model, executor, commands)
         return "fingerprint"
 
-    monkeypatch.setattr(cli, "Preflight", lambda *_args: PassingPreflight())
-    monkeypatch.setattr(cli, "configuration_fingerprint", record_fingerprint)
-    monkeypatch.setattr(cli, "RoleSet", type("Roles", (), {"from_provider": lambda _: object()}))
-    monkeypatch.setattr(cli, "Workflow", FakeWorkflow)
+    monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(run_builder, "configuration_fingerprint", record_fingerprint)
+    monkeypatch.setattr(
+        run_builder, "RoleSet", type("Roles", (), {"from_provider": lambda _: object()})
+    )
+    monkeypatch.setattr(run_builder, "Workflow", FakeWorkflow)
 
     result = runner.invoke(
         app,
@@ -489,9 +571,9 @@ def test_run_stores_failed_preflight_before_constructing_provider(
     def provider_must_not_be_constructed(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("provider must not be constructed after failed preflight")
 
-    monkeypatch.setattr(cli, "OpenAIProvider", provider_must_not_be_constructed)
+    monkeypatch.setattr(run_builder, "OpenAIProvider", provider_must_not_be_constructed)
     monkeypatch.setattr(
-        cli,
+        run_builder,
         "DockerExecutor",
         lambda: type(
             "Unavailable",
@@ -536,8 +618,10 @@ def test_run_blocks_required_missing_pytest_before_provider_construction(
     def provider_must_not_be_constructed(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("provider construction must be blocked by preflight")
 
-    monkeypatch.setattr(cli, "LocalExecutor", lambda **_kwargs: MissingPytestExecutor())
-    monkeypatch.setattr(cli, "OpenAIProvider", provider_must_not_be_constructed)
+    monkeypatch.setattr(
+        run_builder, "LocalExecutor", lambda **_kwargs: MissingPytestExecutor()
+    )
+    monkeypatch.setattr(run_builder, "OpenAIProvider", provider_must_not_be_constructed)
 
     result = runner.invoke(
         app,
@@ -570,7 +654,7 @@ def test_run_terminalizes_keyboard_interrupt_after_store_initialization(
     def interrupt_policy(*_args: object, **_kwargs: object) -> object:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.ValidationPolicy, "commands", interrupt_policy)
+    monkeypatch.setattr(run_builder.ValidationPolicy, "commands", interrupt_policy)
 
     result = runner.invoke(
         app,
@@ -606,7 +690,7 @@ def test_run_terminalizes_unexpected_openai_initialization_failure(
     def fail_provider(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("provider configuration invalid")
 
-    monkeypatch.setattr(cli, "OpenAIProvider", fail_provider)
+    monkeypatch.setattr(run_builder, "OpenAIProvider", fail_provider)
 
     result = runner.invoke(
         app,
@@ -662,7 +746,7 @@ def test_run_reports_openai_provider_load_error_without_traceback(
     def fail_to_load_openai_provider(*_args: object, **_kwargs: object) -> object:
         raise OpenAIError("missing credentials")
 
-    monkeypatch.setattr(cli, "OpenAIProvider", fail_to_load_openai_provider)
+    monkeypatch.setattr(run_builder, "OpenAIProvider", fail_to_load_openai_provider)
 
     result = runner.invoke(
         app,
@@ -727,7 +811,9 @@ def test_run_rejects_filesystem_root_before_creating_artifacts(
     def artifact_creation_must_not_run(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("artifact creation must not run for filesystem root")
 
-    monkeypatch.setattr(cli.ArtifactStore, "create", artifact_creation_must_not_run)
+    monkeypatch.setattr(
+        run_builder.ArtifactStore, "create", artifact_creation_must_not_run
+    )
 
     result = runner.invoke(
         app,
