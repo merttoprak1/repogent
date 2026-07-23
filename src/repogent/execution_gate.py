@@ -15,7 +15,11 @@ from repogent.executor_selection import (
     PreparedExecutor,
     validate_executor_isolation,
 )
-from repogent.mcp_models import ExecutionDecision, PendingExecutionChoice
+from repogent.mcp_models import (
+    ExecutionDecision,
+    ExecutorAvailability,
+    PendingExecutionChoice,
+)
 from repogent.sanitization import sanitize_data
 from repogent.workflow import ExecutorSelectionRejected, WorkflowCancelled
 
@@ -44,6 +48,7 @@ class GateExecutorSelector:
         self._prepared: PreparedExecutor | None = None
         self._rejection: str | None = None
         self._closed = False
+        self._active_selections = 0
 
     def select(
         self,
@@ -51,12 +56,29 @@ class GateExecutorSelector:
         *,
         timeout_seconds: float,
     ) -> PreparedExecutor:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        with self._condition:
+            if self._closed:
+                raise WorkflowCancelled("executor selection gate is closed")
+            self._active_selections += 1
+        try:
+            return self._select(preview, deadline)
+        finally:
+            with self._condition:
+                self._active_selections -= 1
+                self._condition.notify_all()
+
+    def _select(
+        self,
+        preview: PatchPreview,
+        deadline: float,
+    ) -> PreparedExecutor:
         preview_payload = preview.model_dump(mode="json")
         sanitized = sanitize_data(preview_payload)
         if not isinstance(sanitized, dict) or sanitized != preview_payload:
             raise ExecutionGateError("patch preview is unsafe to display")
         digest = patch_preview_digest(preview)
-        availability = self._registry.inspect_availability(self._root, self._policy)
+        availability = self._inspect_availability(deadline)
         base_options = self._registry.build_options(
             self.run_id, digest, availability
         )
@@ -66,10 +88,11 @@ class GateExecutorSelector:
             != {ExecutionMode.DOCKER, ExecutionMode.LOCAL}
         ):
             raise ExecutionGateError("executor registry must provide exactly two options")
-        deadline = time.monotonic() + max(0.0, timeout_seconds)
         with self._condition:
             if self._closed:
                 raise WorkflowCancelled("executor selection gate is closed")
+            if time.monotonic() >= deadline:
+                raise ExecutorSelectionRejected("executor selection timed out")
             if self._pending is not None:
                 raise ExecutionGateError("another executor selection is already pending")
             generation = self._generation + 1
@@ -120,7 +143,7 @@ class GateExecutorSelector:
             self._condition.notify_all()
             return prepared
 
-    def submit(self, decision: ExecutionDecision) -> None:
+    def submit(self, decision: ExecutionDecision) -> int:
         with self._condition:
             if self._closed:
                 raise ExecutionGateError("executor selection gate is closed")
@@ -157,7 +180,7 @@ class GateExecutorSelector:
             if decision.decision is not Decision.APPROVED:
                 self._rejection = "executor selection rejected"
                 self._condition.notify_all()
-                return
+                return generation
             self._preparing_generation = generation
         try:
             prepared = self._registry.prepare(
@@ -193,6 +216,7 @@ class GateExecutorSelector:
             self._preparing_generation = None
             self._prepared = prepared
             self._condition.notify_all()
+            return generation
 
     def wait(
         self,
@@ -204,7 +228,16 @@ class GateExecutorSelector:
         with self._condition:
             if self._closed:
                 return self._generation, None
-            while self._generation <= after_generation and not self._closed:
+            while (
+                (
+                    self._generation <= after_generation
+                    or (
+                        self._pending is None
+                        and self._active_selections > 0
+                    )
+                )
+                and not self._closed
+            ):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return self._generation, None
@@ -242,6 +275,66 @@ class GateExecutorSelector:
             if self._preparing_generation == generation:
                 self._preparing_generation = None
                 self._condition.notify_all()
+
+    def _inspect_availability(
+        self, deadline: float
+    ) -> list[ExecutorAvailability]:
+        result: list[ExecutorAvailability] | None = None
+        error: BaseException | None = None
+        finished = False
+        abandoned = False
+
+        def inspect() -> None:
+            nonlocal abandoned, error, finished, result
+            try:
+                inspected = self._registry.inspect_availability(
+                    self._root, self._policy
+                )
+            except BaseException as inspection_error:
+                inspected = None
+                captured_error: BaseException | None = inspection_error
+            else:
+                captured_error = None
+            with self._condition:
+                if abandoned or self._closed:
+                    return
+                result = inspected
+                error = captured_error
+                finished = True
+                self._condition.notify_all()
+
+        with self._condition:
+            if self._closed:
+                raise WorkflowCancelled("executor selection gate is closed")
+            if time.monotonic() >= deadline:
+                raise ExecutorSelectionRejected("executor selection timed out")
+            worker = threading.Thread(
+                target=inspect,
+                name=f"repogent-executor-inspection-{self.run_id}",
+                daemon=True,
+            )
+            worker.start()
+            while not finished and not self._closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    abandoned = True
+                    raise ExecutorSelectionRejected("executor selection timed out")
+                self._condition.wait(remaining)
+            if self._closed:
+                abandoned = True
+                raise WorkflowCancelled("executor selection gate is closed")
+            if time.monotonic() >= deadline:
+                abandoned = True
+                raise ExecutorSelectionRejected("executor selection timed out")
+            if error is not None:
+                raise ExecutionGateError(
+                    "executor availability inspection failed"
+                ) from error
+            if result is None:
+                raise ExecutionGateError(
+                    "executor availability inspection did not complete"
+                )
+            return result
 
 
 def _generation_option_digest(option_digest: str, generation: int) -> str:
