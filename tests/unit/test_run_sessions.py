@@ -64,6 +64,10 @@ VALID_PATCH_OUTPUT = {
     "acceptance_criteria_addressed": ["tests pass"],
     "focused_tests": ["pytest"],
 }
+REPAIR_PATCH_OUTPUT = {
+    **VALID_PATCH_OUTPUT,
+    "summary": "Repair value change",
+}
 
 
 class PassingValidator:
@@ -73,6 +77,16 @@ class PassingValidator:
         del root, timeout_seconds
         return ValidationReport(
             checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
+        )
+
+
+class FailingValidator:
+    def run(
+        self, root: Path, *, timeout_seconds: float | None = None
+    ) -> ValidationReport:
+        del root, timeout_seconds
+        return ValidationReport(
+            checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.FAILED)]
         )
 
 
@@ -159,6 +173,39 @@ class BlockingSessionRegistry(SessionRegistry):
         return super().prepare(root, mode, policy)
 
 
+class RepairingSessionRegistry(SessionRegistry):
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        prepared = super().prepare(root, mode, policy)
+        if len(self.prepare_calls) != 1:
+            return prepared
+        return PreparedExecutor(
+            mode=prepared.mode,
+            isolation_level=prepared.isolation_level,
+            preflight=prepared.preflight,
+            validator=FailingValidator(),  # type: ignore[arg-type]
+        )
+
+
+class BlockingInspectionSessionRegistry(SessionRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inspect_entered = threading.Event()
+        self.release_inspect = threading.Event()
+        self.inspect_finished = threading.Event()
+
+    def inspect_availability(
+        self, root: Path, policy: ValidationPolicy
+    ) -> list[ExecutorAvailability]:
+        self.inspect_entered.set()
+        try:
+            assert self.release_inspect.wait(timeout=5)
+            return super().inspect_availability(root, policy)
+        finally:
+            self.inspect_finished.set()
+
+
 class BlockingInspector:
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -218,7 +265,12 @@ def make_builder(
             manifest=manifest,
             roles=RoleSet.from_provider(
                 ScriptedProvider(
-                    [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT]
+                    [
+                        REQUIREMENTS_OUTPUT,
+                        PLAN_OUTPUT,
+                        VALID_PATCH_OUTPUT,
+                        REPAIR_PATCH_OUTPUT,
+                    ]
                 )
             ),
             approver=approver,
@@ -395,6 +447,85 @@ def test_get_remains_available_while_executor_prepare_is_blocked(
     assert len(selection_results) == 1
 
 
+def test_old_submit_cannot_erase_cached_newer_execution_choice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = RepairingSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path, registry=registry
+    )
+    session = manager._sessions[snapshot.run_id]
+    gate = session.executor_gate
+    assert gate is not None
+    submit_returned = threading.Event()
+    allow_submit_return = threading.Event()
+    original_submit = gate.submit
+
+    def paused_submit(decision: ExecutionDecision):
+        receipt = original_submit(decision)
+        submit_returned.set()
+        assert allow_submit_return.wait(timeout=5)
+        return receipt
+
+    wait_entered = threading.Event()
+    resume_wait = threading.Event()
+    original_wait = session.wait_for_change
+
+    def paused_wait_for_change():
+        wait_entered.set()
+        assert resume_wait.wait(timeout=5)
+        return original_wait()
+
+    monkeypatch.setattr(gate, "submit", paused_submit)
+    monkeypatch.setattr(session, "wait_for_change", paused_wait_for_change)
+    selection_results: list[object] = []
+    selection_errors: list[BaseException] = []
+
+    def select_executor() -> None:
+        try:
+            selection_results.append(
+                manager.select_executor(execution_decision_for(snapshot))
+            )
+        except BaseException as error:
+            selection_errors.append(error)
+
+    selector = threading.Thread(target=select_executor)
+    selector.start()
+    try:
+        assert submit_returned.wait(timeout=1)
+        generation = session._execution_generation
+        deadline = time.monotonic() + 2
+        newer_pending = None
+        while newer_pending is None:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0
+            generation, newer_pending = gate.wait(
+                after_generation=generation,
+                timeout_seconds=remaining,
+            )
+        cached = manager.get(snapshot.run_id)
+        assert cached.pending_execution == newer_pending
+
+        allow_submit_return.set()
+        assert wait_entered.wait(timeout=1)
+
+        recovered = manager.get(snapshot.run_id)
+        assert recovered.pending_execution == newer_pending
+    finally:
+        allow_submit_return.set()
+        resume_wait.set()
+        monkeypatch.setattr(gate, "submit", original_submit)
+        monkeypatch.setattr(session, "wait_for_change", original_wait)
+        if not session.is_done():
+            manager.cancel(snapshot.run_id)
+        selector.join(timeout=2)
+        manager.shutdown()
+    assert not selector.is_alive()
+    assert selection_errors == []
+    assert len(selection_results) == 1
+
+
 def test_cancel_wins_while_executor_prepare_is_blocked(tmp_path: Path) -> None:
     registry = BlockingSessionRegistry()
     manager, _request, snapshot = deferred_manager_waiting_for_executor(
@@ -465,6 +596,63 @@ def test_executor_timeout_terminal_snapshot_clears_pending_choice(
         assert terminal.pending_execution is None
     finally:
         manager.shutdown()
+
+
+def test_cancel_terminalizes_while_availability_inspection_is_blocked(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    registry = BlockingInspectionSessionRegistry()
+    manager = SessionManager(
+        builder=make_builder(),
+        executor_registry=registry,  # type: ignore[arg-type]
+    )
+    snapshot = manager.start(deferred_request(target, tmp_path / "runs"))
+    snapshot = manager.decide(decision_for(snapshot))
+    assert snapshot.pending_approval is not None
+    assert snapshot.pending_approval.kind is ApprovalKind.PLAN
+    planner_results: list[object] = []
+    planner_errors: list[BaseException] = []
+
+    def approve_plan() -> None:
+        try:
+            planner_results.append(manager.decide(decision_for(snapshot)))
+        except BaseException as error:
+            planner_errors.append(error)
+
+    planner = threading.Thread(target=approve_plan)
+    planner.start()
+    cancellation_results: list[object] = []
+    cancellation_errors: list[BaseException] = []
+
+    def cancel() -> None:
+        try:
+            cancellation_results.append(manager.cancel(snapshot.run_id))
+        except BaseException as error:
+            cancellation_errors.append(error)
+
+    canceller = threading.Thread(target=cancel)
+    try:
+        assert registry.inspect_entered.wait(timeout=1)
+        canceller.start()
+        canceller.join(timeout=0.5)
+        assert not canceller.is_alive()
+        assert cancellation_errors == []
+        assert len(cancellation_results) == 1
+        terminal = cancellation_results[0]
+        assert terminal.status is RunStatus.CANCELLED  # type: ignore[union-attr]
+        assert terminal.pending_approval is None  # type: ignore[union-attr]
+        assert terminal.pending_execution is None  # type: ignore[union-attr]
+        assert not registry.inspect_finished.is_set()
+    finally:
+        registry.release_inspect.set()
+        assert registry.inspect_finished.wait(timeout=1)
+        planner.join(timeout=2)
+        canceller.join(timeout=1)
+        manager.shutdown()
+    assert not planner.is_alive()
+    assert planner_errors == []
+    assert len(planner_results) == 1
 
 
 def test_get_reconciles_pending_execution_after_caller_disconnect(

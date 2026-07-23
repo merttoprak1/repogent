@@ -162,6 +162,26 @@ class OverlappingPrepareRegistry(RecordingRegistry):
         return super().prepare(root, mode, policy)
 
 
+class BlockingInspectionRegistry(RecordingRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inspect_entered = threading.Event()
+        self.release_inspect = threading.Event()
+        self.inspect_finished = threading.Event()
+        self.inspection_daemon: bool | None = None
+
+    def inspect_availability(
+        self, root: Path, policy: ValidationPolicy
+    ) -> list[ExecutorAvailability]:
+        self.inspection_daemon = threading.current_thread().daemon
+        self.inspect_entered.set()
+        try:
+            assert self.release_inspect.wait(timeout=5)
+            return super().inspect_availability(root, policy)
+        finally:
+            self.inspect_finished.set()
+
+
 def preview(*, replacement: str = "value = 2") -> PatchPreview:
     diff = (
         "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n"
@@ -609,3 +629,51 @@ def test_timeout_advances_generation_to_publish_pending_removal(
     assert removed is None
     worker.join(timeout=1)
     assert not worker.is_alive()
+
+
+def test_close_cancels_selection_while_availability_inspection_is_blocked(
+    tmp_path: Path,
+) -> None:
+    registry = BlockingInspectionRegistry()
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), registry)
+    worker, outcome = start_selection(gate, preview())
+    try:
+        assert registry.inspect_entered.wait(timeout=1)
+
+        gate.close()
+
+        with pytest.raises(WorkflowCancelled, match="closed"):
+            outcome.result(timeout=0.2)
+        assert registry.inspection_daemon is True
+        assert not registry.inspect_finished.is_set()
+    finally:
+        registry.release_inspect.set()
+        assert registry.inspect_finished.wait(timeout=1)
+        worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert gate.wait(after_generation=0, timeout_seconds=0) == (0, None)
+
+
+def test_selection_timeout_includes_blocked_availability_inspection(
+    tmp_path: Path,
+) -> None:
+    registry = BlockingInspectionRegistry()
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), registry)
+    worker, outcome = start_selection(
+        gate,
+        preview(),
+        timeout_seconds=0.1,
+    )
+    try:
+        assert registry.inspect_entered.wait(timeout=1)
+
+        with pytest.raises(ExecutorSelectionRejected, match="timed out"):
+            outcome.result(timeout=0.5)
+        assert not registry.inspect_finished.is_set()
+        assert gate.wait(after_generation=0, timeout_seconds=0) == (0, None)
+    finally:
+        registry.release_inspect.set()
+        assert registry.inspect_finished.wait(timeout=1)
+        worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert gate.wait(after_generation=0, timeout_seconds=0) == (0, None)

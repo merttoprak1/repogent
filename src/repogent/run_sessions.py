@@ -146,11 +146,12 @@ class RunSession:
                 raise SessionError("no executor selection is pending")
             executor_gate = self.executor_gate
         try:
-            executor_gate.submit(decision)
+            submitted_generation = executor_gate.submit(decision)
         except ExecutionGateError as error:
             raise SessionError(str(error)) from error
         with self._operation_lock:
-            self._pending_execution = None
+            if self._execution_generation == submitted_generation:
+                self._pending_execution = None
         return self.wait_for_change()
 
     def cancel(self) -> RunSnapshot:
