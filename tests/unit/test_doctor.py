@@ -7,7 +7,7 @@ import pytest
 
 from repogent import doctor, preflight
 from repogent.doctor import DoctorService
-from repogent.domain import ProviderReadiness
+from repogent.domain import ExecutionMode, ProviderReadiness
 from repogent.mcp_models import DoctorRequest
 
 
@@ -17,6 +17,42 @@ class ReadyExecutor:
 
     def available(self, _command: object) -> bool:
         return True
+
+
+def make_repository(tmp_path: Path) -> Path:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    return repository
+
+
+def test_deferred_doctor_is_ready_without_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = make_repository(tmp_path)
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: None)
+
+    report = DoctorService().run(
+        DoctorRequest(repository=repository, provider="scripted", executor="deferred")
+    )
+
+    assert report.ready is True
+    docker = next(item for item in report.executors if item.mode is ExecutionMode.DOCKER)
+    assert docker.available is False
+    assert docker.remediation == "Install Docker and ensure docker is on PATH"
+    assert all(not hasattr(item, "option_digest") for item in report.executors)
+
+
+def test_explicit_docker_doctor_keeps_fail_closed_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = make_repository(tmp_path)
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: None)
+
+    report = DoctorService().run(
+        DoctorRequest(repository=repository, provider="scripted", executor="docker")
+    )
+
+    assert report.ready is False
 
 
 def test_doctor_reports_ready_local_repository(

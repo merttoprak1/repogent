@@ -45,6 +45,12 @@ Run the deterministic project gate with `make verify`. Docker is optional for de
 
 ## Use Repogent from Codex
 
+**Docker recommended for isolated verification, not required for patch preview.**
+The Codex plugin starts every run with a deferred executor: base readiness — the
+repository, provider, and validation commands — gates requirements, the plan, and
+an unvalidated patch preview, so you can review the exact diff even on a machine
+without Docker.
+
 After adding the marketplace, open the Codex Plugin Directory, install
 **Repogent**, and start a new task so its skill and local MCP server are loaded.
 Invoke it explicitly with `@Repogent`, for example:
@@ -54,22 +60,28 @@ Invoke it explicitly with `@Repogent`, for example:
 requirements, plan, and exact patch before changing anything.
 ```
 
-You can also ask naturally for a safe, independently validated,
-evidence-backed Python change with approval before apply. Repogent first runs
-`repogent_doctor`, then conducts the workflow in chat. Requirements, the plan,
-and the exact patch each require a separate explicit approval bound to the
-displayed digest. The patch is not applied until the third approval.
+You can also ask naturally for a safe, independently validated, evidence-backed
+Python change with approval before apply. Repogent first runs `repogent_doctor`
+with a deferred executor, then conducts the workflow in chat. Requirements, the
+plan, and the final exact patch each require a separate explicit approval bound
+to the displayed digest.
 
-Docker is the default execution boundary. If Docker, the fixed validator image,
-the provider, or a required command is unavailable, Repogent stops and presents
-the remediation reported by `repogent_doctor`; it does not silently switch to
-host execution. Terminal results include checkout state, final validation, and
-the local evidence directory containing `run.json`, `events.jsonl`, and
-`report.md` (by default beside the target at `.repogent/runs/run-<id>/`).
+After the plan is approved, the run pauses at an `UNVALIDATED` preview and asks
+you to choose how to validate it. Choosing Docker keeps the isolated boundary and
+can report `ISOLATED VERIFIED` once the required checks pass. Choosing local needs
+an explicit, current-digest acceptance of reduced isolation and always reports
+`REDUCED ISOLATION`. Executor selection is a separate digest-bound decision, never
+a fourth approval; Repogent never silently falls back from Docker to local and
+never runs target-repository code before you select an executor. The patch is not
+applied until the final exact-patch approval. Terminal results include checkout
+state, final validation, the trust label, and the local evidence directory
+containing `run.json`, `events.jsonl`, and `report.md` (by default beside the
+target at `.repogent/runs/run-<id>/`).
 
-The plugin is the chat-facing adapter. The existing standalone
-`repogent analyze` and `repogent run` commands remain available for terminal
-workflows and automation.
+The plugin is the chat-facing adapter. The existing standalone `repogent analyze`
+and `repogent run` commands remain available for terminal workflows and
+automation; the CLI still defaults to Docker and supports an explicit
+`--executor local`.
 
 ## Analyze a repository
 

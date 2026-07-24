@@ -16,10 +16,16 @@ from repogent.agents import RoleSet
 from repogent.approvals import Approver
 from repogent.artifacts import ArtifactStore
 from repogent.candidates import (
+    CandidateEvaluationError,
     CandidateEvaluator,
     CandidatePolicy,
     CandidateSelector,
     ExpansionReason,
+    PatchPreview,
+    PatchPreviewer,
+    RepositoryIntegritySnapshot,
+    ensure_exact_diff_safe,
+    patch_preview_digest,
 )
 from repogent.domain import (
     ApprovalKind,
@@ -32,8 +38,10 @@ from repogent.domain import (
     CheckStatus,
     Decision,
     EventKind,
+    ExecutionMode,
     FinalValidationStatus,
     ImplementationPlan,
+    IsolationLevel,
     MergeRecommendation,
     ProviderCallEvidence,
     ProviderUsage,
@@ -44,11 +52,18 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    VerificationStatus,
     utc_now,
 )
 from repogent.events import EventSink
+from repogent.executor_selection import (
+    FixedExecutorSelector,
+    PreparedExecutor,
+    validate_executor_isolation,
+)
 from repogent.localization import LocalizationReport, PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
+from repogent.preflight import PreflightReport
 from repogent.provider_context import ProviderContextBuilder
 from repogent.providers import ProviderError
 from repogent.reporting import render_report
@@ -68,6 +83,19 @@ class WorkflowCancelled(RuntimeError):
     pass
 
 
+class ExecutorSelectionRejected(RuntimeError):
+    pass
+
+
+class ExecutorSelector(Protocol):
+    def select(
+        self,
+        preview: PatchPreview,
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor: ...
+
+
 class Validator(Protocol):
     def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport: ...
 
@@ -78,7 +106,10 @@ LEGAL_TRANSITIONS: dict[RunStage, set[RunStage]] = {
     RunStage.REQUIREMENTS: {RunStage.REQUIREMENTS_APPROVED},
     RunStage.REQUIREMENTS_APPROVED: {RunStage.PLANNED},
     RunStage.PLANNED: {RunStage.PLAN_APPROVED},
-    RunStage.PLAN_APPROVED: {RunStage.PATCH_PROPOSED},
+    RunStage.PLAN_APPROVED: {RunStage.PATCH_PREVIEWED},
+    RunStage.PATCH_PREVIEWED: {RunStage.EXECUTOR_SELECTED},
+    RunStage.EXECUTOR_SELECTED: {RunStage.VALIDATING},
+    RunStage.VALIDATING: {RunStage.PATCH_PREVIEWED, RunStage.PATCH_PROPOSED},
     RunStage.PATCH_PROPOSED: {RunStage.PATCH_APPROVED},
     RunStage.PATCH_APPROVED: {RunStage.PATCH_APPLIED},
     RunStage.PATCH_APPLIED: {RunStage.VALIDATED},
@@ -104,10 +135,12 @@ class Workflow:
     approver: Approver
     patch_policy: PatchPolicy
     patch_applier: PatchApplier
-    validator: Validator
     artifacts: ArtifactStore
     inspector: RepositoryInspector
     budget: Budget
+    validator: Validator | None = None
+    executor_selector: ExecutorSelector | None = None
+    previewer: PatchPreviewer | None = None
     # Kept optional for the two public constructors from v0.1 while v0.2 callers
     # should provide the explicit Phase 2 collaborators.
     retriever: LexicalRetriever | None = None
@@ -132,13 +165,46 @@ class Workflow:
     elapsed_seconds: float = field(default=0, init=False)
     _sequence: int = field(default=0, init=False)
     _event_failed: bool = field(default=False, init=False)
+    _legacy_validator_selector: bool = field(default=False, init=False)
+    _candidate_evaluators: dict[str, CandidateEvaluator] = field(
+        default_factory=dict, init=False
+    )
+    _candidate_executors: dict[str, PreparedExecutor] = field(
+        default_factory=dict, init=False
+    )
+    _candidate_previews: dict[str, PatchPreview] = field(default_factory=dict, init=False)
+    _candidate_preview_digests: dict[str, str] = field(default_factory=dict, init=False)
+    _candidate_provider_evidence: dict[str, ProviderCallEvidence | None] = field(
+        default_factory=dict, init=False
+    )
 
     def __post_init__(self) -> None:
         self.symbol_builder = self.symbol_builder or PythonSymbolGraphBuilder()
         self.localizer = self.localizer or PythonLocalizer()
-        self.candidate_evaluator = self.candidate_evaluator or CandidateEvaluator(
-            self.patch_policy, self.patch_applier, self.validator
+        self.previewer = self.previewer or PatchPreviewer(
+            self.patch_policy, self.artifacts.secrets
         )
+        if self.executor_selector is None:
+            if self.validator is None:
+                raise ValueError("executor selector is required when validator is deferred")
+            self._legacy_validator_selector = True
+            self.executor_selector = FixedExecutorSelector(
+                PreparedExecutor(
+                    mode=ExecutionMode.LOCAL,
+                    isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                    preflight=PreflightReport(
+                        checks=[],
+                        git_commit=None,
+                        dirty=False,
+                        repository_fingerprint="legacy-direct-workflow",
+                    ),
+                    validator=self.validator,  # type: ignore[arg-type]
+                )
+            )
+        if self.candidate_evaluator is None and self.validator is not None:
+            self.candidate_evaluator = CandidateEvaluator(
+                self.patch_policy, self.patch_applier, self.validator
+            )
         self.candidate_policy = self.candidate_policy or CandidatePolicy()
         self.candidate_selector = self.candidate_selector or CandidateSelector()
         self.events = self.events or self.artifacts.event_store()
@@ -250,9 +316,10 @@ class Workflow:
             return RunStatus.CANCELLED, "implementation plan rejected"
         self.advance(RunStage.PLAN_APPROVED)
 
-        candidate_evaluator = cast(CandidateEvaluator, self.candidate_evaluator)
-        approval_baseline = candidate_evaluator.capture_baseline(
-            self.root, deadline=self.deadline
+        approval_baseline = (
+            self.candidate_evaluator.capture_baseline(self.root, deadline=self.deadline)
+            if self.candidate_evaluator is not None
+            else RepositoryIntegritySnapshot.capture(self.root, deadline=self.deadline)
         )
         self._evaluate_candidates(self.localization)
         if not approval_baseline.matches(self.root, deadline=self.deadline):
@@ -282,10 +349,23 @@ class Workflow:
         selected_evidence = next(
             item for item in self.candidate_evidence if item.candidate_id == selected.candidate_id
         )
+        selected_executor = self._candidate_executors[selected.candidate_id]
+        selected_evaluator = self._candidate_evaluators[selected.candidate_id]
+        selected_preview = self._candidate_previews[selected.candidate_id]
+        selected_preview_digest = self._candidate_preview_digests[selected.candidate_id]
+        self._assert_preview_binding(
+            selected_preview,
+            selected,
+            selected_preview_digest,
+        )
         self.manifest = self.manifest.model_copy(
             update={
                 "selected_candidate_id": selected.candidate_id,
                 "repair_attempts": len(self.candidates) - 1,
+                "preview_digest": selected_preview_digest,
+                "execution_mode": selected_executor.mode,
+                "isolation_level": selected_executor.isolation_level,
+                "verification_status": VerificationStatus.PASSED,
                 "updated_at": utc_now(),
             }
         )
@@ -293,6 +373,9 @@ class Workflow:
         self.advance(RunStage.PATCH_PROPOSED)
         approval_artifact = json.dumps(
             {
+                "execution_mode": selected_executor.mode.value,
+                "isolation_level": selected_executor.isolation_level.value,
+                "verification_status": VerificationStatus.PASSED.value,
                 "selected_candidate": selected.model_dump(mode="json"),
                 "selection": self.selection.model_dump(mode="json"),
                 "candidates": [
@@ -318,9 +401,10 @@ class Workflow:
         self.advance(RunStage.PATCH_APPROVED)
 
         self.ensure_time()
+        self._assert_preview_binding(selected_preview, selected, selected_preview_digest)
         validated = self.patch_policy.validate(self.root, selected.proposal)
         paths = [path.as_posix() for path in validated.touched_paths]
-        pre_apply_baseline = candidate_evaluator.capture_baseline(
+        pre_apply_baseline = selected_evaluator.capture_baseline(
             self.root, deadline=self.deadline
         )
         self._mark_checkout_recovery_unknown(paths)
@@ -350,10 +434,10 @@ class Workflow:
         self.advance(RunStage.PATCH_APPLIED)
         self._set_final_validation_status(FinalValidationStatus.RUNNING)
         self.artifacts.update_manifest(self.manifest)
-        post_patch_baseline = candidate_evaluator.capture_baseline(
+        post_patch_baseline = selected_evaluator.capture_baseline(
             self.root, deadline=self.deadline
         )
-        self.validation, final_root_stable = candidate_evaluator.validate_isolated(
+        self.validation, final_root_stable = selected_evaluator.validate_isolated(
             self.root,
             timeout_seconds=self.remaining_time(),
             baseline=post_patch_baseline,
@@ -446,72 +530,202 @@ class Workflow:
         )
         return broader
 
+    def _generate_candidate(
+        self,
+        localization: LocalizationReport,
+        previous: CandidateRecord | None,
+        previous_evidence: CandidateEvidence | None,
+        generation_reason: str,
+    ) -> CandidateRecord:
+        if self.requirements is None or self.plan is None:
+            raise RuntimeError("requirements and plan must exist before candidate generation")
+        candidate_id = f"candidate-{len(self.candidates) + 1}"
+        role = self.roles.implementation if previous is None else self.roles.repair
+        context_builder = cast(ProviderContextBuilder, self.context_builder)
+        payload = context_builder.candidate(
+            self.requirements,
+            self.plan,
+            localization,
+            candidate_id,
+            previous=previous,
+            previous_evidence=previous_evidence,
+            generation_reason=generation_reason if previous is not None else None,
+        )
+        self._write_json("candidate-input", payload)
+        result = role.run(payload, timeout_seconds=self.remaining_time())
+        candidate = CandidateRecord(
+            candidate_id=candidate_id,
+            proposal=result.output,
+            parent_candidate_id=previous.candidate_id if previous else None,
+            generation_reason=generation_reason,
+            diff_sha256=hashlib.sha256(result.output.diff.encode()).hexdigest(),
+            usage=result.usage,
+        )
+        self._candidate_provider_evidence[candidate_id] = result.evidence
+        return candidate
+
+    def _publish_candidate(self, candidate: CandidateRecord) -> None:
+        self.candidates.append(candidate)
+        self.manifest = self.manifest.model_copy(
+            update={
+                "candidate_ids": [item.candidate_id for item in self.candidates],
+                "repair_attempts": len(self.candidates) - 1,
+                "updated_at": utc_now(),
+            }
+        )
+        self.artifacts.update_manifest(self.manifest)
+        self.write("candidate", candidate)
+        self.emit(
+            EventKind.CANDIDATE,
+            "candidate generated",
+            candidate_id=candidate.candidate_id,
+        )
+
+    def _account_candidate_generation(self, candidate: CandidateRecord) -> None:
+        self.account(
+            candidate.usage,
+            generated_artifact="candidate",
+            evidence=self._candidate_provider_evidence.pop(candidate.candidate_id, None),
+        )
+
+    def _preview_and_select_executor(
+        self, candidate: CandidateRecord
+    ) -> tuple[PatchPreview, PreparedExecutor]:
+        if self.requirements is None:
+            raise RuntimeError("requirements must exist before patch preview")
+        previewer = cast(PatchPreviewer, self.previewer)
+        try:
+            ensure_exact_diff_safe(candidate.proposal.diff, self.artifacts.secrets)
+            preview = previewer.preview(
+                self.root,
+                candidate,
+                self.requirements.acceptance_criteria,
+            )
+        except (Exception, KeyboardInterrupt, SystemExit):
+            self._account_candidate_generation(candidate)
+            raise
+        preview_digest = patch_preview_digest(preview)
+        self.manifest = self.manifest.model_copy(
+            update={
+                "preview_digest": preview_digest,
+                "verification_status": VerificationStatus.UNVALIDATED,
+                "execution_mode": None,
+                "isolation_level": None,
+                "updated_at": utc_now(),
+            }
+        )
+        self.artifacts.update_manifest(self.manifest)
+        self._publish_candidate(candidate)
+        self._account_candidate_generation(candidate)
+        self.write("patch-preview", preview)
+        self.advance(RunStage.PATCH_PREVIEWED)
+        if self._legacy_validator_selector and isinstance(
+            self.executor_selector, FixedExecutorSelector
+        ):
+            if self.validator is None:
+                raise RuntimeError("legacy workflow validator is unavailable")
+            self.executor_selector = FixedExecutorSelector(
+                PreparedExecutor(
+                    mode=ExecutionMode.LOCAL,
+                    isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                    preflight=PreflightReport(
+                        checks=[],
+                        git_commit=None,
+                        dirty=False,
+                        repository_fingerprint="legacy-direct-workflow",
+                    ),
+                    validator=self.validator,  # type: ignore[arg-type]
+                )
+            )
+        selector = cast(ExecutorSelector, self.executor_selector)
+        selector_preview = preview.model_copy(deep=True)
+        prepared = selector.select(
+            selector_preview, timeout_seconds=self.remaining_time()
+        )
+        if patch_preview_digest(selector_preview) != preview_digest:
+            raise CandidateEvaluationError("patch preview changed after persistence")
+        self._assert_preview_binding(preview, candidate, preview_digest)
+        validate_executor_isolation(prepared.mode, prepared.isolation_level)
+        self.manifest = self.manifest.model_copy(
+            update={
+                "execution_mode": prepared.mode,
+                "isolation_level": prepared.isolation_level,
+                "verification_status": VerificationStatus.VALIDATING,
+                "updated_at": utc_now(),
+            }
+        )
+        self.artifacts.update_manifest(self.manifest)
+        self.advance(RunStage.EXECUTOR_SELECTED)
+        self.advance(RunStage.VALIDATING)
+        return preview, prepared
+
     def _evaluate_candidates(self, localization: LocalizationReport) -> None:
         if self.requirements is None or self.plan is None:
             raise RuntimeError("requirements and plan must exist before candidate evaluation")
         self.candidates = []
         self.candidate_evidence = []
+        self._candidate_evaluators = {}
+        self._candidate_executors = {}
+        self._candidate_previews = {}
+        self._candidate_preview_digests = {}
+        self._candidate_provider_evidence = {}
         expansion_reason: str | None = None
         while len(self.candidates) < 3:
-            candidate_id = f"candidate-{len(self.candidates) + 1}"
             previous = self.candidates[-1] if self.candidates else None
             previous_evidence = self.candidate_evidence[-1] if self.candidate_evidence else None
-            role = self.roles.implementation if previous is None else self.roles.repair
             generation_reason = (
                 "initial implementation" if previous is None else expansion_reason or "alternative"
             )
-            context_builder = cast(ProviderContextBuilder, self.context_builder)
-            payload = context_builder.candidate(
-                self.requirements,
-                self.plan,
+            candidate = self._generate_candidate(
                 localization,
-                candidate_id,
-                previous=previous,
-                previous_evidence=previous_evidence,
-                generation_reason=generation_reason if previous is not None else None,
+                previous,
+                previous_evidence,
+                generation_reason,
             )
-            self._write_json("candidate-input", payload)
-            result = role.run(payload, timeout_seconds=self.remaining_time())
-            candidate = CandidateRecord(
-                candidate_id=candidate_id,
-                proposal=result.output,
-                parent_candidate_id=previous.candidate_id if previous else None,
-                generation_reason=generation_reason,
-                diff_sha256=hashlib.sha256(result.output.diff.encode()).hexdigest(),
-                usage=result.usage,
+            preview, prepared = self._preview_and_select_executor(candidate)
+            candidate_evaluator = (
+                self.candidate_evaluator
+                if self.candidate_evaluator is not None
+                and self.candidate_evaluator.validator is prepared.validator
+                else CandidateEvaluator(
+                    self.patch_policy, self.patch_applier, prepared.validator
+                )
             )
-            self.candidates.append(candidate)
-            self.manifest = self.manifest.model_copy(
-                update={
-                    "candidate_ids": [item.candidate_id for item in self.candidates],
-                    "repair_attempts": len(self.candidates) - 1,
-                    "updated_at": utc_now(),
-                }
-            )
-            self.artifacts.update_manifest(self.manifest)
-            self.write("candidate", candidate)
-            self.account(
-                result.usage,
-                generated_artifact="candidate",
-                evidence=result.evidence,
-            )
-            self.emit(EventKind.CANDIDATE, "candidate generated", candidate_id=candidate_id)
-            candidate_evaluator = cast(CandidateEvaluator, self.candidate_evaluator)
+            self._candidate_evaluators[candidate.candidate_id] = candidate_evaluator
+            self._candidate_executors[candidate.candidate_id] = prepared
+            self._candidate_previews[candidate.candidate_id] = preview
+            preview_digest = self.manifest.preview_digest
+            if preview_digest is None:
+                raise CandidateEvaluationError("patch preview digest is unavailable")
+            self._candidate_preview_digests[candidate.candidate_id] = preview_digest
+            self._assert_preview_binding(preview, candidate, preview_digest)
             candidate_evidence = candidate_evaluator.evaluate(
                 self.root,
                 candidate,
                 self.requirements.acceptance_criteria,
                 self.remaining_time(),
             )
+            self._assert_preview_binding(preview, candidate, preview_digest)
             self.candidate_evidence.append(candidate_evidence)
             self.write("candidate-evidence", candidate_evidence)
             self.emit(
                 EventKind.VALIDATION,
                 "candidate validation completed",
-                candidate_id=candidate_id,
+                candidate_id=candidate.candidate_id,
                 **_validation_summary(candidate_evidence.validation, candidate.usage),
                 restored_to_baseline=candidate_evidence.restored_to_baseline,
             )
+            self.manifest = self.manifest.model_copy(
+                update={
+                    "verification_status": (
+                        VerificationStatus.PASSED
+                        if candidate_evidence.eligible
+                        else VerificationStatus.FAILED
+                    ),
+                    "updated_at": utc_now(),
+                }
+            )
+            self.artifacts.update_manifest(self.manifest)
             if not candidate_evidence.restored_to_baseline:
                 raise RuntimeError("candidate evaluation did not restore repository baseline")
             candidate_policy = cast(CandidatePolicy, self.candidate_policy)
@@ -526,6 +740,19 @@ class Workflow:
             if expansion is None:
                 break
             expansion_reason = expansion.value
+
+    @staticmethod
+    def _assert_preview_binding(
+        preview: PatchPreview,
+        candidate: CandidateRecord,
+        expected_digest: str,
+    ) -> None:
+        if (
+            patch_preview_digest(preview) != expected_digest
+            or preview.candidate.model_dump(mode="json")
+            != candidate.model_dump(mode="json")
+        ):
+            raise CandidateEvaluationError("patch preview changed after persistence")
 
     def ensure_time(self) -> None:
         self.remaining_time()
@@ -546,10 +773,13 @@ class Workflow:
 
     def _run_validation(self) -> ValidationReport:
         remaining = self.remaining_time()
-        if _accepts_keyword(self.validator.run, "timeout_seconds"):
-            run_with_timeout = cast(Callable[..., ValidationReport], self.validator.run)
+        if self.validator is None:
+            raise RuntimeError("validator is unavailable before executor selection")
+        validator = self.validator
+        if _accepts_keyword(validator.run, "timeout_seconds"):
+            run_with_timeout = cast(Callable[..., ValidationReport], validator.run)
             return run_with_timeout(self.root, timeout_seconds=remaining)
-        return self.validator.run(self.root)
+        return validator.run(self.root)
 
     def emit(self, kind: EventKind, message: str, **data: object) -> None:
         self._sequence += 1
@@ -674,6 +904,14 @@ class Workflow:
     def _set_final_validation_status(self, status: FinalValidationStatus) -> None:
         paths = ", ".join(self.manifest.applied_paths) or "the affected paths"
         guidance = self.manifest.recovery_guidance
+        verification_status = self.manifest.verification_status
+        if status in {FinalValidationStatus.FAILED, FinalValidationStatus.INTERRUPTED}:
+            # Candidate selection recorded verification_status=PASSED for an
+            # isolated candidate, but a failed or interrupted post-apply final
+            # validation means required checks did not pass on the applied patch.
+            # Downgrade so the terminal trust label cannot overstate the run as
+            # ISOLATED VERIFIED (see domain.compute_trust_label).
+            verification_status = VerificationStatus.FAILED
         if self.manifest.selected_patch_applied:
             if status is FinalValidationStatus.PASSED:
                 guidance = (
@@ -695,6 +933,7 @@ class Workflow:
         self.manifest = self.manifest.model_copy(
             update={
                 "final_validation_status": status,
+                "verification_status": verification_status,
                 "recovery_guidance": guidance,
                 "updated_at": utc_now(),
             }

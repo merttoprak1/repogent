@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 from repogent import cli, run_builder
 from repogent.cli import app
 from repogent.domain import EventKind, ProviderReadiness, RunEvent, RunStage, RunStatus
+from repogent.executor_selection import FixedExecutorSelector
 from repogent.preflight import PreflightReport
 from repogent.run_builder import RunOptions
 
@@ -115,6 +116,108 @@ def test_run_delegates_construction_to_shared_builder(
     assert "[warning] builder event" in result.output
 
 
+def test_run_without_executor_still_builds_docker_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+    captured: dict[str, object] = {}
+
+    class FakeWorkflow:
+        def __init__(self, events: object) -> None:
+            self.events = events
+
+        def run(self) -> object:
+            return type(
+                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
+            )()
+
+    class FakeStore:
+        root = evidence / "run-test"
+        secrets: list[str] = []
+
+        def event_store(self) -> object:
+            return type("Sink", (), {"emit": lambda _self, _event: None})()
+
+    def fake_build_run(
+        options: RunOptions,
+        approver_factory: object,
+        *,
+        events: object,
+    ) -> object:
+        captured["options"] = options
+        return type(
+            "Prepared", (), {"workflow": FakeWorkflow(events), "store": FakeStore()}
+        )()
+
+    monkeypatch.setattr(cli, "build_run", fake_build_run, raising=False)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 0
+    options = captured["options"]
+    assert isinstance(options, RunOptions)
+    assert options.executor == "docker"
+
+
+def test_explicit_local_cli_never_uses_deferred_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    evidence = tmp_path / "runs"
+    captured: dict[str, object] = {}
+
+    class PassingPreflight:
+        def run(self, _repository: Path) -> PreflightReport:
+            return PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repository"
+            )
+
+    class FakeWorkflow:
+        def __init__(self, **kwargs: object) -> None:
+            captured["executor_selector"] = kwargs["executor_selector"]
+
+        def run(self) -> object:
+            return type(
+                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
+            )()
+
+    monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+    monkeypatch.setattr(run_builder, "OpenAIProvider", lambda **_kwargs: object())
+    monkeypatch.setattr(run_builder, "Workflow", FakeWorkflow)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "local",
+            "--output-dir",
+            str(evidence),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert isinstance(captured["executor_selector"], FixedExecutorSelector)
+
+
 def test_analyze_prints_inventory_and_ranked_localization(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -213,6 +316,28 @@ def test_run_rejects_unknown_executor_without_traceback(tmp_path: Path) -> None:
     output = rendered_output(result)
     assert "executor must be docker or local" in output
     assert "Traceback" not in output
+
+
+def test_run_rejects_deferred_executor_without_traceback(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "deferred",
+        ],
+    )
+    assert result.exit_code == 2
+    output = rendered_output(result)
+    assert "executor must be docker or local" in output
+    assert "Traceback" not in output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_run_rejects_script_with_openai_provider(tmp_path: Path) -> None:
@@ -940,6 +1065,15 @@ def test_documented_scripted_demo_completes(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "completed" in result.output
     assert '@app.get("/health")' in (target / "app.py").read_text()
+    assert "[stage] workflow stage changed (patch_previewed)" in result.output
+    assert "[stage] workflow stage changed (executor_selected)" in result.output
+    assert "[stage] workflow stage changed (validating)" in result.output
+    assert "[stage] workflow stage changed (validated)" in result.output
+    assert "[terminal] workflow finished (completed)" in result.output
+    run_directory = next(evidence.iterdir())
+    report = (run_directory / "report.md").read_text()
+    assert "Verification: REDUCED ISOLATION" in report
+    assert "Execution mode: local" in report
 
 
 def test_mcp_stdio_dispatches_to_lazy_server_import(

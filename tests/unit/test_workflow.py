@@ -9,7 +9,13 @@ import pytest
 from repogent.agents import RoleSet
 from repogent.approvals import FakeApprover
 from repogent.artifacts import ArtifactStore
-from repogent.candidates import CandidateEvaluator, CandidatePolicy, CandidateSelector
+from repogent.candidates import (
+    CandidateEvaluator,
+    CandidatePolicy,
+    CandidateSelector,
+    PatchPreviewer,
+    patch_preview_digest,
+)
 from repogent.domain import (
     ApprovalKind,
     Budget,
@@ -20,7 +26,9 @@ from repogent.domain import (
     CheckStatus,
     Decision,
     EventKind,
+    ExecutionMode,
     FinalValidationStatus,
+    IsolationLevel,
     ProviderCallEvidence,
     ProviderCallStatus,
     ProviderUsage,
@@ -29,12 +37,16 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    VerificationStatus,
 )
 from repogent.events import EventSink
+from repogent.executor_selection import PreparedExecutor
 from repogent.localization import PythonLocalizer
 from repogent.patching import PatchApplier, PatchPolicy
+from repogent.preflight import PreflightReport
 from repogent.provider_context import MAX_PROVIDER_PAYLOAD_CHARS
 from repogent.providers import ProviderError, ProviderResult, ScriptedProvider
+from repogent.reporting import derive_trust_label
 from repogent.repository import RepositoryInspector
 from repogent.symbols import PythonSymbolGraphBuilder
 from repogent.workflow import BudgetExceeded, IllegalTransition, Workflow, transition
@@ -64,6 +76,23 @@ ALTERNATIVE_PATCH_OUTPUT = {
     "diff": (
         "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
         " def value():\n-    return 1\n+    return 3\n"
+    ),
+}
+BROADER_PATCH_OUTPUT = {
+    **VALID_PATCH_OUTPUT,
+    "summary": "Change value with an extra line",
+    "diff": (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,3 @@\n"
+        " def value():\n-    return 1\n+    changed = True\n+    return 3\n"
+    ),
+}
+CUSTOM_SECRET = "opaque-zebra-741"  # noqa: S105 - deliberate sanitizer canary
+CUSTOM_SECRET_PATCH_OUTPUT = {
+    **VALID_PATCH_OUTPUT,
+    "summary": "Return configured secret",
+    "diff": (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+        " def value():\n-    return 1\n+    return 'opaque-zebra-741'\n"
     ),
 }
 INVALID_PATCH_OUTPUT = {
@@ -100,6 +129,63 @@ class SequenceValidator:
         )
 
 
+class RecordingExecutorSelector:
+    def __init__(self, validator: SequenceValidator) -> None:
+        self.validator = validator
+        self.previews: list[object] = []
+        self.preview_stages: list[RunStage] = []
+        self.workflow: Workflow | None = None
+
+    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+        assert timeout_seconds > 0
+        self.previews.append(preview)
+        assert self.workflow is not None
+        self.preview_stages.append(self.workflow.manifest.stage)
+        persisted = json.loads((self.workflow.artifacts.root / "run.json").read_text())
+        assert persisted["preview_digest"] == self.workflow.manifest.preview_digest
+        assert persisted["verification_status"] == "unvalidated"
+        return PreparedExecutor(
+            mode=ExecutionMode.LOCAL,
+            isolation_level=IsolationLevel.REDUCED_ISOLATION,
+            preflight=PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repository"
+            ),
+            validator=self.validator,  # type: ignore[arg-type]
+        )
+
+
+class MutatingExecutorSelector(RecordingExecutorSelector):
+    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+        preview.candidate.proposal.diff = (  # type: ignore[attr-defined]
+            "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+            " def value():\n-    return 1\n+    return 99\n"
+        )
+        return prepared
+
+
+class InvalidIsolationExecutorSelector(RecordingExecutorSelector):
+    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+        return PreparedExecutor(
+            mode=ExecutionMode.LOCAL,
+            isolation_level=IsolationLevel.ISOLATED,
+            preflight=prepared.preflight,
+            validator=prepared.validator,
+        )
+
+
+class DockerIsolatedExecutorSelector(RecordingExecutorSelector):
+    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+        return PreparedExecutor(
+            mode=ExecutionMode.DOCKER,
+            isolation_level=IsolationLevel.ISOLATED,
+            preflight=prepared.preflight,
+            validator=prepared.validator,
+        )
+
+
 class FailingEventStore:
     def __init__(self) -> None:
         self.calls = 0
@@ -118,11 +204,18 @@ def make_phase2_workflow(
     candidate_policy: CandidatePolicy | None = None,
     events: EventSink | None = None,
     budget: Budget | None = None,
+    artifact_secrets: list[str] | None = None,
 ) -> Workflow:
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("def value():\n    return 1\n")
-    store = ArtifactStore.create(tmp_path / "runs", target, "change", run_id="run-1")
+    store = ArtifactStore.create(
+        tmp_path / "runs",
+        target,
+        "change",
+        run_id="run-1",
+        secrets=artifact_secrets,
+    )
     validator = SequenceValidator(validation_statuses)
     patch_policy = PatchPolicy()
     patch_applier = PatchApplier()
@@ -168,7 +261,7 @@ def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) 
 
     manifest = workflow.run()
 
-    assert manifest.status is RunStatus.COMPLETED
+    assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
     assert manifest.candidate_ids == ["candidate-1"]
     assert manifest.selected_candidate_id == "candidate-1"
     assert len(list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))) == 1
@@ -176,6 +269,279 @@ def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) 
     assert [event["sequence"] for event in _events(workflow)] == list(
         range(1, len(_events(workflow)) + 1)
     )
+
+
+def test_workflow_persists_unvalidated_preview_before_executor_selection(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = RecordingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
+    assert len(selector.previews) == 1
+    assert selector.preview_stages == [RunStage.PATCH_PREVIEWED]
+    assert manifest.preview_digest is not None
+    preview = json.loads(
+        next(workflow.artifacts.root.glob("patch-preview-*.json")).read_text()
+    )
+    assert preview["verification_status"] == "unvalidated"
+    assert preview["candidate"]["candidate_id"] == "candidate-1"
+
+
+def test_configured_secret_fails_before_candidate_artifact_or_selection(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+        artifact_secrets=[CUSTOM_SECRET],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = RecordingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "preview contains secret-like patch content"
+    assert selector.previews == []
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert not list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))
+    assert not list(workflow.artifacts.root.glob("patch-preview-*.json"))
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+
+
+def test_injected_previewer_cannot_bypass_artifact_store_secrets(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+        artifact_secrets=[CUSTOM_SECRET],
+    )
+    workflow.previewer = PatchPreviewer(workflow.patch_policy)
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = RecordingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "preview contains secret-like patch content"
+    assert selector.previews == []
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert not list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))
+    assert not list(workflow.artifacts.root.glob("patch-preview-*.json"))
+
+
+def test_rejected_static_preview_accounts_completed_provider_once(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+        artifact_secrets=[CUSTOM_SECRET],
+    )
+
+    class AccountingProvider(ScriptedProvider):
+        def generate(self, **kwargs: object) -> ProviderResult[object]:  # type: ignore[override,type-var]
+            result = super().generate(**kwargs)  # type: ignore[arg-type]
+            if len(self.calls) != 3:
+                return result
+            return ProviderResult(
+                output=result.output,
+                usage=ProviderUsage(
+                    model="metered",
+                    input_tokens=2,
+                    output_tokens=3,
+                    estimated_cost_usd=Decimal("0.04"),
+                ),
+                evidence=ProviderCallEvidence(
+                    provider="scripted",
+                    model="metered",
+                    role="implementation",
+                    invocation=1,
+                    status=ProviderCallStatus.COMPLETED,
+                    structured_output_valid=True,
+                ),
+            )
+
+    provider = AccountingProvider(
+        [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT]
+    )
+    workflow.roles = RoleSet.from_provider(provider)
+
+    manifest = workflow.run()
+
+    assert manifest.reason == "preview contains secret-like patch content"
+    assert manifest.token_usage == 5
+    assert manifest.estimated_cost_usd == Decimal("0.04")
+    assert len(list(workflow.artifacts.root.glob("provider-usage-*.json"))) == 3
+    call_evidence = list(workflow.artifacts.root.glob("provider-call-*.json"))
+    assert len(call_evidence) == 1
+    assert json.loads(call_evidence[0].read_text())["role"] == "implementation"
+    assert not list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))
+    assert not list(workflow.artifacts.root.glob("patch-preview-*.json"))
+
+
+def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    persisted_digests: list[str | None] = []
+    original_write = workflow.artifacts.write_model
+
+    def record_manifest_binding(name: str, model: object) -> Path:
+        if name == "candidate":
+            manifest = json.loads((workflow.artifacts.root / "run.json").read_text())
+            persisted_digests.append(manifest["preview_digest"])
+        return original_write(name, model)  # type: ignore[arg-type]
+
+    workflow.artifacts.write_model = record_manifest_binding  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
+    assert persisted_digests == [manifest.preview_digest]
+
+
+def test_selector_mutation_fails_before_candidate_evaluation(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = MutatingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "patch preview changed after persistence"
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert workflow.candidate_evidence == []
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+
+
+def test_invalid_executor_isolation_pair_fails_before_evaluation(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = InvalidIsolationExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "executor isolation level does not match execution mode"
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert workflow.candidate_evidence == []
+
+
+def test_each_repair_gets_a_new_preview_and_executor_selection(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[
+            REQUIREMENTS_OUTPUT,
+            PLAN_OUTPUT,
+            INVALID_PATCH_OUTPUT,
+            VALID_PATCH_OUTPUT,
+            QA_OUTPUT,
+        ],
+        validation_statuses=[CheckStatus.FAILED, CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = RecordingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
+    assert len(selector.previews) == 2
+    assert [preview.candidate.candidate_id for preview in selector.previews] == [  # type: ignore[attr-defined]
+        "candidate-1",
+        "candidate-2",
+    ]
+    assert len({patch_preview_digest(preview) for preview in selector.previews}) == 2  # type: ignore[arg-type]
+
+
+def test_selected_candidate_restores_its_own_preview_digest(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[
+            REQUIREMENTS_OUTPUT,
+            PLAN_OUTPUT,
+            VALID_PATCH_OUTPUT,
+            BROADER_PATCH_OUTPUT,
+            QA_OUTPUT,
+        ],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED, CheckStatus.PASSED],
+        candidate_policy=CandidatePolicy(max_candidates=2, broad_patch_lines=1),
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = RecordingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
+    assert manifest.selected_candidate_id == "candidate-1"
+    assert manifest.preview_digest == patch_preview_digest(selector.previews[0])  # type: ignore[arg-type]
+    assert manifest.preview_digest != patch_preview_digest(selector.previews[1])  # type: ignore[arg-type]
+
+
+def test_final_patch_approval_contains_passed_executor_evidence(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+    original_decide = workflow.approver.decide
+    approval: dict[str, object] = {}
+
+    def decide(kind: ApprovalKind, artifact: object) -> object:
+        if kind is ApprovalKind.PATCH:
+            assert isinstance(artifact, str)
+            approval.update(json.loads(artifact))
+        return original_decide(kind, artifact)  # type: ignore[arg-type]
+
+    workflow.approver.decide = decide  # type: ignore[method-assign]
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.COMPLETED
+    assert approval["execution_mode"] == "local"
+    assert approval["isolation_level"] == "reduced_isolation"
+    assert approval["verification_status"] == "passed"
 
 
 def test_failed_candidate_triggers_one_evidence_informed_alternative(tmp_path: Path) -> None:
@@ -874,6 +1240,32 @@ def test_final_validation_failure_reports_real_patch_as_applied(tmp_path: Path) 
     assert manifest.final_validation_status is FinalValidationStatus.FAILED
     assert "Real checkout patch: remains applied" in report
     assert "run the required validation commands" in report
+
+
+def test_docker_final_validation_failure_downgrades_trust_label(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.FAILED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = DockerIsolatedExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    # Candidate selection ran in Docker with isolation, so the terminal manifest
+    # keeps that execution context...
+    assert manifest.execution_mode is ExecutionMode.DOCKER
+    assert manifest.isolation_level is IsolationLevel.ISOLATED
+    # ...but the post-apply final validation failed, so the run must NOT claim
+    # ISOLATED VERIFIED: verification_status is downgraded to FAILED and the
+    # trust label collapses to UNVALIDATED.
+    assert manifest.final_validation_status is FinalValidationStatus.FAILED
+    assert manifest.verification_status is VerificationStatus.FAILED
+    assert derive_trust_label(manifest) == "UNVALIDATED"
 
 
 def test_post_apply_artifact_failure_preserves_truthful_recovery_state(

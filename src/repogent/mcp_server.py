@@ -12,6 +12,7 @@ from repogent.domain import ApprovalKind, Decision
 from repogent.mcp_models import (
     DoctorReport,
     DoctorRequest,
+    ExecutionDecision,
     RunDecision,
     RunReport,
     RunSnapshot,
@@ -34,6 +35,7 @@ class _ServiceError(StrEnum):
     START = "run could not be started; inspect local Repogent logs"
     GET = "run state is unavailable; inspect local Repogent logs"
     DECISION = "run decision could not be applied; inspect local Repogent logs"
+    EXECUTOR = "executor selection could not be applied; inspect local Repogent logs"
     CANCEL = "run could not be cancelled; inspect local Repogent logs"
     REPORT = "run report is unavailable; inspect local Repogent logs"
 
@@ -55,6 +57,13 @@ def _call_service(
                 or pending.get("artifact") != result.pending_approval.artifact
             ):
                 raise ValueError("approval artifact is unsafe to return")
+        if isinstance(result, RunSnapshot) and result.pending_execution is not None:
+            pending_execution = payload.get("pending_execution")
+            if (
+                not isinstance(pending_execution, dict)
+                or pending_execution.get("preview") != result.pending_execution.preview
+            ):
+                raise ValueError("execution preview is unsafe to return")
         model_type = cast(type[BaseModel], type(result))
         return cast(_ResultT, model_type.model_validate(payload))
     except Exception:
@@ -162,6 +171,23 @@ def create_server(
     def approve_plan(decision: RunDecision) -> RunSnapshot:
         require_kind(decision, ApprovalKind.PLAN)
         return _call_service(lambda: sessions.decide(decision), _ServiceError.DECISION)
+
+    @server.tool(
+        name="select_executor",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+    def select_executor(decision: ExecutionDecision) -> RunSnapshot:
+        if decision.decision is not Decision.APPROVED:
+            raise ValueError("select_executor requires an approved decision")
+        return _call_service(
+            lambda: sessions.select_executor(decision),
+            _ServiceError.EXECUTOR,
+        )
 
     @server.tool(
         name="approve_patch",

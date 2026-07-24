@@ -11,8 +11,20 @@ from repogent.domain import (
     RequirementsSpec,
     RunManifest,
     ValidationReport,
+    compute_trust_label,
 )
 from repogent.localization import LocalizationReport
+
+
+def derive_trust_label(manifest: RunManifest) -> str:
+    """Compute the report-visible trust label from execution mode and verification status.
+
+    Delegates to `domain.compute_trust_label()` so this report-facing label and
+    the MCP-facing `RunSnapshot.trust_label` can never drift apart.
+    """
+    return compute_trust_label(
+        manifest.execution_mode, manifest.isolation_level, manifest.verification_status
+    ).value
 
 
 def render_report(
@@ -34,6 +46,9 @@ def render_report(
         f"Request: {_markdown_text(manifest.request)}",
         f"Repair attempts: {manifest.repair_attempts}",
         f"Reason: {_markdown_text(manifest.reason or 'none')}",
+        f"Verification: {derive_trust_label(manifest)}",
+        f"Execution mode: {manifest.execution_mode.value if manifest.execution_mode else 'none'}",
+        f"Preview digest: {manifest.preview_digest or 'none'}",
         "",
     ]
     if manifest.generated_but_not_consumed:
