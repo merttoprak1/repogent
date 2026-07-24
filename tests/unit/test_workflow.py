@@ -37,6 +37,7 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    VerificationStatus,
 )
 from repogent.events import EventSink
 from repogent.executor_selection import PreparedExecutor
@@ -45,6 +46,7 @@ from repogent.patching import PatchApplier, PatchPolicy
 from repogent.preflight import PreflightReport
 from repogent.provider_context import MAX_PROVIDER_PAYLOAD_CHARS
 from repogent.providers import ProviderError, ProviderResult, ScriptedProvider
+from repogent.reporting import derive_trust_label
 from repogent.repository import RepositoryInspector
 from repogent.symbols import PythonSymbolGraphBuilder
 from repogent.workflow import BudgetExceeded, IllegalTransition, Workflow, transition
@@ -167,6 +169,17 @@ class InvalidIsolationExecutorSelector(RecordingExecutorSelector):
         prepared = super().select(preview, timeout_seconds=timeout_seconds)
         return PreparedExecutor(
             mode=ExecutionMode.LOCAL,
+            isolation_level=IsolationLevel.ISOLATED,
+            preflight=prepared.preflight,
+            validator=prepared.validator,
+        )
+
+
+class DockerIsolatedExecutorSelector(RecordingExecutorSelector):
+    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+        return PreparedExecutor(
+            mode=ExecutionMode.DOCKER,
             isolation_level=IsolationLevel.ISOLATED,
             preflight=prepared.preflight,
             validator=prepared.validator,
@@ -1227,6 +1240,32 @@ def test_final_validation_failure_reports_real_patch_as_applied(tmp_path: Path) 
     assert manifest.final_validation_status is FinalValidationStatus.FAILED
     assert "Real checkout patch: remains applied" in report
     assert "run the required validation commands" in report
+
+
+def test_docker_final_validation_failure_downgrades_trust_label(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.FAILED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = DockerIsolatedExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    # Candidate selection ran in Docker with isolation, so the terminal manifest
+    # keeps that execution context...
+    assert manifest.execution_mode is ExecutionMode.DOCKER
+    assert manifest.isolation_level is IsolationLevel.ISOLATED
+    # ...but the post-apply final validation failed, so the run must NOT claim
+    # ISOLATED VERIFIED: verification_status is downgraded to FAILED and the
+    # trust label collapses to UNVALIDATED.
+    assert manifest.final_validation_status is FinalValidationStatus.FAILED
+    assert manifest.verification_status is VerificationStatus.FAILED
+    assert derive_trust_label(manifest) == "UNVALIDATED"
 
 
 def test_post_apply_artifact_failure_preserves_truthful_recovery_state(

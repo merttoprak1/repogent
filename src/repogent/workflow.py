@@ -904,6 +904,14 @@ class Workflow:
     def _set_final_validation_status(self, status: FinalValidationStatus) -> None:
         paths = ", ".join(self.manifest.applied_paths) or "the affected paths"
         guidance = self.manifest.recovery_guidance
+        verification_status = self.manifest.verification_status
+        if status in {FinalValidationStatus.FAILED, FinalValidationStatus.INTERRUPTED}:
+            # Candidate selection recorded verification_status=PASSED for an
+            # isolated candidate, but a failed or interrupted post-apply final
+            # validation means required checks did not pass on the applied patch.
+            # Downgrade so the terminal trust label cannot overstate the run as
+            # ISOLATED VERIFIED (see domain.compute_trust_label).
+            verification_status = VerificationStatus.FAILED
         if self.manifest.selected_patch_applied:
             if status is FinalValidationStatus.PASSED:
                 guidance = (
@@ -925,6 +933,7 @@ class Workflow:
         self.manifest = self.manifest.model_copy(
             update={
                 "final_validation_status": status,
+                "verification_status": verification_status,
                 "recovery_guidance": guidance,
                 "updated_at": utc_now(),
             }
