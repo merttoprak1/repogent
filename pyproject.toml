@@ -55,6 +55,12 @@ select = ["E", "F", "I", "B", "UP", "SIM", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+# The demo target is a sandbox fixture. ValidationPolicy lints it from inside the
+# copied tree using ruff's own defaults, where S101 is off (so it must carry no
+# `# noqa: S101`) and `app` is first-party (so its imports group differently than
+# they do from the repository root). Ignore only those two contradictory rules;
+# every other repository lint rule still applies to the fixture.
+"examples/fastapi_demo/**/*.py" = ["S101", "I001"]
 
 [tool.mypy]
 python_version = "3.11"
