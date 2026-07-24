@@ -6,15 +6,12 @@ from repogent.domain import (
     CandidateRecord,
     CandidateSelection,
     CheckoutState,
-    ExecutionMode,
     ImplementationPlan,
-    IsolationLevel,
     QAReview,
     RequirementsSpec,
     RunManifest,
-    TrustLabel,
     ValidationReport,
-    VerificationStatus,
+    compute_trust_label,
 )
 from repogent.localization import LocalizationReport
 
@@ -22,20 +19,12 @@ from repogent.localization import LocalizationReport
 def derive_trust_label(manifest: RunManifest) -> str:
     """Compute the report-visible trust label from execution mode and verification status.
 
-    Local execution is always reported as reduced isolation regardless of check
-    outcome. Docker execution may only claim isolated-verified once isolation was
-    actually applied and required validation passed; every other combination is
-    downgraded to unvalidated rather than overstated.
+    Delegates to `domain.compute_trust_label()` so this report-facing label and
+    the MCP-facing `RunSnapshot.trust_label` can never drift apart.
     """
-    if manifest.execution_mode is ExecutionMode.LOCAL:
-        return TrustLabel.REDUCED_ISOLATION.value
-    if (
-        manifest.execution_mode is ExecutionMode.DOCKER
-        and manifest.isolation_level is IsolationLevel.ISOLATED
-        and manifest.verification_status is VerificationStatus.PASSED
-    ):
-        return TrustLabel.ISOLATED_VERIFIED.value
-    return TrustLabel.UNVALIDATED.value
+    return compute_trust_label(
+        manifest.execution_mode, manifest.isolation_level, manifest.verification_status
+    ).value
 
 
 def render_report(

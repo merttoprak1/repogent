@@ -296,3 +296,22 @@ def test_report_downgrades_docker_failure_to_unvalidated() -> None:
     report = render_report(manifest, None, None, None, None)
 
     assert "Verification: UNVALIDATED" in report
+
+
+def test_report_downgrades_docker_passed_without_isolated_level() -> None:
+    """Docker plus a passed check must not imply ISOLATED VERIFIED on its own.
+
+    ``isolation_level`` must also be ``ISOLATED``; a manifest that somehow
+    reports Docker execution and a passed check without isolation actually
+    having been applied must still be downgraded to UNVALIDATED.
+    """
+    manifest = RunManifest(
+        run_id="run-1",
+        request="add route",
+        status=RunStatus.COMPLETED,
+        execution_mode=ExecutionMode.DOCKER,
+        isolation_level=IsolationLevel.REDUCED_ISOLATION,
+        verification_status=VerificationStatus.PASSED,
+    )
+
+    assert derive_trust_label(manifest) == "UNVALIDATED"
