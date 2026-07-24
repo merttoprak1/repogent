@@ -22,6 +22,7 @@ from repogent.domain import (
     FinalValidationStatus,
     IsolationLevel,
     RunStatus,
+    TrustLabel,
     VerificationStatus,
 )
 from repogent.mcp_models import (
@@ -177,14 +178,20 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
         assert snapshot.pending_approval is None
         assert snapshot.pending_execution is not None
         assert snapshot.verification_status is VerificationStatus.UNVALIDATED
+        assert snapshot.trust_label is TrustLabel.UNVALIDATED
+        # The unvalidated preview digest must differ from the final patch digest
+        # the operator later approves; capture it to prove they are distinct.
+        preview_digest = snapshot.pending_execution.preview_digest
 
         snapshot = await _select_local_until_patch_pending(session, snapshot)
         assert snapshot.pending_execution is None
         assert snapshot.execution_mode is ExecutionMode.LOCAL
         assert snapshot.isolation_level is IsolationLevel.REDUCED_ISOLATION
+        assert snapshot.trust_label is TrustLabel.REDUCED_ISOLATION
         pending = snapshot.pending_approval
         assert pending is not None
         assert pending.kind is ApprovalKind.PATCH
+        assert pending.digest != preview_digest
         assert isinstance(pending.artifact, dict)
         patch_artifact = pending.artifact
         selected = patch_artifact["selected_candidate"]
@@ -211,11 +218,21 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
     assert snapshot.status is RunStatus.COMPLETED
     assert snapshot.checkout_state is CheckoutState.APPLIED
     assert snapshot.final_validation_status is FinalValidationStatus.PASSED
+    assert snapshot.trust_label is TrustLabel.REDUCED_ISOLATION
     assert '@app.get("/health")' in (target / "app.py").read_text()
     assert Path(snapshot.evidence_path, "report.md").is_file()
     manifest = _manifest(snapshot)
     assert manifest["checkout_state"] == CheckoutState.APPLIED.value
     assert manifest["final_validation_status"] == FinalValidationStatus.PASSED.value
+    # Evidence must retain the preview, executor, and trust records for the run.
+    assert manifest["preview_digest"] == preview_digest
+    assert manifest["execution_mode"] == ExecutionMode.LOCAL.value
+    assert manifest["isolation_level"] == IsolationLevel.REDUCED_ISOLATION.value
+    assert manifest["verification_status"] == VerificationStatus.PASSED.value
+    report_text = Path(snapshot.evidence_path, "report.md").read_text()
+    assert TrustLabel.REDUCED_ISOLATION.value in report_text
+    assert f"Execution mode: {ExecutionMode.LOCAL.value}" in report_text
+    assert preview_digest in report_text
 
 
 @pytest.mark.anyio
@@ -544,3 +561,70 @@ async def test_second_run_is_locked_while_executor_selection_is_pending(
         observed = await _snapshot_call(session, "get_run", {"run_id": snapshot.run_id})
         assert observed.checkout_state is CheckoutState.NOT_APPLIED
         await _snapshot_call(session, "cancel_run", {"run_id": snapshot.run_id})
+
+
+@pytest.mark.anyio
+async def test_no_target_code_executes_before_executor_selection(
+    tmp_path: Path,
+) -> None:
+    target = _copy_demo(tmp_path)
+    # A canary test fires only if the target's suite is imported or collected.
+    # Its module-level side effect writes a sentinel to an absolute path outside
+    # the checkout; static inventory/graph/localization only AST-parse files and
+    # never execute them, so the sentinel proves whether target code has run.
+    sentinel = tmp_path / "canary-fired"
+    (target / "tests" / "test_canary.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('fired')\n"
+        "def test_canary() -> None:\n"
+        "    assert True\n"
+    )
+    async with _stdio_session() as session:
+        snapshot = await _snapshot_call(
+            session,
+            "start_run",
+            {
+                "request": _start_request(
+                    target, tmp_path / "runs", executor="deferred"
+                ).model_dump(mode="json")
+            },
+        )
+        snapshot = await _snapshot_call(
+            session, "approve_requirements", _approval(snapshot)
+        )
+        snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
+        assert snapshot.pending_execution is not None
+
+        # The run is paused at the unvalidated preview with no executor selected;
+        # nothing may have executed the target repository's code yet.
+        assert not sentinel.exists()
+
+        await _snapshot_call(session, "cancel_run", {"run_id": snapshot.run_id})
+
+    assert not sentinel.exists()
+
+
+@pytest.mark.anyio
+async def test_disconnect_at_pending_execution_preserves_not_applied_evidence(
+    tmp_path: Path,
+) -> None:
+    target = _copy_demo(tmp_path)
+    request = _start_request(
+        target, tmp_path / "runs", executor="deferred"
+    ).model_dump(mode="json")
+    async with _stdio_session() as session:
+        snapshot = await _snapshot_call(session, "start_run", {"request": request})
+        snapshot = await _snapshot_call(
+            session, "approve_requirements", _approval(snapshot)
+        )
+        snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
+        assert snapshot.pending_execution is not None
+        evidence_path = Path(snapshot.evidence_path)
+        # Leave without cancelling: exiting the context tears down the stdio
+        # subprocess, exercising the bounded disconnect finalizer.
+
+    # A later client can only inspect persisted evidence; the durable checkout
+    # state stays authoritative and no mutation happened during the disconnect.
+    manifest = json.loads((evidence_path / "run.json").read_text())
+    assert manifest["checkout_state"] == CheckoutState.NOT_APPLIED.value
+    assert '@app.get("/health")' not in (target / "app.py").read_text()

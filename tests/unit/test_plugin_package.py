@@ -69,6 +69,7 @@ def test_repogent_skill_declares_triggers_tools_and_three_gates() -> None:
         "get_run",
         "approve_requirements",
         "approve_plan",
+        "select_executor",
         "approve_patch",
         "cancel_run",
         "get_report",
@@ -102,18 +103,68 @@ def test_repogent_skill_closes_baseline_safety_loopholes() -> None:
     assert "`skipped_checks`: `{name, reason}`" in skill
 
 
-def test_repogent_evals_have_five_positive_and_three_negative_cases() -> None:
+def test_repogent_skill_teaches_digest_bound_progressive_executor_flow() -> None:
+    raw = SKILL_PATH.read_text()
+    skill = raw.lower()
+
+    # The plugin must onboard without Docker by deferring the executor choice.
+    assert 'executor="deferred"' in raw
+
+    # The three trust labels must appear verbatim (exact case) so the skill can
+    # render and never overstate them.
+    for label in ("UNVALIDATED", "REDUCED ISOLATION", "ISOLATED VERIFIED"):
+        assert label in raw
+
+    # Explicit, current-digest local-risk consent wording is mandatory and no
+    # weaker phrasing may substitute.
+    assert (
+        "i accept reduced isolation; validate this displayed patch locally" in skill
+    )
+
+    # No silent fallback and no apply before verification.
+    assert "silently fall back" in skill
+    assert "never apply an unvalidated patch" in skill
+
+    # The digest-bound executor decision is not a fourth approval and is never
+    # triggered by ambiguous continuation.
+    assert "select_executor" in raw
+    assert "not a fourth" in skill or "separate" in skill
+
+
+def test_repogent_evals_have_seven_positive_and_five_negative_cases() -> None:
     evals = json.loads(EVALS_PATH.read_text())
 
     assert set(evals) == {"positive", "negative"}
-    assert len(evals["positive"]) == 5
-    assert len(evals["negative"]) == 3
+    assert len(evals["positive"]) == 7
+    assert len(evals["negative"]) == 5
 
     cases = [*evals["positive"], *evals["negative"]]
     ids = [case["id"] for case in cases]
     assert len(ids) == len(set(ids))
     assert all(set(case) == {"id", "prompt", "expected"} for case in cases)
     assert all(case["expected"] for case in cases)
+
+    # The progressive-executor contract must be exercised by the fixtures: the
+    # dockerless preview, both explicit executor selections, the two trust
+    # labels, and the negatives that forbid silent fallback and stale digests.
+    positive_ids = {case["id"] for case in evals["positive"]}
+    assert {
+        "dockerless-preview",
+        "explicit-docker",
+        "explicit-local",
+        "stale-local-consent",
+        "executor-switch",
+        "validated-patch",
+        "preview-cancel",
+    } == positive_ids
+    negative_ids = {case["id"] for case in evals["negative"]}
+    assert {
+        "silent-local",
+        "ambiguous-local",
+        "apply-unvalidated",
+        "fake-isolation",
+        "reuse-executor-digest",
+    } == negative_ids
 
 
 def test_readme_installs_bare_runtime_command_before_plugin_marketplace() -> None:
