@@ -1,11 +1,13 @@
 import importlib
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from click.testing import Result
 from openai import OpenAIError
 from typer.testing import CliRunner
 
@@ -17,6 +19,22 @@ from repogent.preflight import PreflightReport
 from repogent.run_builder import RunOptions
 
 runner = CliRunner()
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_PANEL_BORDER = re.compile(r"[─-╿]")  # box drawing characters
+
+
+def rendered_output(result: Result) -> str:
+    """Return CLI output with color and panel framing normalized away.
+
+    When a terminal reports color support (GitHub Actions forces it), rich
+    renders parameter errors inside a bordered panel with ANSI escapes and wraps
+    the message across lines. Strip the escapes and borders and collapse
+    whitespace so assertions match the user-facing text either way.
+    """
+    text = _ANSI_ESCAPE.sub("", result.output)
+    text = _PANEL_BORDER.sub(" ", text)
+    return re.sub(r"\s+", " ", text)
 
 
 def test_run_delegates_construction_to_shared_builder(
@@ -272,10 +290,11 @@ def test_run_rejects_unknown_provider_without_traceback(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 2
-    assert "provider must be openai" in result.output
-    assert "codex-cli" in result.output
-    assert "scripted" in result.output
-    assert "Traceback" not in result.output
+    output = rendered_output(result)
+    assert "provider must be openai" in output
+    assert "codex-cli" in output
+    assert "scripted" in output
+    assert "Traceback" not in output
 
 
 def test_run_rejects_unknown_executor_without_traceback(tmp_path: Path) -> None:
@@ -294,8 +313,9 @@ def test_run_rejects_unknown_executor_without_traceback(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 2
-    assert "executor must be docker or local" in result.output
-    assert "Traceback" not in result.output
+    output = rendered_output(result)
+    assert "executor must be docker or local" in output
+    assert "Traceback" not in output
 
 
 def test_run_rejects_deferred_executor_without_traceback(tmp_path: Path) -> None:
@@ -1073,7 +1093,7 @@ def test_mcp_without_stdio_exits_two() -> None:
     result = runner.invoke(app, ["mcp"])
 
     assert result.exit_code == 2
-    assert "only --stdio is supported" in result.output
+    assert "only --stdio is supported" in rendered_output(result)
 
 
 def test_cli_import_does_not_eagerly_load_mcp(
