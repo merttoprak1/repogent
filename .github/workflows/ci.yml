@@ -19,12 +19,12 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - run: make verify
-      - name: Verify Codex plugin package
+      - name: Verify Codex plugin package and real stdio integration
         run: python -m pytest tests/unit/test_plugin_package.py tests/integration/test_plugin_end_to_end.py -q --no-cov
       - name: Build and inspect wheel
         run: |
           python -m build --wheel
-          python -c "import glob, zipfile; wheels = glob.glob('dist/*.whl'); assert len(wheels) == 1; names = zipfile.ZipFile(wheels[0]).namelist(); assert 'repogent/mcp_server.py' in names; assert 'repogent/py.typed' in names; assert any(name.endswith('.dist-info/licenses/LICENSE') for name in names)"
+          python -c "import glob, zipfile; wheels = glob.glob('dist/*.whl'); assert len(wheels) == 1; names = zipfile.ZipFile(wheels[0]).namelist(); assert 'repogent/mcp_server.py' in names; assert 'repogent/py.typed' in names; assert any(name.endswith('.dist-info/licenses/LICENSE') for name in names); assert not any('.superpowers' in name for name in names)"
       - name: Install wheel in isolated environment
         run: |
           python -m venv /tmp/repogent-wheel-smoke
