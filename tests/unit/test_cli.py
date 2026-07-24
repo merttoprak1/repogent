@@ -334,8 +334,9 @@ def test_run_rejects_deferred_executor_without_traceback(tmp_path: Path) -> None
         ],
     )
     assert result.exit_code == 2
-    assert "executor must be docker or local" in result.output
-    assert "Traceback" not in result.output
+    output = rendered_output(result)
+    assert "executor must be docker or local" in output
+    assert "Traceback" not in output
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
