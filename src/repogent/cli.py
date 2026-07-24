@@ -74,6 +74,14 @@ def run_command(
     output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
 ) -> None:
     """Run the approval-gated workflow and retain evidence outside the repository."""
+    if executor == "deferred":
+        # `deferred` is an internal-only executor value used by the session/plugin
+        # path, which always supplies an executor_selector_factory. The CLI has no
+        # way to prompt for executor selection, so reject it as an invalid choice
+        # instead of letting build_run raise an uncaught ValueError.
+        raise typer.BadParameter(
+            "executor must be docker or local", param_hint="--executor"
+        )
     options = RunOptions(
         repository=repository,
         request=request,

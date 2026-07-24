@@ -298,6 +298,27 @@ def test_run_rejects_unknown_executor_without_traceback(tmp_path: Path) -> None:
     assert "Traceback" not in result.output
 
 
+def test_run_rejects_deferred_executor_without_traceback(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--repository",
+            str(target),
+            "--request",
+            "change",
+            "--executor",
+            "deferred",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "executor must be docker or local" in result.output
+    assert "Traceback" not in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_run_rejects_script_with_openai_provider(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
