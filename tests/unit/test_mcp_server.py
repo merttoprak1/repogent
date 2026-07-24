@@ -11,7 +11,9 @@ from repogent.domain import (
     ApprovalKind,
     CheckoutState,
     Decision,
+    ExecutionMode,
     FinalValidationStatus,
+    IsolationLevel,
     RunStage,
     RunStatus,
 )
@@ -19,6 +21,9 @@ from repogent.mcp_models import (
     DoctorCheck,
     DoctorReport,
     DoctorRequest,
+    ExecutionDecision,
+    ExecutorOption,
+    PendingExecutionChoice,
     RunDecision,
     RunReport,
     RunSnapshot,
@@ -45,6 +50,54 @@ def _snapshot(run_id: str = "run-1") -> RunSnapshot:
     )
 
 
+def _executor_option(mode: ExecutionMode, *, digest: str) -> ExecutorOption:
+    return ExecutorOption(
+        mode=mode,
+        available=True,
+        isolation_level=(
+            IsolationLevel.ISOLATED
+            if mode is ExecutionMode.DOCKER
+            else IsolationLevel.REDUCED_ISOLATION
+        ),
+        option_digest=digest,
+        message=f"{mode.value} validation is available",
+    )
+
+
+def _pending_execution(
+    run_id: str = "run-1",
+    *,
+    preview_digest: str = "a" * 64,
+    preview: dict[str, object] | None = None,
+) -> PendingExecutionChoice:
+    return PendingExecutionChoice(
+        run_id=run_id,
+        preview_digest=preview_digest,
+        preview=preview if preview is not None else {"diff": "bounded preview"},
+        options=[
+            _executor_option(ExecutionMode.DOCKER, digest="b" * 64),
+            _executor_option(ExecutionMode.LOCAL, digest="c" * 64),
+        ],
+    )
+
+
+def _execution_decision(
+    run_id: str = "run-1",
+    *,
+    preview_digest: str = "a" * 64,
+    mode: ExecutionMode = ExecutionMode.LOCAL,
+    option_digest: str = "c" * 64,
+    decision: Decision = Decision.APPROVED,
+) -> ExecutionDecision:
+    return ExecutionDecision(
+        run_id=run_id,
+        preview_digest=preview_digest,
+        mode=mode,
+        option_digest=option_digest,
+        decision=decision,
+    )
+
+
 class FakeManager:
     def __init__(self) -> None:
         self.snapshot = _snapshot()
@@ -68,6 +121,10 @@ class FakeManager:
 
     def decide(self, decision: RunDecision) -> RunSnapshot:
         self.calls.append(("decide", decision))
+        return self.snapshot
+
+    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+        self.calls.append(("select_executor", decision))
         return self.snapshot
 
     def cancel(self, run_id: str) -> RunSnapshot:
@@ -137,6 +194,10 @@ class FailingManager(FakeManager):
         self._fail()
         raise AssertionError("unreachable")
 
+    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+        self._fail()
+        raise AssertionError("unreachable")
+
     def cancel(self, run_id: str) -> RunSnapshot:
         self._fail()
         raise AssertionError("unreachable")
@@ -174,6 +235,34 @@ def test_create_server_constructs_without_starting_transport() -> None:
 
 
 @pytest.mark.anyio
+async def test_server_registers_nine_tools_with_select_executor(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+) -> None:
+    session, _manager, _doctor = client_session
+
+    listed = await session.list_tools()
+    tools = {tool.name: tool for tool in listed.tools}
+
+    assert set(tools) == {
+        "repogent_doctor",
+        "start_run",
+        "get_run",
+        "approve_requirements",
+        "approve_plan",
+        "select_executor",
+        "approve_patch",
+        "cancel_run",
+        "get_report",
+    }
+    annotations = tools["select_executor"].annotations
+    assert annotations is not None
+    assert annotations.readOnlyHint is False
+    assert annotations.destructiveHint is False
+    assert annotations.idempotentHint is False
+    assert annotations.openWorldHint is False
+
+
+@pytest.mark.anyio
 async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
     client_session: tuple[ClientSession, FakeManager, FakeDoctor],
 ) -> None:
@@ -188,6 +277,7 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
         "get_run",
         "approve_requirements",
         "approve_plan",
+        "select_executor",
         "approve_patch",
         "cancel_run",
         "get_report",
@@ -201,8 +291,17 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
     assert decision_schema["$defs"]["RunDecision"]["properties"] == {
         key: value for key, value in RunDecision.model_json_schema()["properties"].items()
     }
+    execution_decision_schema = tools["select_executor"].inputSchema
+    assert execution_decision_schema["properties"]["decision"]["$ref"] == (
+        "#/$defs/ExecutionDecision"
+    )
+    assert execution_decision_schema["$defs"]["ExecutionDecision"]["properties"] == {
+        key: value
+        for key, value in ExecutionDecision.model_json_schema()["properties"].items()
+    }
     assert tools["repogent_doctor"].outputSchema == DoctorReport.model_json_schema()
     assert tools["start_run"].outputSchema == RunSnapshot.model_json_schema()
+    assert tools["select_executor"].outputSchema == RunSnapshot.model_json_schema()
     assert tools["get_report"].outputSchema == RunReport.model_json_schema()
     expected_run_id_schema = {
         "maxLength": 256,
@@ -221,6 +320,7 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
         "get_run": (True, False, True, False),
         "approve_requirements": (False, False, False, True),
         "approve_plan": (False, False, False, True),
+        "select_executor": (False, False, False, False),
         "approve_patch": (False, True, False, False),
         "cancel_run": (False, False, True, False),
         "get_report": (True, False, True, False),
@@ -452,6 +552,130 @@ async def test_decision_tools_enforce_gate_contracts_and_cancel_patch_rejection(
     ]
 
 
+@pytest.mark.anyio
+async def test_select_executor_routes_approved_decision_to_manager(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+) -> None:
+    session, manager, _doctor = client_session
+    decision = _execution_decision()
+
+    result = await session.call_tool(
+        "select_executor", {"decision": decision.model_dump(mode="json")}
+    )
+
+    assert result.isError is False
+    assert manager.calls == [("select_executor", decision)]
+
+
+@pytest.mark.anyio
+async def test_select_executor_rejects_non_approved_decision(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+) -> None:
+    session, manager, _doctor = client_session
+    decision = _execution_decision(decision=Decision.REJECTED)
+
+    result = await session.call_tool(
+        "select_executor", {"decision": decision.model_dump(mode="json")}
+    )
+
+    assert result.isError is True
+    assert "select_executor requires an approved decision" in result.content[0].text
+    assert manager.calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "run_id", ["x", "x" * 256], ids=["one-character", "256-characters"]
+)
+async def test_select_executor_run_id_boundaries_route_to_manager(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+    run_id: str,
+) -> None:
+    session, manager, _doctor = client_session
+    decision = _execution_decision(run_id=run_id)
+
+    result = await session.call_tool(
+        "select_executor", {"decision": decision.model_dump(mode="json")}
+    )
+
+    assert result.isError is False
+    assert manager.calls == [("select_executor", decision)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("run_id", ""),
+        ("run_id", "x" * 257),
+        ("preview_digest", "a" * 63),
+        ("preview_digest", "a" * 65),
+        ("option_digest", "A" * 64),
+    ],
+    ids=[
+        "empty-run-id",
+        "257-character-run-id",
+        "63-character-digest",
+        "65-character-digest",
+        "uppercase-digest",
+    ],
+)
+async def test_select_executor_rejects_out_of_bounds_fields_without_routing(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+    field: str,
+    value: str,
+) -> None:
+    session, manager, _doctor = client_session
+    payload = _execution_decision().model_dump(mode="json")
+    payload[field] = value
+
+    result = await session.call_tool("select_executor", {"decision": payload})
+
+    assert result.isError is True
+    assert manager.calls == []
+
+
+@pytest.mark.anyio
+async def test_select_executor_rejects_invalid_mode_value(
+    client_session: tuple[ClientSession, FakeManager, FakeDoctor],
+) -> None:
+    session, manager, _doctor = client_session
+    payload = _execution_decision().model_dump(mode="json")
+    payload["mode"] = "kubernetes"
+
+    result = await session.call_tool("select_executor", {"decision": payload})
+
+    assert result.isError is True
+    assert manager.calls == []
+
+
+@pytest.mark.anyio
+async def test_secret_bearing_execution_preview_fails_closed() -> None:
+    manager = FakeManager()
+    manager.snapshot = manager.snapshot.model_copy(
+        update={
+            "pending_execution": _pending_execution(
+                preview={"diff": "token=sk-proj-1234567890abcdef"}
+            )
+        }
+    )
+    server = create_server(manager=manager, doctor=FakeDoctor())
+
+    async with create_connected_server_and_client_session(
+        server, raise_exceptions=True
+    ) as session:
+        decision = _execution_decision()
+        result = await session.call_tool(
+            "select_executor", {"decision": decision.model_dump(mode="json")}
+        )
+
+    assert result.isError is True
+    assert result.content[0].text.endswith(
+        "executor selection could not be applied; inspect local Repogent logs"
+    )
+    assert "sk-proj-1234567890abcdef" not in result.content[0].text
+
+
 def test_serve_stdio_runs_only_stdio_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -483,11 +707,16 @@ async def test_falsey_injected_dependencies_are_used_and_shut_down() -> None:
             {"request": doctor_request.model_dump(mode="json")},
         )
         run_result = await session.call_tool("get_run", {"run_id": "run-1"})
+        execution_decision = _execution_decision()
+        select_result = await session.call_tool(
+            "select_executor", {"decision": execution_decision.model_dump(mode="json")}
+        )
 
     assert doctor_result.structuredContent == doctor.report.model_dump(mode="json")
     assert run_result.structuredContent == manager.snapshot.model_dump(mode="json")
+    assert select_result.structuredContent == manager.snapshot.model_dump(mode="json")
     assert doctor.calls == [doctor_request]
-    assert manager.calls == [("get", "run-1")]
+    assert manager.calls == [("get", "run-1"), ("select_executor", execution_decision)]
     assert manager.shutdown_called is True
 
 
@@ -619,6 +848,11 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
             "run decision could not be applied; inspect local Repogent logs",
         ),
         (
+            "select_executor",
+            {"decision": _execution_decision().model_dump(mode="json")},
+            "executor selection could not be applied; inspect local Repogent logs",
+        ),
+        (
             "approve_patch",
             {"decision": patch.model_dump(mode="json")},
             "run decision could not be applied; inspect local Repogent logs",
@@ -723,4 +957,28 @@ async def test_shutdown_failure_preserves_existing_context_error_without_leaks()
 
     _assert_sanitized_lifecycle_error(raised.value)
     assert raised.value.subgroup(ContextFailure) is not None
+
+
+@pytest.mark.anyio
+async def test_shutdown_base_exception_is_not_sanitized_and_propagates() -> None:
+    class ShutdownCancelled(BaseException):
+        pass
+
+    class CancelledShutdownManager(FakeManager):
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+            raise ShutdownCancelled("shutdown cancelled")
+
+    manager = CancelledShutdownManager()
+    server = create_server(manager=manager, doctor=FakeDoctor())
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        async with create_connected_server_and_client_session(
+            server, raise_exceptions=True
+        ):
+            pass
+
+    assert raised.value.subgroup(ShutdownCancelled) is not None
+    assert "session shutdown failed" not in str(raised.value)
+    assert manager.shutdown_called is True
     assert manager.shutdown_called is True
