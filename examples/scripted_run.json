@@ -28,7 +28,7 @@
       "GET /health returns exactly {\"status\": \"ok\"}",
       "All tests pass"
     ],
-    "diff": "--- a/app.py\n+++ b/app.py\n@@ -6,3 +6,8 @@\n @app.get(\"/\")\n def root() -> dict[str, str]:\n     return {\"message\": \"demo\"}\n+\n+\n+@app.get(\"/health\")\n+def health() -> dict[str, str]:\n+    return {\"status\": \"ok\"}\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -6,3 +6,9 @@\n \n def test_root() -> None:\n     assert client.get(\"/\").json() == {\"message\": \"demo\"}  # noqa: S101  # nosec B101\n+\n+\n+def test_health() -> None:\n+    response = client.get(\"/health\")\n+    assert response.status_code == 200  # nosec B101\n+    assert response.json() == {\"status\": \"ok\"}  # nosec B101\n"
+    "diff": "--- a/app.py\n+++ b/app.py\n@@ -6,3 +6,8 @@\n @app.get(\"/\")\n def root() -> dict[str, str]:\n     return {\"message\": \"demo\"}\n+\n+\n+@app.get(\"/health\")\n+def health() -> dict[str, str]:\n+    return {\"status\": \"ok\"}\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -7,3 +7,9 @@\n \n def test_root() -> None:\n     assert client.get(\"/\").json() == {\"message\": \"demo\"}  # nosec B101\n+\n+\n+def test_health() -> None:\n+    response = client.get(\"/health\")\n+    assert response.status_code == 200  # nosec B101\n+    assert response.json() == {\"status\": \"ok\"}  # nosec B101\n"
   },
   {
     "summary": "Alternative health endpoint implementation",
@@ -37,7 +37,7 @@
       "GET /health returns exactly {\"status\": \"ok\"}",
       "All tests pass"
     ],
-    "diff": "--- a/app.py\n+++ b/app.py\n@@ -6,3 +6,8 @@\n @app.get(\"/\")\n def root() -> dict[str, str]:\n     return {\"message\": \"demo\"}\n+\n+\n+@app.get(\"/health\")\n+def health() -> dict[str, str]:\n+    return {\"status\": \"ok\"}\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -6,3 +6,9 @@\n \n def test_root() -> None:\n     assert client.get(\"/\").json() == {\"message\": \"demo\"}  # noqa: S101  # nosec B101\n+\n+\n+def test_health() -> None:\n+    response = client.get(\"/health\")\n+    assert response.status_code == 200  # nosec B101\n+    assert response.json() == {\"status\": \"ok\"}  # nosec B101\n"
+    "diff": "--- a/app.py\n+++ b/app.py\n@@ -6,3 +6,8 @@\n @app.get(\"/\")\n def root() -> dict[str, str]:\n     return {\"message\": \"demo\"}\n+\n+\n+@app.get(\"/health\")\n+def health() -> dict[str, str]:\n+    return {\"status\": \"ok\"}\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -7,3 +7,9 @@\n \n def test_root() -> None:\n     assert client.get(\"/\").json() == {\"message\": \"demo\"}  # nosec B101\n+\n+\n+def test_health() -> None:\n+    response = client.get(\"/health\")\n+    assert response.status_code == 200  # nosec B101\n+    assert response.json() == {\"status\": \"ok\"}  # nosec B101\n"
   },
   {
     "summary": "Third bounded health endpoint candidate",
@@ -46,7 +46,7 @@
       "GET /health returns exactly {\"status\": \"ok\"}",
       "All tests pass"
     ],
-    "diff": "--- a/app.py\n+++ b/app.py\n@@ -6,3 +6,8 @@\n @app.get(\"/\")\n def root() -> dict[str, str]:\n     return {\"message\": \"demo\"}\n+\n+\n+@app.get(\"/health\")\n+def health() -> dict[str, str]:\n+    return {\"status\": \"ok\"}\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -6,3 +6,9 @@\n \n def test_root() -> None:\n     assert client.get(\"/\").json() == {\"message\": \"demo\"}  # noqa: S101  # nosec B101\n+\n+\n+def test_health() -> None:\n+    response = client.get(\"/health\")\n+    assert response.status_code == 200  # nosec B101\n+    assert response.json() == {\"status\": \"ok\"}  # nosec B101\n"
+    "diff": "--- a/app.py\n+++ b/app.py\n@@ -6,3 +6,8 @@\n @app.get(\"/\")\n def root() -> dict[str, str]:\n     return {\"message\": \"demo\"}\n+\n+\n+@app.get(\"/health\")\n+def health() -> dict[str, str]:\n+    return {\"status\": \"ok\"}\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -7,3 +7,9 @@\n \n def test_root() -> None:\n     assert client.get(\"/\").json() == {\"message\": \"demo\"}  # nosec B101\n+\n+\n+def test_health() -> None:\n+    response = client.get(\"/health\")\n+    assert response.status_code == 200  # nosec B101\n+    assert response.json() == {\"status\": \"ok\"}  # nosec B101\n"
   },
   {
     "acceptance_criteria_coverage": 1.0,
