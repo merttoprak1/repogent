@@ -4,6 +4,7 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from repogent.candidates import PatchPreview, patch_preview_digest
@@ -28,6 +29,57 @@ class ExecutionGateError(RuntimeError):
     pass
 
 
+DEFAULT_EXECUTOR_INSPECTION_CAPACITY = 4
+
+
+class ExecutorInspectionCoordinator:
+    def __init__(
+        self, capacity: int = DEFAULT_EXECUTOR_INSPECTION_CAPACITY
+    ) -> None:
+        if capacity <= 0:
+            raise ValueError("executor inspection capacity must be positive")
+        self.capacity = capacity
+        self._condition = threading.Condition()
+        self._active = 0
+
+    def start(self, target: Callable[[], None], *, name: str) -> bool:
+        with self._condition:
+            if self._active >= self.capacity:
+                return False
+            self._active += 1
+
+        def run() -> None:
+            try:
+                target()
+            finally:
+                with self._condition:
+                    self._active -= 1
+                    self._condition.notify_all()
+
+        worker = threading.Thread(target=run, name=name, daemon=True)
+        try:
+            worker.start()
+        except BaseException:
+            with self._condition:
+                self._active -= 1
+                self._condition.notify_all()
+            raise
+        return True
+
+    def wait_for_idle(self, *, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        with self._condition:
+            while self._active > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
+
+
+_PROCESS_INSPECTION_COORDINATOR = ExecutorInspectionCoordinator()
+
+
 class GateExecutorSelector:
     def __init__(
         self,
@@ -35,11 +87,18 @@ class GateExecutorSelector:
         root: Path,
         policy: ValidationPolicy,
         registry: ExecutorRegistry,
+        *,
+        inspection_coordinator: ExecutorInspectionCoordinator | None = None,
     ) -> None:
         self.run_id = run_id
         self._root = root.resolve(strict=True)
         self._policy = policy
         self._registry = registry
+        self._inspection_coordinator = (
+            inspection_coordinator
+            if inspection_coordinator is not None
+            else _PROCESS_INSPECTION_COORDINATOR
+        )
         self._condition = threading.Condition()
         self._generation = 0
         self._pending: PendingExecutionChoice | None = None
@@ -286,6 +345,9 @@ class GateExecutorSelector:
 
         def inspect() -> None:
             nonlocal abandoned, error, finished, result
+            with self._condition:
+                if abandoned or self._closed:
+                    return
             try:
                 inspected = self._registry.inspect_availability(
                     self._root, self._policy
@@ -308,12 +370,20 @@ class GateExecutorSelector:
                 raise WorkflowCancelled("executor selection gate is closed")
             if time.monotonic() >= deadline:
                 raise ExecutorSelectionRejected("executor selection timed out")
-            worker = threading.Thread(
-                target=inspect,
-                name=f"repogent-executor-inspection-{self.run_id}",
-                daemon=True,
-            )
-            worker.start()
+            try:
+                started = self._inspection_coordinator.start(
+                    inspect,
+                    name=f"repogent-executor-inspection-{self.run_id}",
+                )
+            except RuntimeError as start_error:
+                raise ExecutionGateError(
+                    "executor availability inspection could not start"
+                ) from start_error
+            if not started:
+                raise ExecutionGateError(
+                    "executor inspection capacity is exhausted; "
+                    "retry after active inspections finish"
+                )
             while not finished and not self._closed:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

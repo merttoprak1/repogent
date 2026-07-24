@@ -12,7 +12,11 @@ from repogent.approval_gate import ApprovalGateError, GateApprover
 from repogent.approvals import Approver
 from repogent.domain import PendingApproval, RunManifest, RunStatus
 from repogent.execution import ValidationPolicy
-from repogent.execution_gate import ExecutionGateError, GateExecutorSelector
+from repogent.execution_gate import (
+    ExecutionGateError,
+    ExecutorInspectionCoordinator,
+    GateExecutorSelector,
+)
 from repogent.executor_selection import ExecutorRegistry
 from repogent.mcp_models import (
     ExecutionDecision,
@@ -419,6 +423,7 @@ class SessionManager:
         *,
         builder: RunBuilder = build_run,
         executor_registry: ExecutorRegistry | None = None,
+        executor_inspection_coordinator: ExecutorInspectionCoordinator | None = None,
         shutdown_timeout_seconds: float = 10.0,
     ) -> None:
         self._builder = builder
@@ -426,6 +431,11 @@ class SessionManager:
             executor_registry
             if executor_registry is not None
             else ExecutorRegistry()
+        )
+        self._executor_inspection_coordinator = (
+            executor_inspection_coordinator
+            if executor_inspection_coordinator is not None
+            else ExecutorInspectionCoordinator()
         )
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._lock = threading.RLock()
@@ -471,6 +481,7 @@ class SessionManager:
                     prepared_root,
                     policy,
                     self._executor_registry,
+                    inspection_coordinator=self._executor_inspection_coordinator,
                 )
                 return executor_gate
 

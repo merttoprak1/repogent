@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -19,7 +20,11 @@ from repogent.domain import (
     VerificationStatus,
 )
 from repogent.execution import ValidationPolicy
-from repogent.execution_gate import ExecutionGateError, GateExecutorSelector
+from repogent.execution_gate import (
+    ExecutionGateError,
+    ExecutorInspectionCoordinator,
+    GateExecutorSelector,
+)
 from repogent.executor_selection import (
     LOCAL_RISK_STATEMENT,
     ExecutorSelectionError,
@@ -180,6 +185,41 @@ class BlockingInspectionRegistry(RecordingRegistry):
             return super().inspect_availability(root, policy)
         finally:
             self.inspect_finished.set()
+
+
+class CapacityBlockingInspectionRegistry(RecordingRegistry):
+    def __init__(self, capacity: int) -> None:
+        super().__init__()
+        self._capacity = capacity
+        self._lock = threading.Lock()
+        self.inspect_calls = 0
+        self.active_inspections = 0
+        self.max_active_inspections = 0
+        self.capacity_reached = threading.Event()
+        self.release_inspections = threading.Event()
+        self.all_inspections_finished = threading.Event()
+        self.inspection_daemons: list[bool] = []
+
+    def inspect_availability(
+        self, root: Path, policy: ValidationPolicy
+    ) -> list[ExecutorAvailability]:
+        with self._lock:
+            self.inspect_calls += 1
+            self.active_inspections += 1
+            self.max_active_inspections = max(
+                self.max_active_inspections, self.active_inspections
+            )
+            self.inspection_daemons.append(threading.current_thread().daemon)
+            if self.active_inspections == self._capacity:
+                self.capacity_reached.set()
+        try:
+            assert self.release_inspections.wait(timeout=5)
+            return super().inspect_availability(root, policy)
+        finally:
+            with self._lock:
+                self.active_inspections -= 1
+                if self.active_inspections == 0:
+                    self.all_inspections_finished.set()
 
 
 def preview(*, replacement: str = "value = 2") -> PatchPreview:
@@ -677,3 +717,81 @@ def test_selection_timeout_includes_blocked_availability_inspection(
         worker.join(timeout=1)
     assert not worker.is_alive()
     assert gate.wait(after_generation=0, timeout_seconds=0) == (0, None)
+
+
+def test_inspection_capacity_rejects_repeated_work_and_recovers_after_release(
+    tmp_path: Path,
+) -> None:
+    capacity = 2
+    coordinator = ExecutorInspectionCoordinator(capacity=capacity)
+    registry = CapacityBlockingInspectionRegistry(capacity)
+    admitted_gates = [
+        GateExecutorSelector(
+            f"run-{index}",
+            tmp_path,
+            ValidationPolicy(),
+            registry,
+            inspection_coordinator=coordinator,
+        )
+        for index in range(capacity)
+    ]
+    admitted = [start_selection(gate, preview()) for gate in admitted_gates]
+    saturated_gates = [
+        GateExecutorSelector(
+            f"saturated-{index}",
+            tmp_path,
+            ValidationPolicy(),
+            registry,
+            inspection_coordinator=coordinator,
+        )
+        for index in range(3)
+    ]
+    recovered_worker: threading.Thread | None = None
+    recovered_outcome: Future[PreparedExecutor] | None = None
+    try:
+        assert registry.capacity_reached.wait(timeout=1)
+
+        for gate in saturated_gates:
+            started = time.monotonic()
+            with pytest.raises(ExecutionGateError, match="inspection capacity"):
+                gate.select(preview(), timeout_seconds=1)
+            assert time.monotonic() - started < 0.2
+            assert gate.wait(after_generation=0, timeout_seconds=0) == (0, None)
+        assert registry.inspect_calls == capacity
+        assert registry.max_active_inspections == capacity
+        assert registry.inspection_daemons == [True] * capacity
+        assert registry.prepare_calls == []
+
+        admitted_gates[0].close()
+        with pytest.raises(WorkflowCancelled, match="closed"):
+            admitted[0][1].result(timeout=0.2)
+        assert not registry.all_inspections_finished.is_set()
+
+        registry.release_inspections.set()
+        assert registry.all_inspections_finished.wait(timeout=1)
+        assert coordinator.wait_for_idle(timeout_seconds=1)
+        assert admitted_gates[0].wait(
+            after_generation=0, timeout_seconds=0
+        ) == (0, None)
+
+        assert pending_choice(admitted_gates[1]) is not None
+        recovered_worker, recovered_outcome = start_selection(
+            saturated_gates[0], preview()
+        )
+        assert pending_choice(saturated_gates[0]) is not None
+        assert registry.inspect_calls == capacity + 1
+        assert registry.max_active_inspections == capacity
+    finally:
+        registry.release_inspections.set()
+        for gate in admitted_gates + saturated_gates:
+            gate.close()
+        for worker, _outcome in admitted:
+            worker.join(timeout=1)
+        if recovered_worker is not None:
+            recovered_worker.join(timeout=1)
+    assert all(not worker.is_alive() for worker, _outcome in admitted)
+    assert recovered_worker is not None
+    assert not recovered_worker.is_alive()
+    assert recovered_outcome is not None
+    with pytest.raises(WorkflowCancelled, match="closed"):
+        recovered_outcome.result(timeout=0)
