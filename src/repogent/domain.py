@@ -103,6 +103,31 @@ class TrustLabel(StrEnum):
     ISOLATED_VERIFIED = "ISOLATED VERIFIED"
 
 
+def compute_trust_label(
+    execution_mode: ExecutionMode | None,
+    isolation_level: IsolationLevel | None,
+    verification_status: VerificationStatus,
+) -> TrustLabel:
+    """Compute the single trust-label decision shared by reports and MCP snapshots.
+
+    Local execution is always reduced isolation regardless of check outcome.
+    Docker execution may only claim isolated-verified once isolation was
+    actually applied and required validation passed; every other combination
+    is downgraded to unvalidated rather than overstated. Both `reporting.py`
+    and `mcp_models.py` delegate to this function so the two independent
+    trust-label channels can never drift apart.
+    """
+    if execution_mode is ExecutionMode.LOCAL:
+        return TrustLabel.REDUCED_ISOLATION
+    if (
+        execution_mode is ExecutionMode.DOCKER
+        and isolation_level is IsolationLevel.ISOLATED
+        and verification_status is VerificationStatus.PASSED
+    ):
+        return TrustLabel.ISOLATED_VERIFIED
+    return TrustLabel.UNVALIDATED
+
+
 class MergeRecommendation(StrEnum):
     APPROVE = "approve"
     APPROVE_WITH_FINDINGS = "approve_with_findings"
