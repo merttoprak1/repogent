@@ -957,6 +957,7 @@ async def test_shutdown_failure_preserves_existing_context_error_without_leaks()
 
     _assert_sanitized_lifecycle_error(raised.value)
     assert raised.value.subgroup(ContextFailure) is not None
+    assert manager.shutdown_called is True
 
 
 @pytest.mark.anyio
@@ -980,5 +981,4 @@ async def test_shutdown_base_exception_is_not_sanitized_and_propagates() -> None
 
     assert raised.value.subgroup(ShutdownCancelled) is not None
     assert "session shutdown failed" not in str(raised.value)
-    assert manager.shutdown_called is True
     assert manager.shutdown_called is True
