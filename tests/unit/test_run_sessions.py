@@ -29,6 +29,7 @@ from repogent.domain import (
     VerificationStatus,
 )
 from repogent.execution import ValidationPolicy
+from repogent.execution_gate import ExecutorInspectionCoordinator
 from repogent.executor_selection import LOCAL_RISK_STATEMENT, PreparedExecutor
 from repogent.mcp_models import (
     ExecutionDecision,
@@ -194,10 +195,12 @@ class BlockingInspectionSessionRegistry(SessionRegistry):
         self.inspect_entered = threading.Event()
         self.release_inspect = threading.Event()
         self.inspect_finished = threading.Event()
+        self.inspect_calls = 0
 
     def inspect_availability(
         self, root: Path, policy: ValidationPolicy
     ) -> list[ExecutorAvailability]:
+        self.inspect_calls += 1
         self.inspect_entered.set()
         try:
             assert self.release_inspect.wait(timeout=5)
@@ -653,6 +656,78 @@ def test_cancel_terminalizes_while_availability_inspection_is_blocked(
     assert not planner.is_alive()
     assert planner_errors == []
     assert len(planner_results) == 1
+
+
+def test_manager_shares_inspection_capacity_without_blocking_cancel_or_shutdown(
+    tmp_path: Path,
+) -> None:
+    registry = BlockingInspectionSessionRegistry()
+    manager = SessionManager(
+        builder=make_builder(),
+        executor_registry=registry,  # type: ignore[arg-type]
+        executor_inspection_coordinator=ExecutorInspectionCoordinator(capacity=1),
+        shutdown_timeout_seconds=1,
+    )
+    first = manager.start(
+        deferred_request(make_target(tmp_path, "first"), tmp_path / "runs")
+    )
+    first = manager.decide(decision_for(first))
+    assert first.pending_approval is not None
+    assert first.pending_approval.kind is ApprovalKind.PLAN
+    first_results: list[object] = []
+    first_errors: list[BaseException] = []
+
+    def approve_first_plan() -> None:
+        try:
+            first_results.append(manager.decide(decision_for(first)))
+        except BaseException as error:
+            first_errors.append(error)
+
+    first_planner = threading.Thread(target=approve_first_plan)
+    first_planner.start()
+    shutdown_complete = False
+    try:
+        assert registry.inspect_entered.wait(timeout=1)
+
+        second = manager.start(
+            deferred_request(make_target(tmp_path, "second"), tmp_path / "runs")
+        )
+        second = manager.decide(decision_for(second))
+        started = time.monotonic()
+        second = manager.decide(decision_for(second))
+        assert time.monotonic() - started < 0.5
+        assert second.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+        assert second.reason is not None
+        assert "inspection capacity" in second.reason
+        assert second.pending_execution is None
+        assert registry.inspect_calls == 1
+
+        started = time.monotonic()
+        cancelled = manager.cancel(first.run_id)
+        assert time.monotonic() - started < 0.5
+        assert cancelled.status is RunStatus.CANCELLED
+        assert cancelled.pending_execution is None
+        assert not registry.inspect_finished.is_set()
+
+        started = time.monotonic()
+        manager.shutdown()
+        shutdown_complete = True
+        assert time.monotonic() - started < 0.5
+        assert not registry.inspect_finished.is_set()
+    finally:
+        registry.release_inspect.set()
+        assert registry.inspect_finished.wait(timeout=1)
+        first_planner.join(timeout=2)
+        if not shutdown_complete:
+            manager.shutdown()
+    assert not first_planner.is_alive()
+    assert first_errors == []
+    assert len(first_results) == 1
+    session = manager._sessions[first.run_id]
+    assert session.executor_gate is not None
+    assert session.executor_gate.wait(
+        after_generation=0, timeout_seconds=0
+    ) == (0, None)
 
 
 def test_get_reconciles_pending_execution_after_caller_disconnect(
