@@ -362,6 +362,9 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     assert persisted["configuration_fingerprint"]
     assert persisted["selected_candidate_id"] == "candidate-1"
     assert persisted["events_file"] == "events.jsonl"
+    assert persisted["execution_mode"] == "local"
+    assert persisted["verification_status"] == "passed"
+    assert persisted["preview_digest"]
     events = [
         RunEvent.model_validate(json.loads(line))
         for line in (evidence / "events.jsonl").read_text().splitlines()
@@ -375,6 +378,9 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     report = (evidence / "report.md").read_text()
     assert "candidate-1" in report
     assert "| selected |" in report
+    assert "Verification: REDUCED ISOLATION" in report
+    assert "Execution mode: local" in report
+    assert f"Preview digest: {persisted['preview_digest']}" in report
 
 
 @pytest.mark.parametrize("name", ["python_library", "python_cli", "python_data"])
@@ -454,6 +460,8 @@ def test_all_failed_candidates_leave_the_real_repository_unchanged(tmp_path: Pat
     report = (workflow.artifacts.root / "report.md").read_text()
     assert all(candidate_id in report for candidate_id in manifest.candidate_ids)
     assert "rejected" in report
+    assert "Verification: REDUCED ISOLATION" in report
+    assert "Execution mode: local" in report
 
 
 def test_nested_suffix_test_failure_makes_candidates_ineligible_and_unselected(
