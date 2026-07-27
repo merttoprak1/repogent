@@ -22,6 +22,28 @@ deadline, and preserves the resulting manifest and report. A later client must
 inspect persisted evidence rather than assuming a disconnected mutation did or
 did not occur.
 
+## Progressive executor selection
+
+The plugin starts runs with a deferred executor so readiness and execution are
+split. **Split readiness:** preflight separates base readiness (repository,
+provider, and fixed validation commands) from executor availability. Base
+readiness gates requirements, the plan, and the preview; a missing Docker
+executor is recorded as an unavailable option, not a blocking failure, so Docker
+absence never stops preview. **Static preview:** after plan approval a deferred
+run builds an `UNVALIDATED` patch preview — the exact diff, changed paths and
+lines, and a preview digest — entirely from the proposed candidate, without
+executing any target-repository code. **Execution gate:** a digest-bound
+`select_executor` decision sits between plan approval and validation; it binds to
+the current preview and option digests, requires explicit reduced-isolation
+consent for local, and is never a fourth content approval. Ambiguous localization
+can generate more than one candidate, and each candidate's preview requires its
+own selection. **Late validator construction:** the executor and its validation
+pipeline are constructed only after selection, so no container or host validator
+exists — and no target code runs — until the operator has chosen an isolation
+level. Local execution yields `REDUCED ISOLATION`; Docker yields `ISOLATED
+VERIFIED` only when required checks pass. Docker never silently falls back to
+local.
+
 ## Runtime flow
 
 The detailed state machine is preserved in `RunStage`. The following are conceptual/user-facing phases, not literal emitted stage labels: **Understand → Localize → Propose → Validate → Decide**.

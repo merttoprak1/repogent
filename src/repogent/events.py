@@ -12,13 +12,15 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from repogent.domain import RunEvent
+from repogent.domain import RunEvent, RunStage, RunStatus
 from repogent.sanitization import redact_text, sanitize_data
 
 MAX_EVENT_BYTES = 65_536
 MAX_TIMELINE_COUNT = 1_000_000_000
 MAX_TIMELINE_COST_CHARS = 32
 _COUNT_TEXT = re.compile(r"[0-9]+$")
+_KNOWN_STAGES = frozenset(stage.value for stage in RunStage)
+_KNOWN_STATUSES = frozenset(status.value for status in RunStatus)
 
 
 class EventSink(Protocol):
@@ -48,8 +50,19 @@ class ConsoleEventSink:
 
     def emit(self, event: RunEvent) -> None:
         message = " ".join(redact_text(event.message, self.secrets).split())
-        suffix = self._validation_suffix(event) if event.kind.value == "validation" else ""
+        suffix = self._suffix(event)
         self.write(f"[{event.kind.value}] {message}{suffix}")
+
+    @staticmethod
+    def _suffix(event: RunEvent) -> str:
+        kind = event.kind.value
+        if kind == "validation":
+            return ConsoleEventSink._validation_suffix(event)
+        if kind == "stage":
+            return _bounded_label_suffix(event.data.get("stage"), _KNOWN_STAGES)
+        if kind == "terminal":
+            return _bounded_label_suffix(event.data.get("status"), _KNOWN_STATUSES)
+        return ""
 
     @staticmethod
     def _validation_suffix(event: RunEvent) -> str:
@@ -61,6 +74,17 @@ class ConsoleEventSink:
         if cost is not None:
             values.append(f"${cost}")
         return f" ({', '.join(values)})"
+
+
+def _bounded_label_suffix(value: object, allowed: frozenset[str]) -> str:
+    """Render a closed-vocabulary label (a workflow stage or run status) safely.
+
+    Only values that exactly match a known enum member are surfaced; anything
+    else (including arbitrarily large or malformed input) is dropped rather
+    than echoed, so this can never become a vector for raw command output or
+    unbounded console text.
+    """
+    return f" ({value})" if isinstance(value, str) and value in allowed else ""
 
 
 def _nonnegative_int(value: object) -> int:

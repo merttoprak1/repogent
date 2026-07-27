@@ -11,6 +11,7 @@ from repogent.domain import (
     CheckResult,
     CheckStatus,
     Decision,
+    ExecutionMode,
     FinalValidationStatus,
     ImplementationPlan,
     PendingApproval,
@@ -24,6 +25,7 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    VerificationStatus,
 )
 from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
 
@@ -131,6 +133,24 @@ def test_manifest_starts_in_created_state() -> None:
     assert manifest.stage is RunStage.CREATED
 
 
+def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
+    manifest = RunManifest.model_validate(
+        {"run_id": "legacy-run", "request": "Apply a safe change"}
+    )
+
+    assert manifest.execution_mode is None
+    assert manifest.isolation_level is None
+    assert manifest.verification_status is VerificationStatus.UNVALIDATED
+    assert manifest.preview_digest is None
+
+    selected = RunManifest(
+        run_id="run-123",
+        request="Apply a safe change",
+        execution_mode=ExecutionMode.LOCAL,
+    )
+    assert selected.execution_mode is ExecutionMode.LOCAL
+
+
 def test_manifest_phase_two_fields_round_trip_through_json() -> None:
     manifest = RunManifest(
         run_id="run-123",
@@ -209,6 +229,18 @@ def test_mcp_run_start_and_decision_are_versioned_and_typed(tmp_path) -> None:
     assert start.repository == target
     assert start.schema_version == "1"
     assert decision.feedback is None
+
+    assert RunStart(repository=target, request="Apply a safe change").executor == "docker"
+    assert (
+        RunStart(
+            repository=target,
+            request="Apply a safe change",
+            executor="deferred",
+        ).executor
+        == "deferred"
+    )
+    with pytest.raises(ValidationError, match="executor"):
+        RunStart(repository=target, request="Apply a safe change", executor="remote")
 
 
 def test_mcp_models_enforce_input_and_output_bounds(tmp_path) -> None:

@@ -11,8 +11,27 @@ from typing import Protocol, cast
 from repogent.approval_gate import ApprovalGateError, GateApprover
 from repogent.approvals import Approver
 from repogent.domain import PendingApproval, RunManifest, RunStatus
-from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
-from repogent.run_builder import PreparedRun, RunOptions, build_run
+from repogent.execution import ValidationPolicy
+from repogent.execution_gate import (
+    ExecutionGateError,
+    ExecutorInspectionCoordinator,
+    GateExecutorSelector,
+)
+from repogent.executor_selection import ExecutorRegistry
+from repogent.mcp_models import (
+    ExecutionDecision,
+    PendingExecutionChoice,
+    RunDecision,
+    RunReport,
+    RunSnapshot,
+    RunStart,
+)
+from repogent.run_builder import (
+    ExecutorSelectorFactory,
+    PreparedRun,
+    RunOptions,
+    build_run,
+)
 from repogent.sanitization import redact_text, sanitize_data
 
 _ORIGINAL_OS_OPEN = os.open
@@ -47,6 +66,7 @@ class RunBuilder(Protocol):
         options: RunOptions,
         approver_factory: Callable[[str], Approver],
         *,
+        executor_selector_factory: ExecutorSelectorFactory | None = None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> PreparedRun: ...
 
@@ -58,11 +78,13 @@ class RunSession:
         self,
         prepared: PreparedRun,
         approver: GateApprover,
+        executor_gate: GateExecutorSelector | None,
         cancel_event: threading.Event,
         on_done: Callable[[str, Path], None],
     ) -> None:
         self.prepared = prepared
         self.approver = approver
+        self.executor_gate = executor_gate
         self._cancel = cancel_event
         self._on_done = on_done
         self._root = prepared.workflow.root.resolve(strict=True)
@@ -74,6 +96,8 @@ class RunSession:
         self._terminal = False
         self._pending: PendingApproval | None = None
         self._generation = 0
+        self._pending_execution: PendingExecutionChoice | None = None
+        self._execution_generation = 0
         self._operation_lock = threading.RLock()
         self._wait_lock = threading.Lock()
         self._thread = threading.Thread(
@@ -97,6 +121,7 @@ class RunSession:
     def snapshot(self) -> RunSnapshot:
         while True:
             with self._operation_lock:
+                self._refresh_execution_pending_locked()
                 manifest = self._result or self.prepared.workflow.manifest
                 if (
                     manifest.status is RunStatus.RUNNING
@@ -117,6 +142,20 @@ class RunSession:
             except ApprovalGateError as error:
                 raise SessionError(str(error)) from error
             self._pending = None
+        return self.wait_for_change()
+
+    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+        with self._operation_lock:
+            if self.executor_gate is None:
+                raise SessionError("no executor selection is pending")
+            executor_gate = self.executor_gate
+        try:
+            submitted_generation = executor_gate.submit(decision)
+        except ExecutionGateError as error:
+            raise SessionError(str(error)) from error
+        with self._operation_lock:
+            if self._execution_generation == submitted_generation:
+                self._pending_execution = None
         return self.wait_for_change()
 
     def cancel(self) -> RunSnapshot:
@@ -141,29 +180,54 @@ class RunSession:
             if acquired:
                 self._operation_lock.release()
         self.approver.close()
+        if self.executor_gate is not None:
+            self.executor_gate.close()
         return acquired and time.monotonic() <= deadline
 
     def close(self) -> None:
         self.approver.close()
+        if self.executor_gate is not None:
+            self.executor_gate.close()
 
     def wait_for_change(self) -> RunSnapshot:
         with self._wait_lock:
             while not self._done.is_set():
                 with self._operation_lock:
                     generation = self._generation
+                    execution_generation = self._execution_generation
                 generation, pending = self.approver.wait(
                     after_generation=generation,
                     timeout_seconds=self._WAIT_INTERVAL_SECONDS,
                 )
+                execution_pending: PendingExecutionChoice | None = None
+                if self.executor_gate is not None:
+                    execution_generation, execution_pending = self.executor_gate.wait(
+                        after_generation=execution_generation,
+                        timeout_seconds=0,
+                    )
                 with self._operation_lock:
                     if generation > self._generation:
                         self._generation = generation
                         self._pending = pending
-                        if pending is not None:
-                            return self._snapshot()
+                    if execution_generation > self._execution_generation:
+                        self._execution_generation = execution_generation
+                        self._pending_execution = execution_pending
+                    if (
+                        self._pending is not None
+                        and self._pending_execution is not None
+                    ):
+                        raise SessionError(
+                            "content approval and executor selection cannot both be pending"
+                        )
+                    if (
+                        self._pending is not None
+                        or self._pending_execution is not None
+                    ):
+                        return self._snapshot()
                 self._done.wait(self._WAIT_INTERVAL_SECONDS)
             with self._operation_lock:
                 self._pending = None
+                self._pending_execution = None
                 return self._snapshot()
 
     def join(self, timeout_seconds: float) -> None:
@@ -240,8 +304,11 @@ class RunSession:
         try:
             result = self.prepared.workflow.run()
         finally:
+            self.close()
             with self._operation_lock:
                 self._workflow_finished = True
+                self._pending = None
+                self._pending_execution = None
             try:
                 self._on_done(self.prepared.manifest.run_id, self._root)
             finally:
@@ -253,14 +320,30 @@ class RunSession:
 
     def _snapshot(self, manifest: RunManifest | None = None) -> RunSnapshot:
         manifest = manifest or self._result or self.prepared.workflow.manifest
-        pending = (
-            self._pending.model_copy(deep=True) if self._pending is not None else None
-        )
+        terminal = manifest.status is not RunStatus.RUNNING
+        pending = None
+        pending_execution = None
+        if not terminal:
+            pending = (
+                self._pending.model_copy(deep=True)
+                if self._pending is not None
+                else None
+            )
+            pending_execution = (
+                self._pending_execution.model_copy(deep=True)
+                if self._pending_execution is not None
+                else None
+            )
+        if pending is not None and pending_execution is not None:
+            raise SessionError(
+                "content approval and executor selection cannot both be pending"
+            )
         snapshot = RunSnapshot(
             run_id=manifest.run_id,
             status=manifest.status,
             stage=manifest.stage,
             pending_approval=pending,
+            pending_execution=pending_execution,
             checkout_state=manifest.checkout_state,
             selected_patch_applied=manifest.selected_patch_applied,
             applied_paths=list(manifest.applied_paths),
@@ -268,6 +351,9 @@ class RunSession:
             reason=manifest.reason,
             evidence_path=str(self.prepared.store.root),
             cancellation_requested=self.cancellation_requested(),
+            execution_mode=manifest.execution_mode,
+            isolation_level=manifest.isolation_level,
+            verification_status=manifest.verification_status,
         )
         payload = snapshot.model_dump(mode="json")
         sanitized = sanitize_data(payload)
@@ -280,6 +366,10 @@ class RunSession:
                 or sanitized_pending.get("artifact") != pending.artifact
             ):
                 raise SessionError("run approval artifact is unsafe to display")
+        if pending_execution is not None:
+            sanitized_execution = sanitized.get("pending_execution")
+            if sanitized_execution != pending_execution.model_dump(mode="json"):
+                raise SessionError("run execution choice is unsafe to display")
         return RunSnapshot.model_validate(sanitized)
 
     def _capture_evidence_identity(self) -> tuple[int, int]:
@@ -293,6 +383,17 @@ class RunSession:
 
     def _cancellation_was_observed(self) -> bool:
         return isinstance(self._cancel, _CancellationEvent) and self._cancel.was_observed()
+
+    def _refresh_execution_pending_locked(self) -> None:
+        if self.executor_gate is None:
+            return
+        generation, pending = self.executor_gate.wait(
+            after_generation=self._execution_generation,
+            timeout_seconds=0,
+        )
+        if generation > self._execution_generation:
+            self._execution_generation = generation
+            self._pending_execution = pending
 
     def _request_cancel_locked(self) -> bool:
         if (
@@ -310,6 +411,9 @@ class RunSession:
             return False
         self.approver.close()
         self._pending = None
+        if self.executor_gate is not None:
+            self.executor_gate.close()
+        self._pending_execution = None
         return True
 
 
@@ -318,9 +422,21 @@ class SessionManager:
         self,
         *,
         builder: RunBuilder = build_run,
+        executor_registry: ExecutorRegistry | None = None,
+        executor_inspection_coordinator: ExecutorInspectionCoordinator | None = None,
         shutdown_timeout_seconds: float = 10.0,
     ) -> None:
         self._builder = builder
+        self._executor_registry = (
+            executor_registry
+            if executor_registry is not None
+            else ExecutorRegistry()
+        )
+        self._executor_inspection_coordinator = (
+            executor_inspection_coordinator
+            if executor_inspection_coordinator is not None
+            else ExecutorInspectionCoordinator()
+        )
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._lock = threading.RLock()
         self._sessions: dict[str, RunSession] = {}
@@ -347,8 +463,28 @@ class SessionManager:
 
         registered = False
         session: RunSession | None = None
+        prepared: PreparedRun | None = None
+        executor_gate: GateExecutorSelector | None = None
         try:
             cancel_event = _CancellationEvent()
+
+            def selector_factory(
+                run_id: str,
+                prepared_root: Path,
+                policy: ValidationPolicy,
+            ) -> GateExecutorSelector:
+                nonlocal executor_gate
+                if executor_gate is not None:
+                    raise SessionError("executor selector factory was invoked more than once")
+                executor_gate = GateExecutorSelector(
+                    run_id,
+                    prepared_root,
+                    policy,
+                    self._executor_registry,
+                    inspection_coordinator=self._executor_inspection_coordinator,
+                )
+                return executor_gate
+
             prepared = self._builder(
                 RunOptions(
                     repository=root,
@@ -360,15 +496,24 @@ class SessionManager:
                     output_dir=request.output_dir,
                 ),
                 GateApprover,
+                executor_selector_factory=selector_factory,
                 cancel_requested=cancel_event.is_set,
             )
             prepared_root = prepared.workflow.root.resolve(strict=True)
             if prepared_root != root:
                 raise SessionError("prepared run repository does not match requested repository")
             approver = cast(GateApprover, prepared.approver)
+            if request.executor == "deferred":
+                if executor_gate is None or prepared.executor_selector is not executor_gate:
+                    raise SessionError(
+                        "deferred run did not retain the manager execution gate"
+                    )
+            elif executor_gate is not None:
+                raise SessionError("non-deferred run constructed an execution gate")
             session = RunSession(
                 prepared,
                 approver,
+                executor_gate,
                 cancel_event,
                 self._release_root,
             )
@@ -395,6 +540,15 @@ class SessionManager:
                 with self._lock:
                     if self._sessions.get(session.prepared.manifest.run_id) is session:
                         self._sessions.pop(session.prepared.manifest.run_id, None)
+            elif session is not None:
+                session.close()
+            else:
+                if executor_gate is not None:
+                    executor_gate.close()
+                if prepared is not None:
+                    close_approver = getattr(prepared.approver, "close", None)
+                    if callable(close_approver):
+                        close_approver()
             raise
         finally:
             if not registered:
@@ -407,6 +561,9 @@ class SessionManager:
 
     def decide(self, decision: RunDecision) -> RunSnapshot:
         return self._get_session(decision.run_id).decide(decision)
+
+    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+        return self._get_session(decision.run_id).select_executor(decision)
 
     def cancel(self, run_id: str) -> RunSnapshot:
         return self._get_session(run_id).cancel()

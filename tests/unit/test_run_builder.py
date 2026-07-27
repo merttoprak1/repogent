@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 
 from repogent.approvals import FakeApprover
-from repogent.domain import Decision, ProviderReadiness, RunStatus
+from repogent.domain import Decision, ExecutionMode, IsolationLevel, ProviderReadiness, RunStatus
+from repogent.executor_selection import (
+    ExecutorSelectionError,
+    FixedExecutorSelector,
+    PreparedExecutor,
+)
 from repogent.preflight import PreflightReport
 from repogent.run_builder import (
     RunBuildError,
@@ -58,6 +63,15 @@ def test_validate_run_options_rejects_regular_file_repository(tmp_path: Path) ->
         validate_run_options(RunOptions(repository=repository, request="change"))
 
 
+def test_validate_run_options_accepts_deferred_executor(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    validate_run_options(
+        RunOptions(repository=repository, request="change", executor="deferred")
+    )
+
+
 def test_build_run_rejects_evidence_inside_repository(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -96,12 +110,22 @@ def test_build_run_keeps_preflight_before_provider(
         def check_ready(self) -> ProviderReadiness:
             return ProviderReadiness(provider="codex-cli", model="default", ready=True)
 
-    class PassingPreflight:
-        def run(self, _repository: Path) -> PreflightReport:
-            order.append("preflight")
-            return _passing_preflight()
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
 
-    monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+        def prepare(
+            self, _repository: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            order.append("preflight")
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
     monkeypatch.setattr(run_builder, "CodexCliProvider", ReadyCodex)
 
     prepared = build_run(
@@ -119,6 +143,195 @@ def test_build_run_keeps_preflight_before_provider(
     assert prepared.workflow.root == target.resolve()
 
 
+def test_build_run_prepares_selected_executor_with_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    calls: list[tuple[Path, ExecutionMode]] = []
+
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def prepare(
+            self, root: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            calls.append((root, mode))
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
+
+    build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="scripted",
+            script=script,
+            executor="local",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+    )
+
+    assert calls == [(target.resolve(), ExecutionMode.LOCAL)]
+
+
+def test_build_run_wraps_explicit_executor_in_fixed_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def prepare(
+            self, _root: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
+
+    prepared = build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="scripted",
+            script=script,
+            executor="local",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+    )
+
+    assert isinstance(prepared.workflow.executor_selector, FixedExecutorSelector)
+
+
+def test_build_run_deferred_uses_only_base_preflight_and_selector_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    selector = object()
+    factory_calls: list[tuple[str, Path, object]] = []
+
+    class RegistryMustNotBeConstructed:
+        def __init__(self, **_kwargs: object) -> None:
+            raise AssertionError("executor registry must remain deferred")
+
+    def selector_factory(run_id: str, root: Path, policy: object) -> object:
+        factory_calls.append((run_id, root, policy))
+        return selector
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", RegistryMustNotBeConstructed)
+
+    prepared = build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="scripted",
+            script=script,
+            executor="deferred",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+        executor_selector_factory=selector_factory,  # type: ignore[arg-type]
+    )
+
+    assert prepared.preflight.passed
+    assert prepared.executor_selector is selector
+    assert prepared.workflow.executor_selector is selector
+    assert prepared.workflow.validator is None
+    assert factory_calls == [
+        (prepared.manifest.run_id, target.resolve(), factory_calls[0][2])
+    ]
+
+
+def test_deferred_construction_failure_closes_both_decision_channels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    closed: list[str] = []
+
+    class ClosingApprover:
+        def close(self) -> None:
+            closed.append("approval")
+
+    class ClosingSelector:
+        def close(self) -> None:
+            closed.append("execution")
+
+    def fail_workflow(**_kwargs: object) -> object:
+        raise RuntimeError("workflow construction failed")
+
+    monkeypatch.setattr(run_builder, "Workflow", fail_workflow)
+
+    with pytest.raises(RunBuildError, match="workflow construction failed"):
+        build_run(
+            RunOptions(
+                repository=target,
+                request="change",
+                provider="scripted",
+                script=script,
+                executor="deferred",
+                output_dir=tmp_path / "runs",
+            ),
+            lambda _run_id: ClosingApprover(),  # type: ignore[arg-type]
+            executor_selector_factory=lambda *_args: ClosingSelector(),  # type: ignore[arg-type]
+        )
+
+    assert closed == ["execution", "approval"]
+
+
+def test_build_run_deferred_requires_selector_factory(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+
+    with pytest.raises(ValueError, match="executor_selector_factory"):
+        build_run(
+            RunOptions(
+                repository=target,
+                request="change",
+                provider="scripted",
+                script=script,
+                executor="deferred",
+                output_dir=tmp_path / "runs",
+            ),
+            lambda _run_id: FakeApprover([Decision.REJECTED]),
+        )
+
+
 def test_build_run_does_not_fallback_when_docker_preflight_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -128,25 +341,22 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
     target.mkdir()
     provider_constructed = False
 
-    class UnavailableDocker:
-        def readiness(self) -> tuple[bool, str]:
-            return False, "docker unavailable"
-
-        def available(self, _command: object) -> bool:
-            return False
-
     def provider_must_not_be_constructed(*_args: object, **_kwargs: object) -> object:
         nonlocal provider_constructed
         provider_constructed = True
         return object()
 
-    def local_executor_must_not_be_constructed(**_kwargs: object) -> object:
-        raise AssertionError("Docker failure must not fall back to LocalExecutor")
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
 
-    monkeypatch.setattr(run_builder, "DockerExecutor", UnavailableDocker)
-    monkeypatch.setattr(
-        run_builder, "LocalExecutor", local_executor_must_not_be_constructed
-    )
+        def prepare(
+            self, _root: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            assert mode is ExecutionMode.DOCKER
+            raise ExecutorSelectionError("selected executor is unavailable")
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
     monkeypatch.setattr(run_builder, "OpenAIProvider", provider_must_not_be_constructed)
 
     with pytest.raises(RunBuildError, match="repository preflight failed") as caught:
@@ -206,9 +416,19 @@ def test_build_run_terminalizes_interrupt_as_cancelled(
     def interrupt() -> None:
         raise interrupt_type()
 
-    class PassingPreflight:
-        def run(self, _repository: Path) -> PreflightReport:
-            return _passing_preflight()
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def prepare(
+            self, _repository: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
 
     def interrupted_commands(_self: object, _repository: Path) -> object:
         interrupt()
@@ -227,7 +447,7 @@ def test_build_run_terminalizes_interrupt_as_cancelled(
     if phase == "preflight":
         monkeypatch.setattr(run_builder.ValidationPolicy, "commands", interrupted_commands)
     else:
-        monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
+        monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
     if phase == "provider":
         monkeypatch.setattr(run_builder, "OpenAIProvider", interrupted_provider)
     elif phase == "construction":
