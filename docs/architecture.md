@@ -5,8 +5,10 @@ Repogent is a synchronous, artifact-first local workflow for conventional Python
 ## Codex plugin adapter
 
 The repository-local Codex plugin adds a thin chat-facing adapter around the
-same workflow. Codex loads the Repogent skill and starts `repogent mcp --stdio`
-as a local child process. Typed MCP tools translate chat requests and decisions
+same workflow. Codex loads separate `repository-readiness` and `verified-change`
+skills and starts `repogent mcp --stdio` as a local child process. The readiness
+skill can call only `inspect_repository_readiness`; it cannot start or mutate a
+run. Typed MCP tools translate chat requests and decisions
 to `DoctorService` and `SessionManager`; they do not duplicate workflow policy,
 patch validation, execution policy, or state transitions. The plugin is not a
 second policy engine.
@@ -56,10 +58,22 @@ The detailed state machine is preserved in `RunStage`. The following are concept
 
 `candidate-1` is the default low-risk path. Validation failure, incomplete acceptance coverage, high risk, a broad patch, or unresolved ambiguity may create a further candidate; the policy caps the sequence at `candidate-3`. Candidates with required failures cannot be selected. Equal evidence is explicitly ambiguous and ends in human intervention rather than a tie-break mutation.
 
+## Repository scope
+
+`RepositoryScopeResolver` selects one deterministic input set before readiness
+or workflow construction. In a Git checkout that set is the union of tracked
+files and non-ignored untracked files reported by Git. Ignored caches,
+dependencies, build products, and evidence directories are therefore outside
+the normal scope. The resolver fails closed if Git listing is unavailable or
+malformed; it does not silently switch semantics. Inspection, pytest discovery,
+provider context, and the workflow all share this same immutable scope. Limits
+apply to selected paths and selected bytes, and readiness exposes those counts
+so a scope failure is diagnosable.
+
 ## Boundaries
 
 - `domain.py`: versioned contracts and status enums.
-- `repository.py`, `symbols.py`, and `localization.py`: confined and aggregate-bounded traversal, sensitive-path exclusion, source-root-aware deterministic Python AST graph, and explainable hybrid localization.
+- `repository_scope.py`, `repository.py`, `symbols.py`, and `localization.py`: Git-bounded path selection, confined no-follow inspection, sensitive-path exclusion, source-root-aware deterministic Python AST graph, and explainable hybrid localization.
 - `provider_context.py`, `providers.py`, `agents.py`, and `sanitization.py`: metadata-only inventory DTOs, top-ranked complete-line snippets, globally allocated structured context, capped failure summaries, deadline-bounded schema generation, final-boundary recursive redaction, and untrusted-content prompts.
 - `codex_cli.py`: an interchangeable, local Codex CLI proposal provider. It verifies executable/capability/login readiness before workflow construction, makes one structured `codex exec` call for each model role, validates the typed result, and returns typed readiness and per-call evidence. Its provider-owned temporary work directory and Codex read-only sandbox are a practical boundary, not strict OS-enforced isolation of the host or target repository.
 - `approvals.py`: requirements, plan, patch, and repair decisions.

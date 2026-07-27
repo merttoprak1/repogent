@@ -53,16 +53,26 @@ without Docker.
 
 After adding the marketplace, open the Codex Plugin Directory, install
 **Repogent**, and start a new task so its skill and local MCP server are loaded.
-Invoke it explicitly with `@Repogent`, for example:
+The plugin exposes two focused capabilities:
+
+- **Repository Readiness** is read-only. It inspects the Git-bounded file set,
+  validation-command readiness, provider readiness, and executor options without
+  editing files or running repository code.
+- **Verified Change** prepares and independently validates an exact patch through
+  explicit requirements, plan, executor, and patch decisions.
+
+Choose **Repogent Repository Readiness** for diagnosis, or invoke the mutating
+workflow explicitly with **Repogent Verified Change**, for example:
 
 ```text
-@Repogent safely add a health endpoint to /path/to/repository and show me the
+Use Repogent Verified Change to safely add a health endpoint to /path/to/repository and show me the
 requirements, plan, and exact patch before changing anything.
 ```
 
 You can also ask naturally for a safe, independently validated, evidence-backed
-Python change with approval before apply. Repogent first runs `repogent_doctor`
-with a deferred executor, then conducts the workflow in chat. Requirements, the
+Python change with approval before apply. Repogent first runs
+`inspect_repository_readiness`, then starts `start_verified_change` with a
+deferred executor and conducts the workflow in chat. Requirements, the
 plan, and the final exact patch each require a separate explicit approval bound
 to the displayed digest.
 
@@ -93,7 +103,7 @@ repogent analyze ./tests/fixtures/python_library --request "Reject inverted clam
 
 The static graph understands conventional root packages and `src/` layouts (plus simple setuptools `package-dir` configuration), while preserving original filesystem paths in evidence. Dynamic imports, reflection, generated code, runtime framework wiring, and non-Python code can still reduce localization confidence. Repogent records ambiguity rather than pretending an uncertain location is decisive.
 
-## v0.2 local workflow
+## v0.3 local workflow
 
 Repogent describes five conceptual, user-facing phases — **Understand → Localize → Propose → Validate → Decide** — rather than claiming those labels are literal emitted `RunStage` event values:
 
@@ -203,6 +213,14 @@ Only `completed` and `completed_with_findings` produce a successful CLI exit. A 
 ## Security and scope
 
 Repository content and tests are untrusted. Docker reduces their authority but cannot make execution risk-free. Use disposable checkouts, keep Docker and the host patched, inspect the validator image and every patch, never mount credentials, and read the [security model](docs/security.md). See [architecture](docs/architecture.md) for component boundaries and workflow states.
+
+Repogent does not scan every byte under the repository directory. In a Git
+checkout it selects tracked files plus non-ignored untracked files, excludes
+ignored build artifacts and dependencies, then applies file-count and aggregate
+byte limits to that selected scope. Readiness reports the selected file count,
+selected bytes, scope source, and skipped paths. A limit failure means the
+bounded workflow input is too broad; it does not mean the repository itself may
+contain only that many megabytes.
 
 The CLI intentionally uses conservative fixed workflow budgets and patch limits. Applications that need custom `Budget` or `PatchLimits` values can configure them through the Python API; the MVP does not expose limit flags.
 
