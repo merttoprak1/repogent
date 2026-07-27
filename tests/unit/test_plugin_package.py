@@ -5,7 +5,8 @@ import tomllib
 from pathlib import Path
 
 PLUGIN_ROOT = Path("plugins/repogent")
-SKILL_PATH = PLUGIN_ROOT / "skills/repogent/SKILL.md"
+READINESS_SKILL_PATH = PLUGIN_ROOT / "skills/repository-readiness/SKILL.md"
+VERIFIED_CHANGE_SKILL_PATH = PLUGIN_ROOT / "skills/verified-change/SKILL.md"
 EVALS_PATH = Path("tests/plugin/evals.json")
 
 
@@ -40,8 +41,10 @@ def test_repository_marketplace_uses_local_install_policy() -> None:
         "path": "./plugins/repogent",
     }
     assert plugin["source"]["path"].startswith("./")
-    assert (marketplace_path.parent.parent / plugin["source"]["path"]).resolve().is_relative_to(
-        Path.cwd().resolve()
+    assert (
+        (marketplace_path.parent.parent / plugin["source"]["path"])
+        .resolve()
+        .is_relative_to(Path.cwd().resolve())
     )
     assert plugin["policy"] == {
         "installation": "AVAILABLE",
@@ -50,24 +53,38 @@ def test_repository_marketplace_uses_local_install_policy() -> None:
     assert plugin["category"] == "Developer Tools"
 
 
-def test_repogent_skill_declares_triggers_tools_and_three_gates() -> None:
-    skill = SKILL_PATH.read_text()
+def test_plugin_ships_readiness_and_verified_change_skills() -> None:
+    skill_directories = sorted(
+        path.name for path in (PLUGIN_ROOT / "skills").iterdir() if path.is_dir()
+    )
 
-    assert skill.startswith("---\nname: repogent\n")
-    for trigger in (
-        "@Repogent",
-        "$repogent",
-        "safe",
-        "verified",
-        "evidence-backed",
-        "independently validated",
-        "approval-before-apply",
+    assert skill_directories == ["repository-readiness", "verified-change"]
+    assert READINESS_SKILL_PATH.read_text().startswith("---\nname: repository-readiness\n")
+    assert VERIFIED_CHANGE_SKILL_PATH.read_text().startswith("---\nname: verified-change\n")
+
+
+def test_repository_readiness_skill_is_strictly_read_only() -> None:
+    skill = READINESS_SKILL_PATH.read_text()
+
+    assert "`inspect_repository_readiness`" in skill
+    for forbidden_tool in (
+        "start_verified_change",
+        "approve_requirements",
+        "approve_plan",
+        "select_executor",
+        "approve_patch",
     ):
-        assert trigger in skill
+        assert f"`{forbidden_tool}`" not in skill
+    assert "must not run target repository code" in skill.lower()
+    assert "must not edit" in skill.lower()
+
+
+def test_verified_change_skill_declares_tools_and_three_gates() -> None:
+    skill = VERIFIED_CHANGE_SKILL_PATH.read_text()
 
     for tool_name in (
-        "repogent_doctor",
-        "start_run",
+        "inspect_repository_readiness",
+        "start_verified_change",
         "get_run",
         "approve_requirements",
         "approve_plan",
@@ -83,8 +100,8 @@ def test_repogent_skill_declares_triggers_tools_and_three_gates() -> None:
     assert "digest" in skill.lower()
 
 
-def test_repogent_skill_closes_baseline_safety_loopholes() -> None:
-    skill = SKILL_PATH.read_text().lower()
+def test_verified_change_skill_closes_baseline_safety_loopholes() -> None:
+    skill = VERIFIED_CHANGE_SKILL_PATH.read_text().lower()
 
     required_safety_language = (
         "never auto-approve",
@@ -105,8 +122,8 @@ def test_repogent_skill_closes_baseline_safety_loopholes() -> None:
     assert "`skipped_checks`: `{name, reason}`" in skill
 
 
-def test_repogent_skill_teaches_digest_bound_progressive_executor_flow() -> None:
-    raw = SKILL_PATH.read_text()
+def test_verified_change_skill_teaches_digest_bound_progressive_executor_flow() -> None:
+    raw = VERIFIED_CHANGE_SKILL_PATH.read_text()
     skill = raw.lower()
 
     # The plugin must onboard without Docker by deferring the executor choice.
@@ -119,9 +136,7 @@ def test_repogent_skill_teaches_digest_bound_progressive_executor_flow() -> None
 
     # Explicit, current-digest local-risk consent wording is mandatory and no
     # weaker phrasing may substitute.
-    assert (
-        "i accept reduced isolation; validate this displayed patch locally" in skill
-    )
+    assert "i accept reduced isolation; validate this displayed patch locally" in skill
 
     # No silent fallback and no apply before verification.
     assert "silently fall back" in skill
@@ -133,12 +148,12 @@ def test_repogent_skill_teaches_digest_bound_progressive_executor_flow() -> None
     assert "not a fourth" in skill or "separate" in skill
 
 
-def test_repogent_evals_have_seven_positive_and_five_negative_cases() -> None:
+def test_repogent_evals_cover_workflow_and_readiness_routing() -> None:
     evals = json.loads(EVALS_PATH.read_text())
 
     assert set(evals) == {"positive", "negative"}
-    assert len(evals["positive"]) == 7
-    assert len(evals["negative"]) == 5
+    assert len(evals["positive"]) == 9
+    assert len(evals["negative"]) == 7
 
     cases = [*evals["positive"], *evals["negative"]]
     ids = [case["id"] for case in cases]
@@ -158,6 +173,8 @@ def test_repogent_evals_have_seven_positive_and_five_negative_cases() -> None:
         "executor-switch",
         "validated-patch",
         "preview-cancel",
+        "readiness-check",
+        "scope-diagnosis",
     } == positive_ids
     negative_ids = {case["id"] for case in evals["negative"]}
     assert {
@@ -166,6 +183,8 @@ def test_repogent_evals_have_seven_positive_and_five_negative_cases() -> None:
         "apply-unvalidated",
         "fake-isolation",
         "reuse-executor-digest",
+        "readiness-autofix",
+        "ambiguous-capability",
     } == negative_ids
 
 
