@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -19,11 +20,24 @@ from repogent.domain import (
     CheckResult,
     CheckStatus,
     Decision,
+    ExecutionMode,
+    IsolationLevel,
     RunManifest,
     RunStatus,
+    TrustLabel,
     ValidationReport,
+    VerificationStatus,
 )
-from repogent.mcp_models import RunDecision, RunStart
+from repogent.execution import ValidationPolicy
+from repogent.execution_gate import ExecutorInspectionCoordinator
+from repogent.executor_selection import LOCAL_RISK_STATEMENT, PreparedExecutor
+from repogent.mcp_models import (
+    ExecutionDecision,
+    ExecutorAvailability,
+    ExecutorOption,
+    RunDecision,
+    RunStart,
+)
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.preflight import PreflightReport
 from repogent.providers import ScriptedProvider
@@ -42,6 +56,19 @@ PLAN_OUTPUT = {
     "steps": [{"id": "change", "description": "Change value"}],
     "tests": ["pytest"],
 }
+VALID_PATCH_OUTPUT = {
+    "summary": "Change value",
+    "diff": (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+        " def value():\n-    return 1\n+    return 2\n"
+    ),
+    "acceptance_criteria_addressed": ["tests pass"],
+    "focused_tests": ["pytest"],
+}
+REPAIR_PATCH_OUTPUT = {
+    **VALID_PATCH_OUTPUT,
+    "summary": "Repair value change",
+}
 
 
 class PassingValidator:
@@ -52,6 +79,134 @@ class PassingValidator:
         return ValidationReport(
             checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED)]
         )
+
+
+class FailingValidator:
+    def run(
+        self, root: Path, *, timeout_seconds: float | None = None
+    ) -> ValidationReport:
+        del root, timeout_seconds
+        return ValidationReport(
+            checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.FAILED)]
+        )
+
+
+class SessionRegistry:
+    def __init__(self) -> None:
+        self.prepare_calls: list[ExecutionMode] = []
+
+    def inspect_availability(
+        self, root: Path, policy: ValidationPolicy
+    ) -> list[ExecutorAvailability]:
+        del root, policy
+        return [
+            ExecutorAvailability(
+                mode=ExecutionMode.DOCKER,
+                available=True,
+                isolation_level=IsolationLevel.ISOLATED,
+                message="Docker validation is available",
+            ),
+            ExecutorAvailability(
+                mode=ExecutionMode.LOCAL,
+                available=True,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                message="Local validation is available",
+                risk_statement=LOCAL_RISK_STATEMENT,
+            ),
+        ]
+
+    def build_options(
+        self,
+        run_id: str,
+        preview_digest: str,
+        availability: list[ExecutorAvailability],
+    ) -> list[ExecutorOption]:
+        return [
+            ExecutorOption(
+                mode=item.mode,
+                available=item.available,
+                isolation_level=item.isolation_level,
+                option_digest=hashlib.sha256(
+                    f"{run_id}:{preview_digest}:{item.mode.value}".encode()
+                ).hexdigest(),
+                message=item.message,
+                remediation=item.remediation,
+                risk_statement=item.risk_statement,
+            )
+            for item in availability
+        ]
+
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        del root, policy
+        self.prepare_calls.append(mode)
+        return PreparedExecutor(
+            mode=mode,
+            isolation_level=(
+                IsolationLevel.ISOLATED
+                if mode is ExecutionMode.DOCKER
+                else IsolationLevel.REDUCED_ISOLATION
+            ),
+            preflight=PreflightReport(
+                checks=[], git_commit=None, dirty=False, repository_fingerprint="repo"
+            ),
+            validator=PassingValidator(),  # type: ignore[arg-type]
+        )
+
+
+class FalseySessionRegistry(SessionRegistry):
+    def __bool__(self) -> bool:
+        return False
+
+
+class BlockingSessionRegistry(SessionRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_entered = threading.Event()
+        self.release_prepare = threading.Event()
+
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        self.prepare_entered.set()
+        assert self.release_prepare.wait(timeout=5)
+        return super().prepare(root, mode, policy)
+
+
+class RepairingSessionRegistry(SessionRegistry):
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        prepared = super().prepare(root, mode, policy)
+        if len(self.prepare_calls) != 1:
+            return prepared
+        return PreparedExecutor(
+            mode=prepared.mode,
+            isolation_level=prepared.isolation_level,
+            preflight=prepared.preflight,
+            validator=FailingValidator(),  # type: ignore[arg-type]
+        )
+
+
+class BlockingInspectionSessionRegistry(SessionRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inspect_entered = threading.Event()
+        self.release_inspect = threading.Event()
+        self.inspect_finished = threading.Event()
+        self.inspect_calls = 0
+
+    def inspect_availability(
+        self, root: Path, policy: ValidationPolicy
+    ) -> list[ExecutorAvailability]:
+        self.inspect_calls += 1
+        self.inspect_entered.set()
+        try:
+            assert self.release_inspect.wait(timeout=5)
+            return super().inspect_availability(root, policy)
+        finally:
+            self.inspect_finished.set()
 
 
 class BlockingInspector:
@@ -77,6 +232,7 @@ def make_builder(
     *,
     inspector: object | None = None,
     before_build: Callable[[], None] | None = None,
+    budget: Budget | None = None,
 ) -> Callable[..., PreparedRun]:
     counter = 0
 
@@ -84,6 +240,7 @@ def make_builder(
         options: RunOptions,
         approver_factory: Callable[[str], Approver],
         *,
+        executor_selector_factory=None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> PreparedRun:
         nonlocal counter
@@ -100,20 +257,33 @@ def make_builder(
         )
         approver = approver_factory(run_id)
         manifest = RunManifest(run_id=run_id, request=options.request)
+        selector = (
+            executor_selector_factory(run_id, root, ValidationPolicy())
+            if options.executor == "deferred"
+            else None
+        )
         workflow = Workflow(
             root=root,
             request=options.request,
             manifest=manifest,
             roles=RoleSet.from_provider(
-                ScriptedProvider([REQUIREMENTS_OUTPUT, PLAN_OUTPUT])
+                ScriptedProvider(
+                    [
+                        REQUIREMENTS_OUTPUT,
+                        PLAN_OUTPUT,
+                        VALID_PATCH_OUTPUT,
+                        REPAIR_PATCH_OUTPUT,
+                    ]
+                )
             ),
             approver=approver,
             patch_policy=PatchPolicy(),
             patch_applier=PatchApplier(),
-            validator=PassingValidator(),
+            validator=None if selector is not None else PassingValidator(),
+            executor_selector=selector,
             artifacts=store,
             inspector=inspector or RepositoryInspector(),  # type: ignore[arg-type]
-            budget=Budget(),
+            budget=budget or Budget(),
             cancel_requested=cancel_requested,
         )
         return PreparedRun(
@@ -124,6 +294,7 @@ def make_builder(
             preflight=PreflightReport(
                 checks=[], git_commit=None, dirty=False, repository_fingerprint="repo"
             ),
+            executor_selector=workflow.executor_selector,
         )
 
     return builder
@@ -140,6 +311,12 @@ def start_request(target: Path, output_dir: Path) -> RunStart:
     )
 
 
+def deferred_request(target: Path, output_dir: Path) -> RunStart:
+    return start_request(target, output_dir).model_copy(
+        update={"executor": "deferred"}
+    )
+
+
 def decision_for(snapshot, decision: Decision = Decision.APPROVED) -> RunDecision:
     assert snapshot.pending_approval is not None
     return RunDecision(
@@ -148,6 +325,520 @@ def decision_for(snapshot, decision: Decision = Decision.APPROVED) -> RunDecisio
         digest=snapshot.pending_approval.digest,
         decision=decision,
     )
+
+
+def execution_decision_for(
+    snapshot,
+    *,
+    mode: ExecutionMode = ExecutionMode.LOCAL,
+    decision: Decision = Decision.APPROVED,
+) -> ExecutionDecision:
+    assert snapshot.pending_execution is not None
+    selected = next(
+        item for item in snapshot.pending_execution.options if item.mode is mode
+    )
+    return ExecutionDecision(
+        run_id=snapshot.run_id,
+        preview_digest=snapshot.pending_execution.preview_digest,
+        mode=mode,
+        option_digest=selected.option_digest,
+        decision=decision,
+    )
+
+
+def deferred_manager_waiting_for_executor(
+    tmp_path: Path,
+    *,
+    registry: SessionRegistry | None = None,
+    budget: Budget | None = None,
+):
+    target = make_target(tmp_path)
+    selected_registry = registry or SessionRegistry()
+    manager = SessionManager(
+        builder=make_builder(budget=budget),
+        executor_registry=selected_registry,  # type: ignore[arg-type]
+    )
+    request = deferred_request(target, tmp_path / "runs")
+    snapshot = manager.start(request)
+    snapshot = manager.decide(decision_for(snapshot))
+    snapshot = manager.decide(decision_for(snapshot))
+    return manager, request, snapshot
+
+
+def test_manager_preserves_injected_falsey_executor_registry() -> None:
+    registry = FalseySessionRegistry()
+
+    manager = SessionManager(executor_registry=registry)  # type: ignore[arg-type]
+
+    assert manager._executor_registry is registry
+
+
+def test_deferred_session_surfaces_pending_execution_after_plan(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        assert snapshot.pending_approval is None
+        assert snapshot.pending_execution is not None
+        assert snapshot.verification_status is VerificationStatus.UNVALIDATED
+        assert snapshot.checkout_state is CheckoutState.NOT_APPLIED
+        assert snapshot.selected_patch_applied is False
+    finally:
+        manager.cancel(snapshot.run_id)
+        manager.shutdown()
+
+
+def test_executor_selection_releases_waiter_but_not_root_lock(
+    tmp_path: Path,
+) -> None:
+    manager, request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        selected = manager.select_executor(execution_decision_for(snapshot))
+
+        assert selected.pending_execution is None
+        assert selected.pending_approval is not None
+        assert selected.pending_approval.kind is ApprovalKind.PATCH
+        assert selected.execution_mode is ExecutionMode.LOCAL
+        assert selected.isolation_level is IsolationLevel.REDUCED_ISOLATION
+        with pytest.raises(SessionError, match="repository already has an active run"):
+            manager.start(request)
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_get_remains_available_while_executor_prepare_is_blocked(
+    tmp_path: Path,
+) -> None:
+    registry = BlockingSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path, registry=registry
+    )
+    selection_results: list[object] = []
+    selection_errors: list[BaseException] = []
+
+    def select_executor() -> None:
+        try:
+            selection_results.append(
+                manager.select_executor(execution_decision_for(snapshot))
+            )
+        except BaseException as error:
+            selection_errors.append(error)
+
+    selector = threading.Thread(target=select_executor)
+    selector.start()
+    getter_results: list[object] = []
+    getter = threading.Thread(
+        target=lambda: getter_results.append(manager.get(snapshot.run_id))
+    )
+    try:
+        assert registry.prepare_entered.wait(timeout=1)
+        getter.start()
+        getter.join(timeout=0.2)
+        assert not getter.is_alive()
+        assert len(getter_results) == 1
+        assert getter_results[0].pending_execution == snapshot.pending_execution  # type: ignore[union-attr]
+    finally:
+        registry.release_prepare.set()
+        selector.join(timeout=2)
+        getter.join(timeout=1)
+        if not manager._sessions[snapshot.run_id].is_done():
+            manager.cancel(snapshot.run_id)
+        manager.shutdown()
+    assert not selector.is_alive()
+    assert selection_errors == []
+    assert len(selection_results) == 1
+
+
+def test_old_submit_cannot_erase_cached_newer_execution_choice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = RepairingSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path, registry=registry
+    )
+    session = manager._sessions[snapshot.run_id]
+    gate = session.executor_gate
+    assert gate is not None
+    submit_returned = threading.Event()
+    allow_submit_return = threading.Event()
+    original_submit = gate.submit
+
+    def paused_submit(decision: ExecutionDecision):
+        receipt = original_submit(decision)
+        submit_returned.set()
+        assert allow_submit_return.wait(timeout=5)
+        return receipt
+
+    wait_entered = threading.Event()
+    resume_wait = threading.Event()
+    original_wait = session.wait_for_change
+
+    def paused_wait_for_change():
+        wait_entered.set()
+        assert resume_wait.wait(timeout=5)
+        return original_wait()
+
+    monkeypatch.setattr(gate, "submit", paused_submit)
+    monkeypatch.setattr(session, "wait_for_change", paused_wait_for_change)
+    selection_results: list[object] = []
+    selection_errors: list[BaseException] = []
+
+    def select_executor() -> None:
+        try:
+            selection_results.append(
+                manager.select_executor(execution_decision_for(snapshot))
+            )
+        except BaseException as error:
+            selection_errors.append(error)
+
+    selector = threading.Thread(target=select_executor)
+    selector.start()
+    try:
+        assert submit_returned.wait(timeout=1)
+        generation = session._execution_generation
+        deadline = time.monotonic() + 2
+        newer_pending = None
+        while newer_pending is None:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0
+            generation, newer_pending = gate.wait(
+                after_generation=generation,
+                timeout_seconds=remaining,
+            )
+        cached = manager.get(snapshot.run_id)
+        assert cached.pending_execution == newer_pending
+
+        allow_submit_return.set()
+        assert wait_entered.wait(timeout=1)
+
+        recovered = manager.get(snapshot.run_id)
+        assert recovered.pending_execution == newer_pending
+    finally:
+        allow_submit_return.set()
+        resume_wait.set()
+        monkeypatch.setattr(gate, "submit", original_submit)
+        monkeypatch.setattr(session, "wait_for_change", original_wait)
+        if not session.is_done():
+            manager.cancel(snapshot.run_id)
+        selector.join(timeout=2)
+        manager.shutdown()
+    assert not selector.is_alive()
+    assert selection_errors == []
+    assert len(selection_results) == 1
+
+
+def test_cancel_wins_while_executor_prepare_is_blocked(tmp_path: Path) -> None:
+    registry = BlockingSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path, registry=registry
+    )
+    selection_errors: list[BaseException] = []
+
+    def select_executor() -> None:
+        try:
+            manager.select_executor(execution_decision_for(snapshot))
+        except BaseException as error:
+            selection_errors.append(error)
+
+    selector = threading.Thread(target=select_executor)
+    selector.start()
+    cancellation_results: list[object] = []
+    cancellation_errors: list[BaseException] = []
+
+    def cancel() -> None:
+        try:
+            cancellation_results.append(manager.cancel(snapshot.run_id))
+        except BaseException as error:
+            cancellation_errors.append(error)
+
+    canceller = threading.Thread(target=cancel)
+    try:
+        assert registry.prepare_entered.wait(timeout=1)
+        canceller.start()
+        canceller.join(timeout=0.5)
+        assert not canceller.is_alive()
+        assert cancellation_errors == []
+        assert len(cancellation_results) == 1
+        terminal = cancellation_results[0]
+        assert terminal.status is RunStatus.CANCELLED  # type: ignore[union-attr]
+        assert terminal.pending_approval is None  # type: ignore[union-attr]
+        assert terminal.pending_execution is None  # type: ignore[union-attr]
+        recovered = manager.get(snapshot.run_id)
+        assert recovered.pending_approval is None
+        assert recovered.pending_execution is None
+    finally:
+        registry.release_prepare.set()
+        selector.join(timeout=2)
+        canceller.join(timeout=1)
+        manager.shutdown()
+    assert not selector.is_alive()
+    assert len(selection_errors) == 1
+    assert isinstance(selection_errors[0], SessionError)
+    assert "closed" in str(selection_errors[0])
+
+
+def test_executor_timeout_terminal_snapshot_clears_pending_choice(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path,
+        budget=Budget(timeout_seconds=1),
+    )
+    session = manager._sessions[snapshot.run_id]
+    try:
+        assert snapshot.pending_execution is not None
+        assert session._done.wait(timeout=2)
+
+        terminal = manager.get(snapshot.run_id)
+
+        assert terminal.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+        assert terminal.reason == "executor selection timed out"
+        assert terminal.pending_approval is None
+        assert terminal.pending_execution is None
+    finally:
+        manager.shutdown()
+
+
+def test_cancel_terminalizes_while_availability_inspection_is_blocked(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    registry = BlockingInspectionSessionRegistry()
+    manager = SessionManager(
+        builder=make_builder(),
+        executor_registry=registry,  # type: ignore[arg-type]
+    )
+    snapshot = manager.start(deferred_request(target, tmp_path / "runs"))
+    snapshot = manager.decide(decision_for(snapshot))
+    assert snapshot.pending_approval is not None
+    assert snapshot.pending_approval.kind is ApprovalKind.PLAN
+    planner_results: list[object] = []
+    planner_errors: list[BaseException] = []
+
+    def approve_plan() -> None:
+        try:
+            planner_results.append(manager.decide(decision_for(snapshot)))
+        except BaseException as error:
+            planner_errors.append(error)
+
+    planner = threading.Thread(target=approve_plan)
+    planner.start()
+    cancellation_results: list[object] = []
+    cancellation_errors: list[BaseException] = []
+
+    def cancel() -> None:
+        try:
+            cancellation_results.append(manager.cancel(snapshot.run_id))
+        except BaseException as error:
+            cancellation_errors.append(error)
+
+    canceller = threading.Thread(target=cancel)
+    try:
+        assert registry.inspect_entered.wait(timeout=1)
+        canceller.start()
+        canceller.join(timeout=0.5)
+        assert not canceller.is_alive()
+        assert cancellation_errors == []
+        assert len(cancellation_results) == 1
+        terminal = cancellation_results[0]
+        assert terminal.status is RunStatus.CANCELLED  # type: ignore[union-attr]
+        assert terminal.pending_approval is None  # type: ignore[union-attr]
+        assert terminal.pending_execution is None  # type: ignore[union-attr]
+        assert not registry.inspect_finished.is_set()
+    finally:
+        registry.release_inspect.set()
+        assert registry.inspect_finished.wait(timeout=1)
+        planner.join(timeout=2)
+        canceller.join(timeout=1)
+        manager.shutdown()
+    assert not planner.is_alive()
+    assert planner_errors == []
+    assert len(planner_results) == 1
+
+
+def test_manager_shares_inspection_capacity_without_blocking_cancel_or_shutdown(
+    tmp_path: Path,
+) -> None:
+    registry = BlockingInspectionSessionRegistry()
+    manager = SessionManager(
+        builder=make_builder(),
+        executor_registry=registry,  # type: ignore[arg-type]
+        executor_inspection_coordinator=ExecutorInspectionCoordinator(capacity=1),
+        shutdown_timeout_seconds=1,
+    )
+    first = manager.start(
+        deferred_request(make_target(tmp_path, "first"), tmp_path / "runs")
+    )
+    first = manager.decide(decision_for(first))
+    assert first.pending_approval is not None
+    assert first.pending_approval.kind is ApprovalKind.PLAN
+    first_results: list[object] = []
+    first_errors: list[BaseException] = []
+
+    def approve_first_plan() -> None:
+        try:
+            first_results.append(manager.decide(decision_for(first)))
+        except BaseException as error:
+            first_errors.append(error)
+
+    first_planner = threading.Thread(target=approve_first_plan)
+    first_planner.start()
+    shutdown_complete = False
+    try:
+        assert registry.inspect_entered.wait(timeout=1)
+
+        second = manager.start(
+            deferred_request(make_target(tmp_path, "second"), tmp_path / "runs")
+        )
+        second = manager.decide(decision_for(second))
+        started = time.monotonic()
+        second = manager.decide(decision_for(second))
+        assert time.monotonic() - started < 0.5
+        assert second.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+        assert second.reason is not None
+        assert "inspection capacity" in second.reason
+        assert second.pending_execution is None
+        assert registry.inspect_calls == 1
+
+        started = time.monotonic()
+        cancelled = manager.cancel(first.run_id)
+        assert time.monotonic() - started < 0.5
+        assert cancelled.status is RunStatus.CANCELLED
+        assert cancelled.pending_execution is None
+        assert not registry.inspect_finished.is_set()
+
+        started = time.monotonic()
+        manager.shutdown()
+        shutdown_complete = True
+        assert time.monotonic() - started < 0.5
+        assert not registry.inspect_finished.is_set()
+    finally:
+        registry.release_inspect.set()
+        assert registry.inspect_finished.wait(timeout=1)
+        first_planner.join(timeout=2)
+        if not shutdown_complete:
+            manager.shutdown()
+    assert not first_planner.is_alive()
+    assert first_errors == []
+    assert len(first_results) == 1
+    session = manager._sessions[first.run_id]
+    assert session.executor_gate is not None
+    assert session.executor_gate.wait(
+        after_generation=0, timeout_seconds=0
+    ) == (0, None)
+
+
+def test_get_reconciles_pending_execution_after_caller_disconnect(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        assert snapshot.pending_execution is not None
+        original = snapshot.pending_execution.model_copy(deep=True)
+        snapshot.pending_execution.preview["changed_files"] = 99
+        snapshot.pending_execution.options[1].option_digest = "f" * 64
+
+        recovered = manager.get(snapshot.run_id)
+
+        assert recovered.pending_execution == original
+        selected = manager.select_executor(execution_decision_for(recovered))
+        assert selected.pending_approval is not None
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_executor_selection_is_rejected_while_content_approval_is_pending(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(
+        builder=make_builder(), executor_registry=SessionRegistry()  # type: ignore[arg-type]
+    )
+    snapshot = manager.start(deferred_request(target, tmp_path / "runs"))
+    try:
+        assert snapshot.pending_approval is not None
+        with pytest.raises(SessionError, match="no executor selection is pending"):
+            manager.select_executor(
+                ExecutionDecision(
+                    run_id=snapshot.run_id,
+                    preview_digest="a" * 64,
+                    mode=ExecutionMode.LOCAL,
+                    option_digest="b" * 64,
+                    decision=Decision.APPROVED,
+                )
+            )
+    finally:
+        manager.cancel(snapshot.run_id)
+        manager.shutdown()
+
+
+def test_stale_execution_decision_does_not_consume_pending_choice(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        decision = execution_decision_for(snapshot)
+        with pytest.raises(SessionError, match="preview digest mismatch"):
+            manager.select_executor(
+                decision.model_copy(update={"preview_digest": "f" * 64})
+            )
+        with pytest.raises(SessionError, match="option digest mismatch"):
+            manager.select_executor(
+                decision.model_copy(update={"option_digest": "e" * 64})
+            )
+
+        recovered = manager.get(snapshot.run_id)
+        assert recovered.pending_execution == snapshot.pending_execution
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_cancel_while_awaiting_executor_closes_both_decision_channels(
+    tmp_path: Path,
+) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+
+    terminal = manager.cancel(snapshot.run_id)
+
+    assert terminal.status is RunStatus.CANCELLED
+    assert terminal.pending_approval is None
+    assert terminal.pending_execution is None
+    assert terminal.checkout_state is CheckoutState.NOT_APPLIED
+    assert terminal.cancellation_requested is True
+    manager.shutdown()
+
+
+def test_rejected_local_selection_terminalizes_before_root_release(
+    tmp_path: Path,
+) -> None:
+    manager, request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    try:
+        terminal = manager.select_executor(
+            execution_decision_for(snapshot, decision=Decision.REJECTED)
+        )
+
+        assert terminal.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+        assert terminal.pending_execution is None
+        replacement = manager.start(request)
+        manager.cancel(replacement.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_shutdown_closes_gate_waiter_within_shared_deadline(tmp_path: Path) -> None:
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
+    started = time.monotonic()
+
+    manager.shutdown()
+
+    assert time.monotonic() - started < 1
+    terminal = manager.get(snapshot.run_id)
+    assert terminal.status is RunStatus.CANCELLED
+    assert terminal.pending_execution is None
 
 
 def test_session_advances_matching_gate_and_releases_root_at_terminal(
@@ -216,6 +907,33 @@ def test_returned_snapshot_cannot_mutate_pending_gate_integrity(tmp_path: Path) 
         )
         assert advanced.pending_approval is not None
         assert advanced.pending_approval.kind is ApprovalKind.PLAN
+        manager.cancel(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_session_snapshot_surfaces_manifest_execution_trust_evidence(
+    tmp_path: Path,
+) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start(start_request(target, tmp_path / "runs"))
+        session = manager._sessions[snapshot.run_id]
+        session.prepared.workflow.manifest = session.prepared.workflow.manifest.model_copy(
+            update={
+                "execution_mode": ExecutionMode.DOCKER,
+                "isolation_level": IsolationLevel.ISOLATED,
+                "verification_status": VerificationStatus.PASSED,
+            }
+        )
+
+        refreshed = manager.get(snapshot.run_id)
+
+        assert refreshed.execution_mode is ExecutionMode.DOCKER
+        assert refreshed.isolation_level is IsolationLevel.ISOLATED
+        assert refreshed.verification_status is VerificationStatus.PASSED
+        assert refreshed.trust_label is TrustLabel.ISOLATED_VERIFIED
         manager.cancel(snapshot.run_id)
     finally:
         manager.shutdown()

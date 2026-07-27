@@ -5,8 +5,19 @@ from pathlib import Path
 
 from repogent.codex_cli import CodexCliProvider
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
-from repogent.mcp_models import DoctorCheck, DoctorReport, DoctorRequest
-from repogent.preflight import Preflight, PreflightCheck, ReadinessStatus
+from repogent.executor_selection import ExecutorRegistry
+from repogent.mcp_models import (
+    DoctorCheck,
+    DoctorReport,
+    DoctorRequest,
+    ExecutorAvailability,
+)
+from repogent.preflight import (
+    Preflight,
+    PreflightCheck,
+    ReadinessStatus,
+    repository_preflight,
+)
 
 _PYTHON_REMEDIATION = "Install and run Repogent with Python 3.11 or newer"
 _DOCKER_REMEDIATION = "Install Docker and ensure docker is on PATH"
@@ -47,6 +58,21 @@ class DoctorService:
         )
 
         policy = ValidationPolicy()
+        if request.executor == "deferred":
+            base_preflight = repository_preflight(repository, policy)
+            checks.extend(self._preflight_checks(base_preflight.checks))
+            if request.provider == "codex-cli":
+                readiness = CodexCliProvider(
+                    model=request.model, target_root=repository
+                ).check_ready()
+                checks.append(self._provider_check(readiness.ready, readiness.reason))
+            return self._report(
+                request,
+                checks,
+                repository,
+                executors=ExecutorRegistry().inspect_availability(repository, policy),
+            )
+
         commands = policy.commands(repository)
         executor = (
             DockerExecutor()
@@ -151,7 +177,11 @@ class DoctorService:
 
     @staticmethod
     def _report(
-        request: DoctorRequest, checks: list[DoctorCheck], repository: Path | None = None
+        request: DoctorRequest,
+        checks: list[DoctorCheck],
+        repository: Path | None = None,
+        *,
+        executors: list[ExecutorAvailability] | None = None,
     ) -> DoctorReport:
         return DoctorReport(
             ready=all(check.passed or not check.required for check in checks),
@@ -159,6 +189,7 @@ class DoctorService:
             provider=request.provider,
             executor=request.executor,
             checks=checks,
+            executors=executors or [],
         )
 
 

@@ -1,3 +1,5 @@
+import pytest
+
 from repogent.domain import (
     CandidateEvidence,
     CandidateRecord,
@@ -5,8 +7,10 @@ from repogent.domain import (
     CheckoutState,
     CheckResult,
     CheckStatus,
+    ExecutionMode,
     FinalValidationStatus,
     ImplementationPlan,
+    IsolationLevel,
     MergeRecommendation,
     PlanStep,
     QAReview,
@@ -15,9 +19,27 @@ from repogent.domain import (
     RunManifest,
     RunStatus,
     ValidationReport,
+    VerificationStatus,
 )
 from repogent.localization import LocalizationReport, LocalizedSymbol
-from repogent.reporting import render_report
+from repogent.reporting import derive_trust_label, render_report
+
+
+def manifest_with_execution(
+    *, mode: ExecutionMode | None, verification_status: VerificationStatus
+) -> RunManifest:
+    isolation_level = None
+    if mode is ExecutionMode.LOCAL:
+        isolation_level = IsolationLevel.REDUCED_ISOLATION
+    elif mode is ExecutionMode.DOCKER:
+        isolation_level = IsolationLevel.ISOLATED
+    return RunManifest(
+        run_id="run-1",
+        request="change",
+        execution_mode=mode,
+        isolation_level=isolation_level,
+        verification_status=verification_status,
+    )
 
 
 def test_report_separates_tool_evidence_from_qa_interpretation() -> None:
@@ -213,3 +235,83 @@ def test_report_never_claims_not_applied_when_checkout_recovery_is_unknown() -> 
     assert "Real checkout patch: recovery unknown" in report
     assert "Real checkout patch: not applied" not in report
     assert "Inspect and manually restore src/app.py" in report
+
+
+@pytest.mark.parametrize(
+    ("mode", "status", "label"),
+    [
+        (None, VerificationStatus.UNVALIDATED, "UNVALIDATED"),
+        (ExecutionMode.LOCAL, VerificationStatus.VALIDATING, "REDUCED ISOLATION"),
+        (ExecutionMode.LOCAL, VerificationStatus.PASSED, "REDUCED ISOLATION"),
+        (ExecutionMode.LOCAL, VerificationStatus.FAILED, "REDUCED ISOLATION"),
+        (ExecutionMode.DOCKER, VerificationStatus.PASSED, "ISOLATED VERIFIED"),
+        (ExecutionMode.DOCKER, VerificationStatus.FAILED, "UNVALIDATED"),
+    ],
+)
+def test_report_never_overstates_verification(
+    mode: ExecutionMode | None, status: VerificationStatus, label: str
+) -> None:
+    manifest = manifest_with_execution(mode=mode, verification_status=status)
+    assert derive_trust_label(manifest) == label
+
+
+def test_report_shows_isolated_verified_only_for_docker_and_passed() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="add route",
+        status=RunStatus.COMPLETED,
+        execution_mode=ExecutionMode.DOCKER,
+        isolation_level=IsolationLevel.ISOLATED,
+        verification_status=VerificationStatus.PASSED,
+        preview_digest="a" * 64,
+    )
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Verification: ISOLATED VERIFIED" in report
+    assert "Execution mode: docker" in report
+    assert f"Preview digest: {'a' * 64}" in report
+
+
+def test_report_shows_none_for_unset_execution_evidence() -> None:
+    manifest = RunManifest(run_id="run-1", request="add route", status=RunStatus.COMPLETED)
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Verification: UNVALIDATED" in report
+    assert "Execution mode: none" in report
+    assert "Preview digest: none" in report
+
+
+def test_report_downgrades_docker_failure_to_unvalidated() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="add route",
+        status=RunStatus.HUMAN_INTERVENTION_REQUIRED,
+        execution_mode=ExecutionMode.DOCKER,
+        isolation_level=IsolationLevel.ISOLATED,
+        verification_status=VerificationStatus.FAILED,
+    )
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Verification: UNVALIDATED" in report
+
+
+def test_report_downgrades_docker_passed_without_isolated_level() -> None:
+    """Docker plus a passed check must not imply ISOLATED VERIFIED on its own.
+
+    ``isolation_level`` must also be ``ISOLATED``; a manifest that somehow
+    reports Docker execution and a passed check without isolation actually
+    having been applied must still be downgraded to UNVALIDATED.
+    """
+    manifest = RunManifest(
+        run_id="run-1",
+        request="add route",
+        status=RunStatus.COMPLETED,
+        execution_mode=ExecutionMode.DOCKER,
+        isolation_level=IsolationLevel.REDUCED_ISOLATION,
+        verification_status=VerificationStatus.PASSED,
+    )
+
+    assert derive_trust_label(manifest) == "UNVALIDATED"

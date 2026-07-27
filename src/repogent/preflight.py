@@ -51,7 +51,7 @@ class Preflight:
         repository = root.resolve(strict=True)
         if repository.parent == repository:
             raise ValueError("filesystem root repositories are unsupported")
-        git_commit, dirty_output, git_check = _git_state(repository)
+        base = repository_preflight(repository, self.policy)
         ready, reason = self.executor.readiness()
         commands = self.policy.commands(repository)
         executor_check = PreflightCheck(
@@ -60,7 +60,7 @@ class Preflight:
             required=True,
             reason=reason,
         )
-        checks = [git_check, executor_check]
+        checks = [*base.checks, executor_check]
         if ready:
             for command in commands:
                 available = self.executor.available(command)
@@ -84,19 +84,33 @@ class Preflight:
                         ),
                     )
                 )
-        payload = {
-            "root": str(repository),
-            "commit": git_commit or "no-commit",
-            "dirty": dirty_output,
-            "commands": sorted(command.name for command in commands),
-        }
-        fingerprint = _sha256(payload)
         return PreflightReport(
             checks=checks,
-            git_commit=git_commit,
-            dirty=bool(dirty_output),
-            repository_fingerprint=fingerprint,
+            git_commit=base.git_commit,
+            dirty=base.dirty,
+            repository_fingerprint=base.repository_fingerprint,
         )
+
+
+def repository_preflight(root: Path, policy: ValidationPolicy) -> PreflightReport:
+    repository = root.resolve(strict=True)
+    if not repository.is_dir() or repository.parent == repository:
+        raise ValueError("repository must be a supported directory")
+    git_commit, dirty_output, git_check = _git_state(repository)
+    commands = policy.commands(repository)
+    return PreflightReport(
+        checks=[git_check],
+        git_commit=git_commit,
+        dirty=bool(dirty_output),
+        repository_fingerprint=_sha256(
+            {
+                "root": str(repository),
+                "commit": git_commit or "no-commit",
+                "dirty": dirty_output,
+                "commands": sorted(command.name for command in commands),
+            }
+        ),
+    )
 
 
 def configuration_fingerprint(
