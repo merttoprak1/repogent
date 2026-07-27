@@ -4,7 +4,14 @@ from pathlib import Path
 import pytest
 
 from repogent.approvals import FakeApprover
-from repogent.domain import Decision, ExecutionMode, IsolationLevel, ProviderReadiness, RunStatus
+from repogent.domain import (
+    Decision,
+    ExecutionMode,
+    IsolationLevel,
+    ProviderReadiness,
+    RunStatus,
+    WorkflowOutcome,
+)
 from repogent.executor_selection import (
     ExecutorSelectionError,
     FixedExecutorSelector,
@@ -419,6 +426,7 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
     assert provider_constructed is False
     assert caught.value.manifest is not None
     assert caught.value.manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert caught.value.manifest.outcome is WorkflowOutcome.HUMAN_INTERVENTION_REQUIRED
 
 
 def test_build_run_constructs_scripted_workflow(tmp_path: Path) -> None:

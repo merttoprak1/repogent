@@ -340,6 +340,8 @@ class RunSession:
             )
         snapshot = RunSnapshot(
             run_id=manifest.run_id,
+            kind=manifest.kind,
+            outcome=manifest.outcome,
             status=manifest.status,
             stage=manifest.stage,
             pending_approval=pending,
@@ -578,6 +580,8 @@ class SessionManager:
             raise SessionError("run report exceeds 64,000 characters")
         return RunReport(
             run_id=run_id,
+            kind=snapshot.kind,
+            outcome=snapshot.outcome,
             status=snapshot.status,
             checkout_state=snapshot.checkout_state,
             evidence_path=snapshot.evidence_path,
