@@ -22,6 +22,8 @@ from repogent.domain import (
     RunManifest,
     RunStage,
     RunStatus,
+    WorkflowKind,
+    WorkflowOutcome,
 )
 from repogent.events import EventSink
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
@@ -122,6 +124,7 @@ def build_run(
     manifest = RunManifest(
         run_id=store.root.name,
         request=options.request,
+        kind=WorkflowKind.VERIFIED_CHANGE,
         events_file="events.jsonl",
     )
 
@@ -305,8 +308,18 @@ def terminalize_failure(
     reason: str,
     status: RunStatus = RunStatus.HUMAN_INTERVENTION_REQUIRED,
 ) -> RunManifest:
+    outcome = (
+        WorkflowOutcome.HUMAN_INTERVENTION_REQUIRED
+        if status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+        else None
+    )
     terminal = manifest.model_copy(
-        update={"status": status, "stage": RunStage.FINISHED, "reason": reason}
+        update={
+            "status": status,
+            "outcome": outcome,
+            "stage": RunStage.FINISHED,
+            "reason": reason,
+        }
     )
     store.update_manifest(terminal)
     store.write_final("report.md", render_report(terminal, None, None, None, None))

@@ -38,6 +38,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
     VerificationStatus,
+    WorkflowOutcome,
 )
 from repogent.events import EventSink
 from repogent.executor_selection import PreparedExecutor
@@ -301,6 +302,7 @@ def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) 
     manifest = workflow.run()
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
+    assert manifest.outcome is WorkflowOutcome.APPLIED
     assert manifest.candidate_ids == ["candidate-1"]
     assert manifest.selected_candidate_id == "candidate-1"
     assert len(list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))) == 1

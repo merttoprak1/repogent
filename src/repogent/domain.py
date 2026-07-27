@@ -32,6 +32,21 @@ class RunStatus(StrEnum):
     HUMAN_INTERVENTION_REQUIRED = "human_intervention_required"
 
 
+class WorkflowKind(StrEnum):
+    VERIFIED_CHANGE = "verified_change"
+    PATCH_REVIEW = "patch_review"
+    CI_TRIAGE = "ci_triage"
+    DEPENDENCY_UPDATE = "dependency_update"
+    SECURITY_FIX = "security_fix"
+    RELEASE_GATE = "release_gate"
+
+
+class WorkflowOutcome(StrEnum):
+    PATCH_READY = "patch_ready"
+    APPLIED = "applied"
+    HUMAN_INTERVENTION_REQUIRED = "human_intervention_required"
+
+
 class RunStage(StrEnum):
     CREATED = "created"
     ANALYZED = "analyzed"
@@ -356,6 +371,8 @@ class Budget(VersionedModel):
 class RunManifest(VersionedModel):
     run_id: str
     request: str
+    kind: WorkflowKind = WorkflowKind.VERIFIED_CHANGE
+    outcome: WorkflowOutcome | None = None
     status: RunStatus = RunStatus.RUNNING
     stage: RunStage = RunStage.CREATED
     repair_attempts: int = Field(default=0, ge=0, le=2)

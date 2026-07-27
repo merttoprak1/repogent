@@ -42,6 +42,7 @@ def render_report(
         f"# Repogent run {manifest.run_id}",
         "",
         f"Status: **{manifest.status.value}**",
+        f"Outcome: {manifest.outcome.value if manifest.outcome else 'none'}",
         f"Stage: `{manifest.stage.value}`",
         f"Request: {_markdown_text(manifest.request)}",
         f"Repair attempts: {manifest.repair_attempts}",

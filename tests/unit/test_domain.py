@@ -26,6 +26,8 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
     VerificationStatus,
+    WorkflowKind,
+    WorkflowOutcome,
 )
 from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
 
@@ -131,6 +133,8 @@ def test_manifest_starts_in_created_state() -> None:
     manifest = RunManifest(run_id="run-123", request="Add a health route")
     assert manifest.status is RunStatus.RUNNING
     assert manifest.stage is RunStage.CREATED
+    assert manifest.kind is WorkflowKind.VERIFIED_CHANGE
+    assert manifest.outcome is None
 
 
 def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
@@ -278,6 +282,28 @@ def _snapshot_payload() -> dict[str, object]:
         "final_validation_status": FinalValidationStatus.NOT_STARTED,
         "evidence_path": "/evidence/run-1",
     }
+
+
+def test_mcp_models_preserve_workflow_kind_and_outcome() -> None:
+    snapshot = RunSnapshot(
+        **{
+            **_snapshot_payload(),
+            "kind": WorkflowKind.VERIFIED_CHANGE,
+            "outcome": WorkflowOutcome.PATCH_READY,
+        }
+    )
+    report = RunReport(
+        run_id="run-1",
+        kind=WorkflowKind.VERIFIED_CHANGE,
+        outcome=WorkflowOutcome.PATCH_READY,
+        status=RunStatus.COMPLETED,
+        checkout_state=CheckoutState.NOT_APPLIED,
+        evidence_path="/evidence/run-1",
+        report="done",
+    )
+
+    assert snapshot.outcome is WorkflowOutcome.PATCH_READY
+    assert report.kind is WorkflowKind.VERIFIED_CHANGE
 
 
 @pytest.mark.parametrize("model", ["decision", "snapshot", "report"])

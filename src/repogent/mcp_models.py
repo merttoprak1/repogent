@@ -17,6 +17,8 @@ from repogent.domain import (
     TrustLabel,
     VerificationStatus,
     VersionedModel,
+    WorkflowKind,
+    WorkflowOutcome,
     compute_trust_label,
 )
 from repogent.repository_scope import ScopeSource
@@ -85,6 +87,8 @@ class ExecutionDecision(VersionedModel):
 
 class RunSnapshot(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
+    kind: WorkflowKind = WorkflowKind.VERIFIED_CHANGE
+    outcome: WorkflowOutcome | None = None
     status: RunStatus
     stage: RunStage
     pending_approval: PendingApproval | None = None
@@ -157,6 +161,8 @@ class RunSnapshot(VersionedModel):
 
 class RunReport(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
+    kind: WorkflowKind = WorkflowKind.VERIFIED_CHANGE
+    outcome: WorkflowOutcome | None = None
     status: RunStatus
     checkout_state: CheckoutState
     evidence_path: str = Field(max_length=4_096)

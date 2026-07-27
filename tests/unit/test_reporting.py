@@ -20,6 +20,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
     VerificationStatus,
+    WorkflowOutcome,
 )
 from repogent.localization import LocalizationReport, LocalizedSymbol
 from repogent.reporting import derive_trust_label, render_report
@@ -295,6 +296,20 @@ def test_report_downgrades_docker_failure_to_unvalidated() -> None:
 
     report = render_report(manifest, None, None, None, None)
 
+    assert "Verification: UNVALIDATED" in report
+
+
+def test_report_renders_workflow_outcome_separately_from_verification() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="add route",
+        status=RunStatus.HUMAN_INTERVENTION_REQUIRED,
+        outcome=WorkflowOutcome.HUMAN_INTERVENTION_REQUIRED,
+    )
+
+    report = render_report(manifest, None, None, None, None)
+
+    assert "Outcome: human_intervention_required" in report
     assert "Verification: UNVALIDATED" in report
 
 

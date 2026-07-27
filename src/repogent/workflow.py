@@ -53,6 +53,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
     VerificationStatus,
+    WorkflowOutcome,
     utc_now,
 )
 from repogent.events import EventSink
@@ -1015,9 +1016,24 @@ class Workflow:
             if self.manifest.stage is RunStage.FINISHED
             else transition(self.manifest.stage, RunStage.FINISHED)
         )
+        outcome: WorkflowOutcome | None = None
+        if status is RunStatus.HUMAN_INTERVENTION_REQUIRED:
+            outcome = WorkflowOutcome.HUMAN_INTERVENTION_REQUIRED
+        elif (
+            status
+            in {
+                RunStatus.COMPLETED,
+                RunStatus.COMPLETED_WITH_FINDINGS,
+                RunStatus.CHANGES_REQUESTED,
+            }
+            and self.manifest.selected_patch_applied
+            and self.manifest.final_validation_status is FinalValidationStatus.PASSED
+        ):
+            outcome = WorkflowOutcome.APPLIED
         self.manifest = self.manifest.model_copy(
             update={
                 "status": status,
+                "outcome": outcome,
                 "stage": final_stage,
                 "reason": reason,
                 "updated_at": utc_now(),
