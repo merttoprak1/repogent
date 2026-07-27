@@ -42,6 +42,7 @@ from repogent.patching import PatchApplier, PatchPolicy
 from repogent.preflight import PreflightReport
 from repogent.providers import ScriptedProvider
 from repogent.repository import RepositoryInspector
+from repogent.repository_scope import RepositoryScope, ScopeSource
 from repogent.run_builder import PreparedRun, RunOptions
 from repogent.run_sessions import SessionError, SessionManager
 from repogent.workflow import Workflow
@@ -257,8 +258,13 @@ def make_builder(
         )
         approver = approver_factory(run_id)
         manifest = RunManifest(run_id=run_id, request=options.request)
+        scope = RepositoryScope(
+            root=root,
+            source=ScopeSource.FILESYSTEM,
+            paths=(),
+        )
         selector = (
-            executor_selector_factory(run_id, root, ValidationPolicy())
+            executor_selector_factory(run_id, root, ValidationPolicy(scope=scope))
             if options.executor == "deferred"
             else None
         )
@@ -284,12 +290,14 @@ def make_builder(
             artifacts=store,
             inspector=inspector or RepositoryInspector(),  # type: ignore[arg-type]
             budget=budget or Budget(),
+            scope=scope,
             cancel_requested=cancel_requested,
         )
         return PreparedRun(
             store=store,
             manifest=manifest,
             workflow=workflow,
+            scope=scope,
             approver=approver,
             preflight=PreflightReport(
                 checks=[], git_commit=None, dirty=False, repository_fingerprint="repo"

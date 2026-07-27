@@ -41,6 +41,7 @@ from repogent.preflight import (
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
+from repogent.repository_scope import RepositoryScope, RepositoryScopeResolver
 from repogent.workflow import ExecutorSelector, Workflow
 
 ProviderName = Literal["openai", "codex-cli", "scripted"]
@@ -64,6 +65,7 @@ class PreparedRun:
     store: ArtifactStore
     manifest: RunManifest
     workflow: Workflow
+    scope: RepositoryScope
     approver: Approver
     preflight: PreflightReport
     executor_selector: ExecutorSelector
@@ -124,12 +126,13 @@ def build_run(
     )
 
     try:
+        scope = RepositoryScopeResolver().resolve(repository)
         effective_model = options.model or {
             "openai": "gpt-5.6-sol",
             "codex-cli": "default",
             "scripted": "scripted",
         }[options.provider]
-        policy = ValidationPolicy()
+        policy = ValidationPolicy(scope=scope)
         commands = policy.commands(repository)
         manifest = manifest.model_copy(
             update={
@@ -251,6 +254,7 @@ def build_run(
             inspector=RepositoryInspector(),
             retriever=LexicalRetriever(),
             budget=Budget(),
+            scope=scope,
             events=events or store.event_store(),
             cancel_requested=cancel_requested,
         )
@@ -276,6 +280,7 @@ def build_run(
         store=store,
         manifest=manifest,
         workflow=workflow,
+        scope=scope,
         approver=approver,
         preflight=preflight,
         executor_selector=executor_selector,

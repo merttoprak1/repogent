@@ -19,6 +19,7 @@ from repogent.domain import (
     VersionedModel,
     compute_trust_label,
 )
+from repogent.repository_scope import ScopeSource
 
 BoundedPath = Annotated[str, Field(max_length=4_096)]
 
@@ -191,10 +192,18 @@ class DoctorCheck(VersionedModel):
     remediation: str | None = Field(default=None, max_length=512)
 
 
+class RepositoryScopeSummary(VersionedModel):
+    source: ScopeSource
+    selected_files: int = Field(ge=0)
+    aggregate_bytes: int = Field(ge=0)
+    skipped_paths: int = Field(ge=0)
+
+
 class DoctorReport(VersionedModel):
     ready: bool
     repository: str = Field(max_length=4_096)
     provider: str = Field(max_length=32)
     executor: str = Field(max_length=32)
-    checks: list[DoctorCheck] = Field(max_length=9)
+    scope: RepositoryScopeSummary | None = None
+    checks: list[DoctorCheck] = Field(max_length=12)
     executors: list[ExecutorAvailability] = Field(default_factory=list, max_length=2)

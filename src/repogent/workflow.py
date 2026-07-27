@@ -68,6 +68,7 @@ from repogent.provider_context import ProviderContextBuilder
 from repogent.providers import ProviderError
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
+from repogent.repository_scope import RepositoryScope
 from repogent.symbols import PythonSymbolGraph, PythonSymbolGraphBuilder
 
 
@@ -138,6 +139,7 @@ class Workflow:
     artifacts: ArtifactStore
     inspector: RepositoryInspector
     budget: Budget
+    scope: RepositoryScope | None = None
     validator: Validator | None = None
     executor_selector: ExecutorSelector | None = None
     previewer: PatchPreviewer | None = None
@@ -767,7 +769,20 @@ class Workflow:
 
     def _inspect_repository(self) -> RepositoryInventory:
         self.ensure_time()
-        if _accepts_keyword(self.inspector.inspect, "deadline"):
+        accepts_deadline = _accepts_keyword(self.inspector.inspect, "deadline")
+        accepts_scope = (
+            self.scope is not None
+            and _accepts_keyword(self.inspector.inspect, "scope")
+        )
+        if accepts_deadline and accepts_scope:
+            return self.inspector.inspect(
+                self.root,
+                scope=self.scope,
+                deadline=self.deadline,
+            )
+        if accepts_scope:
+            return self.inspector.inspect(self.root, scope=self.scope)
+        if accepts_deadline:
             return self.inspector.inspect(self.root, deadline=self.deadline)
         return self.inspector.inspect(self.root)
 
