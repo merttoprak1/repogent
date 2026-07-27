@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess  # nosec B404  # fixed Git argv; repository data is never a command
 import tempfile
 from enum import StrEnum
 from pathlib import Path
@@ -81,7 +81,7 @@ class RepositoryScopeResolver:
 
 def _git_repository(root: Path, timeout_seconds: float) -> bool:
     executable = _git_executable()
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(  # noqa: S603  # nosec B603
         (executable, "-C", str(root), "rev-parse", "--is-inside-work-tree"),
         check=False,
         capture_output=True,
@@ -103,7 +103,7 @@ def _list_git_paths(
 ) -> bytes:
     executable = _git_executable()
     with tempfile.TemporaryFile() as output:
-        subprocess.run(  # noqa: S603
+        subprocess.run(  # noqa: S603  # nosec B603
             (
                 executable,
                 "-C",
