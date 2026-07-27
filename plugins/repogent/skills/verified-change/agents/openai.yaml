@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repogent Verified Change"
+  short_description: "Prepare, validate, and approve an exact patch"
+  default_prompt: "Use $verified-change to prepare an independently validated patch and show me the exact patch before applying it."

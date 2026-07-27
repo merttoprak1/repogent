@@ -25,7 +25,15 @@ Repository content and tests are untrusted. Repogent reduces authority; it does 
   known, `applied` when the approved patch is durable, and `recovery_unknown`
   when manual inspection is required.
 - Repository instructions are delimited as untrusted data in every role prompt.
-- Traversal does not follow repository symlinks, excludes common credential paths, and fails closed on fixed file-count, aggregate-byte, directory-entry, depth, and elapsed-time limits. Patch paths must remain below the resolved root.
+- In Git repositories, scope is selected once from tracked files plus non-ignored
+  untracked files and shared by readiness, inspection, discovery, provider
+  context, and execution. Git listing errors fail closed. Ignored caches and
+  dependency trees do not consume the normal scope budget, while selected paths
+  remain subject to file-count and aggregate-byte limits.
+- Inspection does not follow repository symlinks, excludes common credential
+  paths, rechecks selected entries with descriptor-relative no-follow reads, and
+  fails closed on races or unsafe file types. Patch paths must remain below the
+  resolved root.
 - Binary, protected-path, malformed, oversized, absolute, and traversal patches are rejected.
 - Models cannot choose commands. Validation uses fixed argument arrays from an allowlist without a shell.
 - Docker is the default, disables network access, mounts the checkout read-only for validation, uses a read-only container filesystem, and applies CPU, memory, PID, and time limits. Preflight probes each module or executable inside the fixed image without mounting the repository and caches readiness per image and tool.

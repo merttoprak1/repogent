@@ -38,6 +38,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
     VerificationStatus,
+    WorkflowOutcome,
 )
 from repogent.events import EventSink
 from repogent.executor_selection import PreparedExecutor
@@ -47,7 +48,8 @@ from repogent.preflight import PreflightReport
 from repogent.provider_context import MAX_PROVIDER_PAYLOAD_CHARS
 from repogent.providers import ProviderError, ProviderResult, ScriptedProvider
 from repogent.reporting import derive_trust_label
-from repogent.repository import RepositoryInspector
+from repogent.repository import RepositoryInspector, RepositoryInventory
+from repogent.repository_scope import RepositoryScope, ScopeSource
 from repogent.symbols import PythonSymbolGraphBuilder
 from repogent.workflow import BudgetExceeded, IllegalTransition, Workflow, transition
 
@@ -252,6 +254,44 @@ def test_illegal_transition_is_rejected() -> None:
         transition(RunStage.CREATED, RunStage.PATCH_APPLIED)
 
 
+def test_workflow_inspection_uses_retained_repository_scope(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    scope = RepositoryScope(
+        root=workflow.root,
+        source=ScopeSource.GIT,
+        paths=(Path("app.py"),),
+    )
+    received: list[RepositoryScope | None] = []
+
+    class RecordingInspector:
+        def inspect(
+            self,
+            root: Path,
+            *,
+            scope: RepositoryScope | None = None,
+            deadline: float | None = None,
+        ) -> RepositoryInventory:
+            del deadline
+            received.append(scope)
+            return RepositoryInventory(
+                root=str(root),
+                files=[],
+                scope_source=scope.source if scope is not None else ScopeSource.FILESYSTEM,
+            )
+
+    workflow.inspector = RecordingInspector()  # type: ignore[assignment]
+    workflow.scope = scope
+    workflow.deadline = float("inf")
+
+    workflow._inspect_repository()
+
+    assert received == [scope]
+
+
 def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) -> None:
     workflow = make_phase2_workflow(
         tmp_path,
@@ -262,6 +302,7 @@ def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) 
     manifest = workflow.run()
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
+    assert manifest.outcome is WorkflowOutcome.APPLIED
     assert manifest.candidate_ids == ["candidate-1"]
     assert manifest.selected_candidate_id == "candidate-1"
     assert len(list(workflow.artifacts.root.glob("candidate-[0-9][0-9][0-9].json"))) == 1

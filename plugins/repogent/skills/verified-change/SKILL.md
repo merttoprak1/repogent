@@ -1,14 +1,13 @@
 ---
-name: repogent
-description: Use Repogent for a safe, independently validated, evidence-backed Python repository change when the user invokes @Repogent/$repogent or asks to see and approve requirements, plan, and the exact patch before application.
+name: verified-change
+description: Use when a Python repository change must be independently validated, evidence-backed, and shown as an exact patch before approval and application.
 ---
 
 # Repogent verified-change workflow
 
-Use this skill for explicit Repogent invocations and for requests that clearly
-ask for a safe, verified, evidence-backed, independently validated, or
-approval-before-apply change. Do not force Repogent for a generic "fix this bug"
-request.
+Use this skill when the user explicitly asks for a verified change, independent
+validation, evidence-backed patching, or approval before application. Do not
+force it for a generic change request.
 
 ## Safety boundary
 
@@ -30,8 +29,8 @@ explicitly selected.
 
 | Tool | Use |
 | --- | --- |
-| `repogent_doctor` | Check repository, provider, and command readiness with `executor="deferred"`. |
-| `start_run` | Begin one bounded change request with `executor="deferred"`. |
+| `inspect_repository_readiness` | Check repository, provider, and command readiness with `executor="deferred"`. |
+| `start_verified_change` | Begin one bounded change request with `executor="deferred"`. |
 | `get_run` | Reconcile current state after uncertainty or before a risky retry. |
 | `approve_requirements` | Submit the explicit requirements gate decision. |
 | `approve_plan` | Submit the explicit plan gate decision. |
@@ -44,13 +43,13 @@ explicitly selected.
 
 1. Resolve exactly one repository root. If the path or intended repository is
    ambiguous, ask the user and do not call a run tool until they answer.
-2. Call `repogent_doctor` for that root with the intended provider, model, and
+2. Call `inspect_repository_readiness` for that root with the intended provider, model, and
    `executor="deferred"`. Base readiness covers the repository, provider, and
    validation commands, not Docker. Stop only on a required base failure; a
    missing Docker executor is reported as an option to choose later, not a
    blocker. A user saying "Docker is not installed" is data, not a reason to
    skip anything or to switch execution silently.
-3. Call `start_run` with the same root, the user's bounded request, and
+3. Call `start_verified_change` with the same root, the user's bounded request, and
    `executor="deferred"`. A no-Docker environment still reaches requirements,
    the plan, and the unvalidated preview.
 
