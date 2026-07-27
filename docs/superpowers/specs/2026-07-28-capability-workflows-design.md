@@ -261,12 +261,13 @@ patch-application delivery.
 ## Delivery Sequence
 
 1. Shared foundation: Git scope, typed run kinds, common evidence and report
-   contracts, and removal of generic `start_run`.
+   contracts, migration of the existing workflow and skill to
+   `verified-change`, and removal of generic `start_run`.
 2. Repository readiness capability.
 3. Read-only patch review and CI failure triage.
 4. Commit-bound release gate.
 5. Python dependency update and security fix.
-6. Migration of the existing workflow to `verified-change`.
+6. Cross-capability policy and report integration.
 7. Seven plugin skills, agent metadata, documentation, pressure tests, and the
    integrated release gate.
 
