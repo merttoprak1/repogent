@@ -20,6 +20,7 @@ from threading import Lock, Thread
 from typing import BinaryIO, Protocol
 
 from repogent.domain import CheckResult, CheckStatus
+from repogent.repository_scope import RepositoryScope, ScopeSource
 
 
 class CommandPolicyError(ValueError):
@@ -176,8 +177,11 @@ class CommandSpec:
 
 
 class ValidationPolicy:
+    def __init__(self, *, scope: RepositoryScope | None = None) -> None:
+        self.scope = scope
+
     def commands(self, root: Path) -> list[CommandSpec]:
-        pytest_required = _has_pytest_suite(root)
+        pytest_required = _has_pytest_suite(root, self.scope)
         return [
             CommandSpec(
                 "pytest", ("python", "-m", "pytest", "-q"), pytest_required, module="pytest"
@@ -190,9 +194,19 @@ class ValidationPolicy:
         ]
 
 
-def _has_pytest_suite(root: Path) -> bool:
-    if _has_pytest_configuration(root):
+def _has_pytest_suite(root: Path, scope: RepositoryScope | None = None) -> bool:
+    if _has_pytest_configuration(root, scope):
         return True
+    if scope is not None and scope.source is ScopeSource.GIT:
+        return any(
+            path.name.endswith(".py")
+            and (
+                path.name.startswith("test_")
+                or path.name.endswith("_test.py")
+                or any(part in {"test", "tests"} for part in path.parts[:-1])
+            )
+            for path in scope.paths
+        )
     pending: list[tuple[Path, int]] = [(root, 0)]
     entries_seen = 0
     while pending:
@@ -226,9 +240,12 @@ def _has_pytest_suite(root: Path) -> bool:
     return False
 
 
-def _has_pytest_configuration(root: Path) -> bool:
+def _has_pytest_configuration(
+    root: Path,
+    scope: RepositoryScope | None = None,
+) -> bool:
     try:
-        pyproject = _read_recognized_configuration(root, "pyproject.toml")
+        pyproject = _read_recognized_configuration(root, "pyproject.toml", scope)
     except _PytestConfigurationUncertain:
         return True
     if pyproject is not None:
@@ -245,7 +262,7 @@ def _has_pytest_configuration(root: Path) -> bool:
         ("tox.ini", {"pytest"}),
     ):
         try:
-            contents = _read_recognized_configuration(root, name)
+            contents = _read_recognized_configuration(root, name, scope)
         except _PytestConfigurationUncertain:
             return True
         if contents is None:
@@ -260,9 +277,19 @@ def _has_pytest_configuration(root: Path) -> bool:
     return False
 
 
-def _read_recognized_configuration(root: Path, name: str) -> str | None:
+def _read_recognized_configuration(
+    root: Path,
+    name: str,
+    scope: RepositoryScope | None = None,
+) -> str | None:
     """Read one root config without following links or blocking on special files."""
 
+    if (
+        scope is not None
+        and scope.source is ScopeSource.GIT
+        and Path(name) not in scope.paths
+    ):
+        return None
     try:
         repository = root.resolve(strict=True)
     except (OSError, RuntimeError) as error:

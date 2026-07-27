@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 from enum import StrEnum
 from pathlib import Path
+from shutil import which as find_executable
 
 from repogent.domain import VersionedModel
 
@@ -127,7 +127,7 @@ def _list_git_paths(
 
 
 def _git_executable() -> str:
-    executable = shutil.which("git")
+    executable = find_executable("git")
     if executable is None:
         raise RepositoryScopeError("Git executable is unavailable")
     return executable
