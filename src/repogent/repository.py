@@ -14,6 +14,7 @@ from pathlib import Path
 from pydantic import Field
 
 from repogent.domain import ContextSnippet, VersionedModel
+from repogent.repository_scope import RepositoryScope, ScopeSource
 
 IGNORED_DIRECTORIES = {
     ".git",
@@ -86,6 +87,7 @@ class RepositoryInventory(VersionedModel):
     root: str
     files: list[FileRecord]
     skipped: list[str] = Field(default_factory=list)
+    scope_source: ScopeSource = ScopeSource.FILESYSTEM
 
 
 class RepositoryInspector:
@@ -115,7 +117,13 @@ class RepositoryInspector:
         self.max_depth = max_depth
         self.max_elapsed_seconds = max_elapsed_seconds
 
-    def inspect(self, root: Path, *, deadline: float | None = None) -> RepositoryInventory:
+    def inspect(
+        self,
+        root: Path,
+        *,
+        scope: RepositoryScope | None = None,
+        deadline: float | None = None,
+    ) -> RepositoryInventory:
         local_deadline = time.monotonic() + self.max_elapsed_seconds
         effective_deadline = (
             min(local_deadline, deadline) if deadline is not None else local_deadline
@@ -124,6 +132,8 @@ class RepositoryInspector:
         resolved = root.resolve(strict=True)
         if not resolved.is_dir():
             raise ValueError("repository root must be a directory")
+        if scope is not None and scope.root.resolve(strict=True) != resolved:
+            raise ValueError("repository scope root does not match inspection root")
         records: list[FileRecord] = []
         skipped: set[str] = set()
         state = _InspectionState()
@@ -132,15 +142,122 @@ class RepositoryInspector:
         except OSError as error:
             raise ValueError("repository root must be a directory") from error
         try:
-            self._inspect_directory(
-                root_fd, Path(), records, skipped, state, effective_deadline
-            )
+            if scope is not None and scope.source is ScopeSource.GIT:
+                self._inspect_scoped_paths(
+                    root_fd,
+                    scope.paths,
+                    records,
+                    skipped,
+                    state,
+                    effective_deadline,
+                )
+            else:
+                self._inspect_directory(
+                    root_fd, Path(), records, skipped, state, effective_deadline
+                )
         finally:
             os.close(root_fd)
         return RepositoryInventory(
             root=str(resolved),
             files=sorted(records, key=lambda item: item.path),
             skipped=sorted(skipped),
+            scope_source=scope.source if scope is not None else ScopeSource.FILESYSTEM,
+        )
+
+    def _inspect_scoped_paths(
+        self,
+        root_fd: int,
+        paths: tuple[Path, ...],
+        records: list[FileRecord],
+        skipped: set[str],
+        state: _InspectionState,
+        deadline: float,
+    ) -> None:
+        for relative_path in paths:
+            self._ensure_deadline(deadline)
+            relative = relative_path.as_posix()
+            state.directory_entries += 1
+            if state.directory_entries > self.max_directory_entries:
+                raise RepositoryLimitError("repository directory entries limit exceeded")
+            if (
+                len(relative_path.parts) - 1 > self.max_depth
+                or any(part in IGNORED_DIRECTORIES for part in relative_path.parts)
+                or any(
+                    self._is_sensitive_directory(Path(*relative_path.parts[:index]))
+                    for index in range(1, len(relative_path.parts))
+                )
+                or self._is_sensitive_file(relative_path)
+            ):
+                skipped.add(relative)
+                continue
+            parent_fd = os.dup(root_fd)
+            try:
+                opened = True
+                for part in relative_path.parts[:-1]:
+                    try:
+                        next_fd = os.open(part, self._directory_flags, dir_fd=parent_fd)
+                    except OSError:
+                        opened = False
+                        break
+                    os.close(parent_fd)
+                    parent_fd = next_fd
+                if not opened:
+                    skipped.add(relative)
+                    continue
+                name = relative_path.name
+                try:
+                    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except OSError:
+                    skipped.add(relative)
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    skipped.add(relative)
+                    continue
+                read_result = self._read_regular_file(parent_fd, name, deadline)
+                if read_result is None:
+                    skipped.add(relative)
+                    continue
+                self._append_record(
+                    relative_path,
+                    read_result,
+                    records,
+                    skipped,
+                    state,
+                )
+            finally:
+                os.close(parent_fd)
+
+    def _append_record(
+        self,
+        relative_path: Path,
+        read_result: tuple[bytes, int],
+        records: list[FileRecord],
+        skipped: set[str],
+        state: _InspectionState,
+    ) -> None:
+        data, size = read_result
+        relative = relative_path.as_posix()
+        if any(header in data for header in PRIVATE_KEY_HEADERS):
+            skipped.add(relative)
+            return
+        if len(records) >= self.max_files:
+            raise RepositoryLimitError("repository accepted file count limit exceeded")
+        if state.aggregate_bytes + size > self.max_total_bytes:
+            raise RepositoryLimitError("repository aggregate bytes limit exceeded")
+        state.aggregate_bytes += size
+        text = data.decode("utf-8", errors="replace")
+        symbols, imports, routes = self._python_metadata(relative_path, text)
+        records.append(
+            FileRecord(
+                path=relative,
+                size=size,
+                sha256=hashlib.sha256(data).hexdigest(),
+                kind=self._kind(relative_path),
+                symbols=symbols,
+                imports=imports,
+                routes=routes,
+                text=text,
+            )
         )
 
     @property
@@ -202,28 +319,12 @@ class RepositoryInspector:
                 if read_result is None:
                     skipped.add(relative)
                     continue
-                data, size = read_result
-                if any(header in data for header in PRIVATE_KEY_HEADERS):
-                    skipped.add(relative)
-                    continue
-                if len(records) >= self.max_files:
-                    raise RepositoryLimitError("repository accepted file count limit exceeded")
-                if state.aggregate_bytes + size > self.max_total_bytes:
-                    raise RepositoryLimitError("repository aggregate bytes limit exceeded")
-                state.aggregate_bytes += size
-                text = data.decode("utf-8", errors="replace")
-                symbols, imports, routes = self._python_metadata(relative_path, text)
-                records.append(
-                    FileRecord(
-                        path=relative,
-                        size=size,
-                        sha256=hashlib.sha256(data).hexdigest(),
-                        kind=self._kind(relative_path),
-                        symbols=symbols,
-                        imports=imports,
-                        routes=routes,
-                        text=text,
-                    )
+                self._append_record(
+                    relative_path,
+                    read_result,
+                    records,
+                    skipped,
+                    state,
                 )
             else:
                 skipped.add(relative)

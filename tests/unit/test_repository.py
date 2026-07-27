@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,11 @@ from pytest import MonkeyPatch
 
 from repogent import repository
 from repogent.repository import LexicalRetriever, RepositoryInspector
+from repogent.repository_scope import (
+    RepositoryScope,
+    RepositoryScopeResolver,
+    ScopeSource,
+)
 
 
 def test_inspector_extracts_fastapi_route_and_symbols(tmp_path: Path) -> None:
@@ -133,6 +139,72 @@ def test_inspector_honors_external_deadline(
 
     with pytest.raises(repository.RepositoryLimitError, match="deadline"):
         RepositoryInspector().inspect(tmp_path, deadline=9.0)
+
+
+def test_inspector_applies_aggregate_limit_only_to_git_scope(tmp_path: Path) -> None:
+    subprocess.run(  # noqa: S603
+        ("git", "-C", str(tmp_path), "init", "--quiet"),  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / ".gitignore").write_text("ignored/\n")
+    (tmp_path / "app.py").write_text("value = 1\n")
+    ignored = tmp_path / "ignored"
+    ignored.mkdir()
+    (ignored / "large.bin").write_bytes(b"x" * 128)
+    scope = RepositoryScopeResolver().resolve(tmp_path)
+
+    inventory = RepositoryInspector(max_total_bytes=32).inspect(tmp_path, scope=scope)
+
+    assert inventory.scope_source is ScopeSource.GIT
+    assert [record.path for record in inventory.files] == [".gitignore", "app.py"]
+
+
+def test_inspector_still_rejects_selected_file_over_aggregate_limit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_bytes(b"x" * 33)
+    scope = RepositoryScope(
+        root=tmp_path,
+        source=ScopeSource.GIT,
+        paths=(Path("app.py"),),
+    )
+
+    with pytest.raises(repository.RepositoryLimitError, match="aggregate bytes"):
+        RepositoryInspector(max_total_bytes=32).inspect(tmp_path, scope=scope)
+
+
+def test_inspector_rechecks_sensitive_and_symlinked_scoped_paths(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("value = 1\n")
+    (tmp_path / ".env").write_text("TOKEN=secret\n")
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("secret = True\n")
+    (tmp_path / "escape.py").symlink_to(outside)
+    scope = RepositoryScope(
+        root=tmp_path,
+        source=ScopeSource.GIT,
+        paths=(Path(".env"), Path("app.py"), Path("escape.py")),
+    )
+
+    inventory = RepositoryInspector().inspect(tmp_path, scope=scope)
+
+    assert [record.path for record in inventory.files] == ["app.py"]
+    assert inventory.skipped == [".env", "escape.py"]
+
+
+def test_scoped_root_file_does_not_consume_directory_depth(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("value = 1\n")
+    scope = RepositoryScope(
+        root=tmp_path,
+        source=ScopeSource.GIT,
+        paths=(Path("app.py"),),
+    )
+
+    inventory = RepositoryInspector(max_depth=0).inspect(tmp_path, scope=scope)
+
+    assert [record.path for record in inventory.files] == ["app.py"]
 
 
 def test_inspector_does_not_read_file_replaced_by_symlink_during_open(
