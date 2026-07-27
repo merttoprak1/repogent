@@ -16,7 +16,7 @@ from repogent.mcp_models import (
     RunDecision,
     RunReport,
     RunSnapshot,
-    RunStart,
+    VerifiedChangeStart,
 )
 from repogent.run_sessions import SessionManager
 from repogent.sanitization import sanitize_data
@@ -101,7 +101,7 @@ def create_server(
     server = FastMCP("Repogent", json_response=True, lifespan=lifespan)
 
     @server.tool(
-        name="repogent_doctor",
+        name="inspect_repository_readiness",
         annotations=ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -109,11 +109,11 @@ def create_server(
             openWorldHint=False,
         ),
     )
-    def repogent_doctor(request: DoctorRequest) -> DoctorReport:
+    def inspect_repository_readiness(request: DoctorRequest) -> DoctorReport:
         return _call_service(lambda: readiness.run(request), _ServiceError.DOCTOR)
 
     @server.tool(
-        name="start_run",
+        name="start_verified_change",
         annotations=ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -121,8 +121,8 @@ def create_server(
             openWorldHint=True,
         ),
     )
-    def start_run(request: RunStart) -> RunSnapshot:
-        return _call_service(lambda: sessions.start(request), _ServiceError.START)
+    def start_verified_change(request: VerifiedChangeStart) -> RunSnapshot:
+        return _call_service(lambda: sessions.start_verified_change(request), _ServiceError.START)
 
     def require_run_id(run_id: RunId) -> str:
         if not 1 <= len(run_id) <= 256:

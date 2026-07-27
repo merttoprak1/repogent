@@ -29,7 +29,7 @@ from repogent.domain import (
     WorkflowKind,
     WorkflowOutcome,
 )
-from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, RunStart
+from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, VerifiedChangeStart
 
 
 def test_pending_approval_requires_sha256_digest() -> None:
@@ -215,7 +215,7 @@ def test_run_event_message_is_limited_to_4096_characters() -> None:
 def test_mcp_run_start_and_decision_are_versioned_and_typed(tmp_path) -> None:
     target = tmp_path / "target"
     script = tmp_path / "script.json"
-    start = RunStart(
+    start = VerifiedChangeStart(
         repository=target,
         request="Add health endpoint",
         provider="scripted",
@@ -234,9 +234,11 @@ def test_mcp_run_start_and_decision_are_versioned_and_typed(tmp_path) -> None:
     assert start.schema_version == "1"
     assert decision.feedback is None
 
-    assert RunStart(repository=target, request="Apply a safe change").executor == "docker"
     assert (
-        RunStart(
+        VerifiedChangeStart(repository=target, request="Apply a safe change").executor == "deferred"
+    )
+    assert (
+        VerifiedChangeStart(
             repository=target,
             request="Apply a safe change",
             executor="deferred",
@@ -244,12 +246,12 @@ def test_mcp_run_start_and_decision_are_versioned_and_typed(tmp_path) -> None:
         == "deferred"
     )
     with pytest.raises(ValidationError, match="executor"):
-        RunStart(repository=target, request="Apply a safe change", executor="remote")
+        VerifiedChangeStart(repository=target, request="Apply a safe change", executor="remote")
 
 
 def test_mcp_models_enforce_input_and_output_bounds(tmp_path) -> None:
     with pytest.raises(ValidationError, match="at most 10000"):
-        RunStart(repository=tmp_path, request="x" * 10_001)
+        VerifiedChangeStart(repository=tmp_path, request="x" * 10_001)
     with pytest.raises(ValidationError, match="digest"):
         RunDecision(
             run_id="run-1",

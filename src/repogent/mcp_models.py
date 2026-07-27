@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
@@ -26,21 +26,14 @@ from repogent.repository_scope import ScopeSource
 BoundedPath = Annotated[str, Field(max_length=4_096)]
 
 
-class RunStart(VersionedModel):
+class VerifiedChangeStart(VersionedModel):
     repository: Path
     request: str = Field(min_length=1, max_length=10_000)
-    provider: str = "codex-cli"
-    model: str | None = None
+    provider: Literal["openai", "codex-cli", "scripted"] = "codex-cli"
+    model: str | None = Field(default=None, max_length=256)
     script: Path | None = None
-    executor: str = "docker"
+    executor: Literal["docker", "local", "deferred"] = "deferred"
     output_dir: Path | None = None
-
-    @field_validator("executor")
-    @classmethod
-    def validate_executor(cls, executor: str) -> str:
-        if executor not in {"docker", "local", "deferred"}:
-            raise ValueError("executor must be docker, local, or deferred")
-        return executor
 
 
 class RunDecision(VersionedModel):

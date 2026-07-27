@@ -27,7 +27,7 @@ from repogent.mcp_models import (
     RunDecision,
     RunReport,
     RunSnapshot,
-    RunStart,
+    VerifiedChangeStart,
 )
 from repogent.mcp_server import create_server
 
@@ -111,8 +111,8 @@ class FakeManager:
         self.calls: list[tuple[str, object]] = []
         self.shutdown_called = False
 
-    def start(self, request: RunStart) -> RunSnapshot:
-        self.calls.append(("start", request))
+    def start_verified_change(self, request: VerifiedChangeStart) -> RunSnapshot:
+        self.calls.append(("start_verified_change", request))
         return self.snapshot
 
     def get(self, run_id: str) -> RunSnapshot:
@@ -182,7 +182,7 @@ class FailingManager(FakeManager):
     def _fail() -> None:
         raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
 
-    def start(self, request: RunStart) -> RunSnapshot:
+    def start_verified_change(self, request: VerifiedChangeStart) -> RunSnapshot:
         self._fail()
         raise AssertionError("unreachable")
 
@@ -244,8 +244,8 @@ async def test_server_registers_nine_tools_with_select_executor(
     tools = {tool.name: tool for tool in listed.tools}
 
     assert set(tools) == {
-        "repogent_doctor",
-        "start_run",
+        "inspect_repository_readiness",
+        "start_verified_change",
         "get_run",
         "approve_requirements",
         "approve_plan",
@@ -272,8 +272,8 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
     tools = {tool.name: tool for tool in listed.tools}
 
     assert set(tools) == {
-        "repogent_doctor",
-        "start_run",
+        "inspect_repository_readiness",
+        "start_verified_change",
         "get_run",
         "approve_requirements",
         "approve_plan",
@@ -282,10 +282,12 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
         "cancel_run",
         "get_report",
     }
-    assert tools["repogent_doctor"].inputSchema["$defs"]["DoctorRequest"] == (
+    assert tools["inspect_repository_readiness"].inputSchema["$defs"]["DoctorRequest"] == (
         DoctorRequest.model_json_schema()
     )
-    assert tools["start_run"].inputSchema["$defs"]["RunStart"] == (RunStart.model_json_schema())
+    assert tools["start_verified_change"].inputSchema["$defs"]["VerifiedChangeStart"] == (
+        VerifiedChangeStart.model_json_schema()
+    )
     decision_schema = tools["approve_plan"].inputSchema
     assert decision_schema["properties"]["decision"]["$ref"] == ("#/$defs/RunDecision")
     assert decision_schema["$defs"]["RunDecision"]["properties"] == {
@@ -296,11 +298,10 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
         "#/$defs/ExecutionDecision"
     )
     assert execution_decision_schema["$defs"]["ExecutionDecision"]["properties"] == {
-        key: value
-        for key, value in ExecutionDecision.model_json_schema()["properties"].items()
+        key: value for key, value in ExecutionDecision.model_json_schema()["properties"].items()
     }
-    assert tools["repogent_doctor"].outputSchema == DoctorReport.model_json_schema()
-    assert tools["start_run"].outputSchema == RunSnapshot.model_json_schema()
+    assert tools["inspect_repository_readiness"].outputSchema == DoctorReport.model_json_schema()
+    assert tools["start_verified_change"].outputSchema == RunSnapshot.model_json_schema()
     assert tools["select_executor"].outputSchema == RunSnapshot.model_json_schema()
     assert tools["get_report"].outputSchema == RunReport.model_json_schema()
     expected_run_id_schema = {
@@ -310,13 +311,11 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
         "type": "string",
     }
     for name in ("get_run", "cancel_run", "get_report"):
-        assert tools[name].inputSchema["properties"] == {
-            "run_id": expected_run_id_schema
-        }
+        assert tools[name].inputSchema["properties"] == {"run_id": expected_run_id_schema}
 
     expected_annotations = {
-        "repogent_doctor": (True, False, True, False),
-        "start_run": (False, False, False, True),
+        "inspect_repository_readiness": (True, False, True, False),
+        "start_verified_change": (False, False, False, True),
         "get_run": (True, False, True, False),
         "approve_requirements": (False, False, False, True),
         "approve_plan": (False, False, False, True),
@@ -345,7 +344,7 @@ async def test_tools_route_typed_requests_and_return_structured_content(
 ) -> None:
     session, manager, doctor = client_session
     doctor_request = DoctorRequest(repository=Path("/repository"), executor="local")
-    start_request = RunStart(
+    start_request = VerifiedChangeStart(
         repository=Path("/repository"), request="make a bounded change", executor="deferred"
     )
     requirements = RunDecision(
@@ -369,8 +368,8 @@ async def test_tools_route_typed_requests_and_return_structured_content(
     )
 
     calls = [
-        ("repogent_doctor", {"request": doctor_request.model_dump(mode="json")}),
-        ("start_run", {"request": start_request.model_dump(mode="json")}),
+        ("inspect_repository_readiness", {"request": doctor_request.model_dump(mode="json")}),
+        ("start_verified_change", {"request": start_request.model_dump(mode="json")}),
         ("get_run", {"run_id": "run-1"}),
         (
             "approve_requirements",
@@ -388,7 +387,7 @@ async def test_tools_route_typed_requests_and_return_structured_content(
     assert results[6].structuredContent == manager.report.model_dump(mode="json")
     assert doctor.calls == [doctor_request]
     assert manager.calls == [
-        ("start", start_request),
+        ("start_verified_change", start_request),
         ("get", "run-1"),
         ("decide", requirements),
         ("decide", plan_rejection),
@@ -412,14 +411,12 @@ async def test_successful_structured_results_are_recursively_redacted() -> None:
     )
     server = create_server(manager=manager, doctor=doctor)
 
-    async with create_connected_server_and_client_session(
-        server, raise_exceptions=True
-    ) as session:
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
         results = [
             await session.call_tool("get_run", {"run_id": "run-1"}),
             await session.call_tool("get_report", {"run_id": "run-1"}),
             await session.call_tool(
-                "repogent_doctor",
+                "inspect_repository_readiness",
                 {
                     "request": DoctorRequest(
                         repository=Path("/repository"), executor="local"
@@ -443,11 +440,9 @@ async def test_mcp_doctor_and_start_reject_regular_file_repository(
     repository.write_text("value = 1\n")
     server = create_server()
 
-    async with create_connected_server_and_client_session(
-        server, raise_exceptions=True
-    ) as session:
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
         doctor_result = await session.call_tool(
-            "repogent_doctor",
+            "inspect_repository_readiness",
             {
                 "request": DoctorRequest(
                     repository=repository,
@@ -457,9 +452,9 @@ async def test_mcp_doctor_and_start_reject_regular_file_repository(
             },
         )
         start_result = await session.call_tool(
-            "start_run",
+            "start_verified_change",
             {
-                "request": RunStart(
+                "request": VerifiedChangeStart(
                     repository=repository,
                     request="change the file",
                     provider="openai",
@@ -584,9 +579,7 @@ async def test_select_executor_rejects_non_approved_decision(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "run_id", ["x", "x" * 256], ids=["one-character", "256-characters"]
-)
+@pytest.mark.parametrize("run_id", ["x", "x" * 256], ids=["one-character", "256-characters"])
 async def test_select_executor_run_id_boundaries_route_to_manager(
     client_session: tuple[ClientSession, FakeManager, FakeDoctor],
     run_id: str,
@@ -661,9 +654,7 @@ async def test_secret_bearing_execution_preview_fails_closed() -> None:
     )
     server = create_server(manager=manager, doctor=FakeDoctor())
 
-    async with create_connected_server_and_client_session(
-        server, raise_exceptions=True
-    ) as session:
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
         decision = _execution_decision()
         result = await session.call_tool(
             "select_executor", {"decision": decision.model_dump(mode="json")}
@@ -699,11 +690,9 @@ async def test_falsey_injected_dependencies_are_used_and_shut_down() -> None:
     server = create_server(manager=manager, doctor=doctor)
     doctor_request = DoctorRequest(repository=Path("/repository"), executor="local")
 
-    async with create_connected_server_and_client_session(
-        server, raise_exceptions=True
-    ) as session:
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
         doctor_result = await session.call_tool(
-            "repogent_doctor",
+            "inspect_repository_readiness",
             {"request": doctor_request.model_dump(mode="json")},
         )
         run_result = await session.call_tool("get_run", {"run_id": "run-1"})
@@ -729,9 +718,7 @@ async def test_exceptional_server_context_still_shuts_down_injected_manager() ->
     server = create_server(manager=manager, doctor=FalseyDoctor())
 
     with pytest.raises(ExceptionGroup) as raised:
-        async with create_connected_server_and_client_session(
-            server, raise_exceptions=True
-        ):
+        async with create_connected_server_and_client_session(server, raise_exceptions=True):
             raise ContextFailure
 
     assert raised.value.subgroup(ContextFailure) is not None
@@ -759,9 +746,7 @@ async def test_standalone_run_ids_are_bounded_and_redacted_before_routing(
     result = await session.call_tool(tool_name, {"run_id": run_id})
 
     assert result.isError is True
-    assert result.content[0].text.endswith(
-        "run ID must be between 1 and 256 characters"
-    )
+    assert result.content[0].text.endswith("run ID must be between 1 and 256 characters")
     assert len(result.content[0].text) <= 160
     assert "secret-value" not in result.content[0].text
     assert manager.calls == []
@@ -800,7 +785,7 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
     manager = FailingManager()
     server = create_server(manager=manager, doctor=FailingDoctor())
     doctor_request = DoctorRequest(repository=Path("/repository"), executor="local")
-    start_request = RunStart(
+    start_request = VerifiedChangeStart(
         repository=Path("/repository"), request="make a bounded change", executor="local"
     )
     requirements = RunDecision(
@@ -823,12 +808,12 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
     )
     calls = [
         (
-            "repogent_doctor",
+            "inspect_repository_readiness",
             {"request": doctor_request.model_dump(mode="json")},
             "readiness check failed; inspect local Repogent logs",
         ),
         (
-            "start_run",
+            "start_verified_change",
             {"request": start_request.model_dump(mode="json")},
             "run could not be started; inspect local Repogent logs",
         ),
@@ -869,9 +854,7 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
         ),
     ]
 
-    async with create_connected_server_and_client_session(
-        server, raise_exceptions=True
-    ) as session:
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
         for tool_name, arguments, category in calls:
             result = await session.call_tool(tool_name, arguments)
             message = result.content[0].text
@@ -932,9 +915,7 @@ async def test_shutdown_failure_is_bounded_and_redacted_on_normal_exit() -> None
     server = create_server(manager=manager, doctor=FakeDoctor())
 
     with pytest.raises(ExceptionGroup) as raised:
-        async with create_connected_server_and_client_session(
-            server, raise_exceptions=True
-        ):
+        async with create_connected_server_and_client_session(server, raise_exceptions=True):
             pass
 
     _assert_sanitized_lifecycle_error(raised.value)
@@ -950,9 +931,7 @@ async def test_shutdown_failure_preserves_existing_context_error_without_leaks()
     server = create_server(manager=manager, doctor=FakeDoctor())
 
     with pytest.raises(ExceptionGroup) as raised:
-        async with create_connected_server_and_client_session(
-            server, raise_exceptions=True
-        ):
+        async with create_connected_server_and_client_session(server, raise_exceptions=True):
             raise ContextFailure("body failure remains distinguishable")
 
     _assert_sanitized_lifecycle_error(raised.value)
@@ -974,9 +953,7 @@ async def test_shutdown_base_exception_is_not_sanitized_and_propagates() -> None
     server = create_server(manager=manager, doctor=FakeDoctor())
 
     with pytest.raises(BaseExceptionGroup) as raised:
-        async with create_connected_server_and_client_session(
-            server, raise_exceptions=True
-        ):
+        async with create_connected_server_and_client_session(server, raise_exceptions=True):
             pass
 
     assert raised.value.subgroup(ShutdownCancelled) is not None
