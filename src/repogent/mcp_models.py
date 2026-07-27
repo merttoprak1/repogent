@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
@@ -17,27 +17,23 @@ from repogent.domain import (
     TrustLabel,
     VerificationStatus,
     VersionedModel,
+    WorkflowKind,
+    WorkflowOutcome,
     compute_trust_label,
 )
+from repogent.repository_scope import ScopeSource
 
 BoundedPath = Annotated[str, Field(max_length=4_096)]
 
 
-class RunStart(VersionedModel):
+class VerifiedChangeStart(VersionedModel):
     repository: Path
     request: str = Field(min_length=1, max_length=10_000)
-    provider: str = "codex-cli"
-    model: str | None = None
+    provider: Literal["openai", "codex-cli", "scripted"] = "codex-cli"
+    model: str | None = Field(default=None, max_length=256)
     script: Path | None = None
-    executor: str = "docker"
+    executor: Literal["docker", "local", "deferred"] = "deferred"
     output_dir: Path | None = None
-
-    @field_validator("executor")
-    @classmethod
-    def validate_executor(cls, executor: str) -> str:
-        if executor not in {"docker", "local", "deferred"}:
-            raise ValueError("executor must be docker, local, or deferred")
-        return executor
 
 
 class RunDecision(VersionedModel):
@@ -84,6 +80,8 @@ class ExecutionDecision(VersionedModel):
 
 class RunSnapshot(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
+    kind: WorkflowKind = WorkflowKind.VERIFIED_CHANGE
+    outcome: WorkflowOutcome | None = None
     status: RunStatus
     stage: RunStage
     pending_approval: PendingApproval | None = None
@@ -156,6 +154,8 @@ class RunSnapshot(VersionedModel):
 
 class RunReport(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
+    kind: WorkflowKind = WorkflowKind.VERIFIED_CHANGE
+    outcome: WorkflowOutcome | None = None
     status: RunStatus
     checkout_state: CheckoutState
     evidence_path: str = Field(max_length=4_096)
@@ -191,10 +191,18 @@ class DoctorCheck(VersionedModel):
     remediation: str | None = Field(default=None, max_length=512)
 
 
+class RepositoryScopeSummary(VersionedModel):
+    source: ScopeSource
+    selected_files: int = Field(ge=0)
+    aggregate_bytes: int = Field(ge=0)
+    skipped_paths: int = Field(ge=0)
+
+
 class DoctorReport(VersionedModel):
     ready: bool
     repository: str = Field(max_length=4_096)
     provider: str = Field(max_length=32)
     executor: str = Field(max_length=32)
-    checks: list[DoctorCheck] = Field(max_length=9)
+    scope: RepositoryScopeSummary | None = None
+    checks: list[DoctorCheck] = Field(max_length=12)
     executors: list[ExecutorAvailability] = Field(default_factory=list, max_length=2)

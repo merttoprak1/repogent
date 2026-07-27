@@ -24,7 +24,7 @@ from repogent.mcp_models import (
     RunDecision,
     RunReport,
     RunSnapshot,
-    RunStart,
+    VerifiedChangeStart,
 )
 from repogent.run_builder import (
     ExecutorSelectorFactory,
@@ -340,6 +340,8 @@ class RunSession:
             )
         snapshot = RunSnapshot(
             run_id=manifest.run_id,
+            kind=manifest.kind,
+            outcome=manifest.outcome,
             status=manifest.status,
             stage=manifest.stage,
             pending_approval=pending,
@@ -443,7 +445,7 @@ class SessionManager:
         self._active_roots: dict[Path, str | None] = {}
         self._closed = False
 
-    def start(self, request: RunStart) -> RunSnapshot:
+    def start_verified_change(self, request: VerifiedChangeStart) -> RunSnapshot:
         root = request.repository.resolve(strict=True)
         if not root.is_dir():
             raise SessionError("repository must be a directory")
@@ -578,6 +580,8 @@ class SessionManager:
             raise SessionError("run report exceeds 64,000 characters")
         return RunReport(
             run_id=run_id,
+            kind=snapshot.kind,
+            outcome=snapshot.outcome,
             status=snapshot.status,
             checkout_state=snapshot.checkout_state,
             evidence_path=snapshot.evidence_path,

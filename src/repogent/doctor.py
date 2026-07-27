@@ -11,6 +11,7 @@ from repogent.mcp_models import (
     DoctorReport,
     DoctorRequest,
     ExecutorAvailability,
+    RepositoryScopeSummary,
 )
 from repogent.preflight import (
     Preflight,
@@ -18,6 +19,8 @@ from repogent.preflight import (
     ReadinessStatus,
     repository_preflight,
 )
+from repogent.repository import RepositoryInspector
+from repogent.repository_scope import RepositoryScopeResolver
 
 _PYTHON_REMEDIATION = "Install and run Repogent with Python 3.11 or newer"
 _DOCKER_REMEDIATION = "Install Docker and ensure docker is on PATH"
@@ -30,6 +33,15 @@ _CODEX_REPAIR_REMEDIATION = "Inspect or reinstall the Codex CLI"
 
 class DoctorService:
     """Read-only readiness checks for a future Repogent run."""
+
+    def __init__(
+        self,
+        *,
+        scope_resolver: RepositoryScopeResolver | None = None,
+        inspector: RepositoryInspector | None = None,
+    ) -> None:
+        self.scope_resolver = scope_resolver or RepositoryScopeResolver()
+        self.inspector = inspector or RepositoryInspector()
 
     def run(self, request: DoctorRequest) -> DoctorReport:
         checks: list[DoctorCheck] = []
@@ -57,7 +69,36 @@ class DoctorService:
             )
         )
 
-        policy = ValidationPolicy()
+        try:
+            scope = self.scope_resolver.resolve(repository)
+            inventory = self.inspector.inspect(repository, scope=scope)
+        except Exception:
+            checks.append(
+                DoctorCheck(
+                    name="scope",
+                    passed=False,
+                    required=True,
+                    message="repository scope could not be inspected",
+                    remediation="Inspect Git metadata, ignore rules, and repository limits",
+                )
+            )
+            return self._report(request, checks, repository)
+        checks.append(
+            DoctorCheck(
+                name="scope",
+                passed=True,
+                required=True,
+                message="repository scope is inspectable",
+            )
+        )
+        scope_summary = RepositoryScopeSummary(
+            source=inventory.scope_source,
+            selected_files=len(inventory.files),
+            aggregate_bytes=sum(item.size for item in inventory.files),
+            skipped_paths=len(inventory.skipped),
+        )
+
+        policy = ValidationPolicy(scope=scope)
         if request.executor == "deferred":
             base_preflight = repository_preflight(repository, policy)
             checks.extend(self._preflight_checks(base_preflight.checks))
@@ -70,6 +111,7 @@ class DoctorService:
                 request,
                 checks,
                 repository,
+                scope=scope_summary,
                 executors=ExecutorRegistry().inspect_availability(repository, policy),
             )
 
@@ -82,14 +124,14 @@ class DoctorService:
         preflight = Preflight(executor, policy).run(repository)
         checks.extend(self._preflight_checks(preflight.checks))
         if not preflight.passed:
-            return self._report(request, checks, repository)
+            return self._report(request, checks, repository, scope=scope_summary)
 
         if request.provider == "codex-cli":
             readiness = CodexCliProvider(
                 model=request.model, target_root=repository
             ).check_ready()
             checks.append(self._provider_check(readiness.ready, readiness.reason))
-        return self._report(request, checks, repository)
+        return self._report(request, checks, repository, scope=scope_summary)
 
     @staticmethod
     def _repository_check(repository: Path, checks: list[DoctorCheck]) -> Path | None:
@@ -181,6 +223,7 @@ class DoctorService:
         checks: list[DoctorCheck],
         repository: Path | None = None,
         *,
+        scope: RepositoryScopeSummary | None = None,
         executors: list[ExecutorAvailability] | None = None,
     ) -> DoctorReport:
         return DoctorReport(
@@ -188,6 +231,7 @@ class DoctorService:
             repository=str(repository if repository is not None else request.repository),
             provider=request.provider,
             executor=request.executor,
+            scope=scope,
             checks=checks,
             executors=executors or [],
         )

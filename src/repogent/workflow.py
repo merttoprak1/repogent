@@ -53,6 +53,7 @@ from repogent.domain import (
     RunStatus,
     ValidationReport,
     VerificationStatus,
+    WorkflowOutcome,
     utc_now,
 )
 from repogent.events import EventSink
@@ -68,6 +69,7 @@ from repogent.provider_context import ProviderContextBuilder
 from repogent.providers import ProviderError
 from repogent.reporting import render_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
+from repogent.repository_scope import RepositoryScope
 from repogent.symbols import PythonSymbolGraph, PythonSymbolGraphBuilder
 
 
@@ -138,6 +140,7 @@ class Workflow:
     artifacts: ArtifactStore
     inspector: RepositoryInspector
     budget: Budget
+    scope: RepositoryScope | None = None
     validator: Validator | None = None
     executor_selector: ExecutorSelector | None = None
     previewer: PatchPreviewer | None = None
@@ -767,7 +770,20 @@ class Workflow:
 
     def _inspect_repository(self) -> RepositoryInventory:
         self.ensure_time()
-        if _accepts_keyword(self.inspector.inspect, "deadline"):
+        accepts_deadline = _accepts_keyword(self.inspector.inspect, "deadline")
+        accepts_scope = (
+            self.scope is not None
+            and _accepts_keyword(self.inspector.inspect, "scope")
+        )
+        if accepts_deadline and accepts_scope:
+            return self.inspector.inspect(
+                self.root,
+                scope=self.scope,
+                deadline=self.deadline,
+            )
+        if accepts_scope:
+            return self.inspector.inspect(self.root, scope=self.scope)
+        if accepts_deadline:
             return self.inspector.inspect(self.root, deadline=self.deadline)
         return self.inspector.inspect(self.root)
 
@@ -1000,9 +1016,24 @@ class Workflow:
             if self.manifest.stage is RunStage.FINISHED
             else transition(self.manifest.stage, RunStage.FINISHED)
         )
+        outcome: WorkflowOutcome | None = None
+        if status is RunStatus.HUMAN_INTERVENTION_REQUIRED:
+            outcome = WorkflowOutcome.HUMAN_INTERVENTION_REQUIRED
+        elif (
+            status
+            in {
+                RunStatus.COMPLETED,
+                RunStatus.COMPLETED_WITH_FINDINGS,
+                RunStatus.CHANGES_REQUESTED,
+            }
+            and self.manifest.selected_patch_applied
+            and self.manifest.final_validation_status is FinalValidationStatus.PASSED
+        ):
+            outcome = WorkflowOutcome.APPLIED
         self.manifest = self.manifest.model_copy(
             update={
                 "status": status,
+                "outcome": outcome,
                 "stage": final_stage,
                 "reason": reason,
                 "updated_at": utc_now(),

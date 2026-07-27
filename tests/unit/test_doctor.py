@@ -42,6 +42,32 @@ def test_deferred_doctor_is_ready_without_docker(
     assert all(not hasattr(item, "option_digest") for item in report.executors)
 
 
+def test_doctor_reports_git_scope_without_counting_ignored_large_tree(
+    tmp_path: Path,
+) -> None:
+    repository = make_repository(tmp_path)
+    subprocess.run(  # noqa: S603
+        ("git", "-C", str(repository), "init", "--quiet"),  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    (repository / ".gitignore").write_text(".superpowers/\n")
+    (repository / "app.py").write_text("value = 1\n")
+    ignored = repository / ".superpowers" / "competitor-research"
+    ignored.mkdir(parents=True)
+    (ignored / "large.bin").write_bytes(b"x" * 1_024)
+
+    report = DoctorService().run(
+        DoctorRequest(repository=repository, provider="scripted", executor="deferred")
+    )
+
+    assert report.ready is True
+    assert report.scope is not None
+    assert report.scope.source.value == "git"
+    assert report.scope.selected_files == 2
+    assert report.scope.aggregate_bytes == 24
+
+
 def test_explicit_docker_doctor_keeps_fail_closed_semantics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

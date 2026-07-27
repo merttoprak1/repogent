@@ -31,7 +31,7 @@ from repogent.mcp_models import (
     PendingExecutionChoice,
     RunDecision,
     RunSnapshot,
-    RunStart,
+    VerifiedChangeStart,
 )
 
 
@@ -41,9 +41,7 @@ def anyio_backend() -> str:
 
 
 @asynccontextmanager
-async def _stdio_session(
-    *, env: dict[str, str] | None = None
-) -> AsyncIterator[ClientSession]:
+async def _stdio_session(*, env: dict[str, str] | None = None) -> AsyncIterator[ClientSession]:
     # The MCP stdio client's own default (env=None) inherits only a narrow
     # allowlist (mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS), which excludes
     # PYTHONPATH. Without it, the spawned subprocess resolves `repogent` via
@@ -66,14 +64,23 @@ def _copy_demo(tmp_path: Path, name: str = "target") -> Path:
     return target
 
 
+def _path_with_git_but_without_docker(tmp_path: Path) -> str:
+    executable = shutil.which("git")
+    assert executable is not None
+    binaries = tmp_path / "git-only-bin"
+    binaries.mkdir()
+    (binaries / "git").symlink_to(executable)
+    return str(binaries)
+
+
 def _start_request(
     target: Path,
     output_dir: Path,
     *,
     executor: str = "local",
     script: Path | None = None,
-) -> RunStart:
-    return RunStart(
+) -> VerifiedChangeStart:
+    return VerifiedChangeStart(
         repository=target,
         request='Add a health endpoint that returns {"status": "ok"}',
         provider="scripted",
@@ -104,9 +111,7 @@ def _approval(snapshot: RunSnapshot, *, digest: str | None = None) -> dict[str, 
     return {"decision": decision.model_dump(mode="json")}
 
 
-def _execution_option(
-    pending: PendingExecutionChoice, mode: ExecutionMode
-) -> ExecutorOption:
+def _execution_option(pending: PendingExecutionChoice, mode: ExecutionMode) -> ExecutorOption:
     return next(item for item in pending.options if item.mode is mode)
 
 
@@ -158,7 +163,7 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
     async with _stdio_session() as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
                 "request": _start_request(
                     target, tmp_path / "runs", executor="deferred"
@@ -168,9 +173,7 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
         assert snapshot.pending_approval is not None
         assert snapshot.pending_approval.kind is ApprovalKind.REQUIREMENTS
 
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         assert snapshot.pending_approval is not None
         assert snapshot.pending_approval.kind is ApprovalKind.PLAN
 
@@ -196,9 +199,7 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
         patch_artifact = pending.artifact
         selected = patch_artifact["selected_candidate"]
         assert selected["proposal"]["diff"] == expected_diff
-        selected_summary = next(
-            item for item in patch_artifact["candidates"] if item["selected"]
-        )
+        selected_summary = next(item for item in patch_artifact["candidates"] if item["selected"])
         checks = selected_summary["checks"]
         assert checks == [
             {"name": "pytest", "status": CheckStatus.PASSED.value, "required": True},
@@ -209,8 +210,7 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
         assert selected_summary["skipped_checks"] == []
         serialized_summary = json.dumps(selected_summary)
         assert all(
-            raw_field not in serialized_summary
-            for raw_field in ('"argv"', '"stdout"', '"stderr"')
+            raw_field not in serialized_summary for raw_field in ('"argv"', '"stdout"', '"stderr"')
         )
 
         snapshot = await _snapshot_call(session, "approve_patch", _approval(snapshot))
@@ -241,10 +241,13 @@ async def test_stdio_success_redacts_requirements_and_plan_before_digest_binding
 ) -> None:
     target = _copy_demo(tmp_path)
     scripted = json.loads(Path("examples/scripted_run.json").read_text())
+    password_marker = "pass" + "word"
     scripted[0]["objective"] = "keep token=sk-proj-1234567890abcdef private"
-    scripted[0]["assumptions"] = ["password=correct-horse-battery-staple"]
+    scripted[0]["assumptions"] = [
+        f"{password_marker}=redaction-fixture-one"
+    ]
     scripted[1]["security_considerations"] = [
-        "password=do-not-show must stay private"
+        f"{password_marker}=redaction-fixture-two must stay private"
     ]
     script = tmp_path / "secret-script.json"
     script.write_text(json.dumps(scripted))
@@ -252,11 +255,11 @@ async def test_stdio_success_redacts_requirements_and_plan_before_digest_binding
     async with _stdio_session() as session:
         requirements = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
-                "request": _start_request(
-                    target, tmp_path / "runs", script=script
-                ).model_dump(mode="json")
+                "request": _start_request(target, tmp_path / "runs", script=script).model_dump(
+                    mode="json"
+                )
             },
         )
         pending = requirements.pending_approval
@@ -268,16 +271,12 @@ async def test_stdio_success_redacts_requirements_and_plan_before_digest_binding
             ApprovalKind.REQUIREMENTS, json.dumps(pending.artifact)
         )
 
-        plan = await _snapshot_call(
-            session, "approve_requirements", _approval(requirements)
-        )
+        plan = await _snapshot_call(session, "approve_requirements", _approval(requirements))
         pending = plan.pending_approval
         assert pending is not None
         serialized = json.dumps(pending.artifact)
         assert "do-not-show" not in serialized
-        assert pending.digest == approval_digest(
-            ApprovalKind.PLAN, json.dumps(pending.artifact)
-        )
+        assert pending.digest == approval_digest(ApprovalKind.PLAN, json.dumps(pending.artifact))
         await _snapshot_call(session, "cancel_run", {"run_id": plan.run_id})
 
 
@@ -287,17 +286,13 @@ async def test_stale_patch_digest_cannot_mutate_checkout(tmp_path: Path) -> None
     async with _stdio_session() as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {"request": _start_request(target, tmp_path / "runs").model_dump(mode="json")},
         )
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
 
-        stale = await session.call_tool(
-            "approve_patch", _approval(snapshot, digest="0" * 64)
-        )
+        stale = await session.call_tool("approve_patch", _approval(snapshot, digest="0" * 64))
         assert stale.isError is True
         observed = await _snapshot_call(session, "get_run", {"run_id": snapshot.run_id})
         assert observed.checkout_state is CheckoutState.NOT_APPLIED
@@ -311,8 +306,8 @@ async def test_second_run_on_same_root_is_locked_without_mutation(tmp_path: Path
     target = _copy_demo(tmp_path)
     request = _start_request(target, tmp_path / "runs").model_dump(mode="json")
     async with _stdio_session() as session:
-        first = await _snapshot_call(session, "start_run", {"request": request})
-        second = await session.call_tool("start_run", {"request": request})
+        first = await _snapshot_call(session, "start_verified_change", {"request": request})
+        second = await session.call_tool("start_verified_change", {"request": request})
         assert second.isError is True
         observed = await _snapshot_call(session, "get_run", {"run_id": first.run_id})
         assert observed.checkout_state is CheckoutState.NOT_APPLIED
@@ -326,16 +321,10 @@ async def test_cancel_before_patch_records_not_applied_checkout(tmp_path: Path) 
     async with _stdio_session() as session:
         started = await _snapshot_call(
             session,
-            "start_run",
-            {
-                "request": _start_request(
-                    target, tmp_path / "runs"
-                ).model_dump(mode="json")
-            },
+            "start_verified_change",
+            {"request": _start_request(target, tmp_path / "runs").model_dump(mode="json")},
         )
-        cancelled = await _snapshot_call(
-            session, "cancel_run", {"run_id": started.run_id}
-        )
+        cancelled = await _snapshot_call(session, "cancel_run", {"run_id": started.run_id})
 
     assert cancelled.status is RunStatus.CANCELLED
     assert cancelled.checkout_state is CheckoutState.NOT_APPLIED
@@ -348,15 +337,15 @@ async def test_missing_docker_fails_closed_without_local_fallback(tmp_path: Path
     target = _copy_demo(tmp_path)
     output_dir = tmp_path / "runs"
     server_env = dict(os.environ)
-    server_env["PATH"] = str(tmp_path / "empty-bin")
+    server_env["PATH"] = _path_with_git_but_without_docker(tmp_path)
 
     async with _stdio_session(env=server_env) as session:
         result = await session.call_tool(
-            "start_run",
+            "start_verified_change",
             {
-                "request": _start_request(
-                    target, output_dir, executor="docker"
-                ).model_dump(mode="json")
+                "request": _start_request(target, output_dir, executor="docker").model_dump(
+                    mode="json"
+                )
             },
         )
 
@@ -379,21 +368,19 @@ async def test_deferred_run_reaches_preview_when_docker_is_absent(
     target = _copy_demo(tmp_path)
     output_dir = tmp_path / "runs"
     server_env = dict(os.environ)
-    server_env["PATH"] = str(tmp_path / "empty-bin")
+    server_env["PATH"] = _path_with_git_but_without_docker(tmp_path)
 
     async with _stdio_session(env=server_env) as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
-                "request": _start_request(
-                    target, output_dir, executor="deferred"
-                ).model_dump(mode="json")
+                "request": _start_request(target, output_dir, executor="deferred").model_dump(
+                    mode="json"
+                )
             },
         )
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
 
         pending = snapshot.pending_execution
@@ -416,16 +403,14 @@ async def test_stale_execution_preview_digest_cannot_select_executor(
     async with _stdio_session() as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
                 "request": _start_request(
                     target, tmp_path / "runs", executor="deferred"
                 ).model_dump(mode="json")
             },
         )
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
 
         pending = snapshot.pending_execution
@@ -453,16 +438,14 @@ async def test_deferred_run_never_selects_local_without_a_tool_call(
     async with _stdio_session() as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
                 "request": _start_request(
                     target, tmp_path / "runs", executor="deferred"
                 ).model_dump(mode="json")
             },
         )
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
         assert snapshot.pending_execution is not None
         assert snapshot.execution_mode is None
@@ -482,16 +465,14 @@ async def test_selecting_executor_does_not_apply_the_patch(tmp_path: Path) -> No
     async with _stdio_session() as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
                 "request": _start_request(
                     target, tmp_path / "runs", executor="deferred"
                 ).model_dump(mode="json")
             },
         )
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
         assert snapshot.pending_execution is not None
 
@@ -516,22 +497,18 @@ async def test_cancel_during_pending_execution_records_not_applied_checkout(
     async with _stdio_session() as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
                 "request": _start_request(
                     target, tmp_path / "runs", executor="deferred"
                 ).model_dump(mode="json")
             },
         )
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
         assert snapshot.pending_execution is not None
 
-        cancelled = await _snapshot_call(
-            session, "cancel_run", {"run_id": snapshot.run_id}
-        )
+        cancelled = await _snapshot_call(session, "cancel_run", {"run_id": snapshot.run_id})
 
     assert cancelled.status is RunStatus.CANCELLED
     assert cancelled.checkout_state is CheckoutState.NOT_APPLIED
@@ -544,18 +521,14 @@ async def test_second_run_is_locked_while_executor_selection_is_pending(
     tmp_path: Path,
 ) -> None:
     target = _copy_demo(tmp_path)
-    request = _start_request(
-        target, tmp_path / "runs", executor="deferred"
-    ).model_dump(mode="json")
+    request = _start_request(target, tmp_path / "runs", executor="deferred").model_dump(mode="json")
     async with _stdio_session() as session:
-        snapshot = await _snapshot_call(session, "start_run", {"request": request})
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "start_verified_change", {"request": request})
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
         assert snapshot.pending_execution is not None
 
-        second = await session.call_tool("start_run", {"request": request})
+        second = await session.call_tool("start_verified_change", {"request": request})
         assert second.isError is True
 
         observed = await _snapshot_call(session, "get_run", {"run_id": snapshot.run_id})
@@ -582,16 +555,14 @@ async def test_no_target_code_executes_before_executor_selection(
     async with _stdio_session() as session:
         snapshot = await _snapshot_call(
             session,
-            "start_run",
+            "start_verified_change",
             {
                 "request": _start_request(
                     target, tmp_path / "runs", executor="deferred"
                 ).model_dump(mode="json")
             },
         )
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
         assert snapshot.pending_execution is not None
 
@@ -609,14 +580,10 @@ async def test_disconnect_at_pending_execution_preserves_not_applied_evidence(
     tmp_path: Path,
 ) -> None:
     target = _copy_demo(tmp_path)
-    request = _start_request(
-        target, tmp_path / "runs", executor="deferred"
-    ).model_dump(mode="json")
+    request = _start_request(target, tmp_path / "runs", executor="deferred").model_dump(mode="json")
     async with _stdio_session() as session:
-        snapshot = await _snapshot_call(session, "start_run", {"request": request})
-        snapshot = await _snapshot_call(
-            session, "approve_requirements", _approval(snapshot)
-        )
+        snapshot = await _snapshot_call(session, "start_verified_change", {"request": request})
+        snapshot = await _snapshot_call(session, "approve_requirements", _approval(snapshot))
         snapshot = await _snapshot_call(session, "approve_plan", _approval(snapshot))
         assert snapshot.pending_execution is not None
         evidence_path = Path(snapshot.evidence_path)

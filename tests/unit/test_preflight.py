@@ -12,6 +12,7 @@ from repogent.preflight import (
     configuration_fingerprint,
     repository_preflight,
 )
+from repogent.repository_scope import RepositoryScopeResolver
 
 
 class FakeExecutor:
@@ -169,6 +170,20 @@ def test_repository_preflight_only_performs_base_checks(tmp_path: Path) -> None:
 
     assert [check.name for check in report.checks] == ["git"]
     assert report.passed is True
+
+
+def test_validation_policy_ignores_test_suite_outside_git_scope(tmp_path: Path) -> None:
+    repository = initialize_git_repository(tmp_path)
+    (repository / ".gitignore").write_text("ignored/\n")
+    ignored = repository / "ignored" / "tests"
+    ignored.mkdir(parents=True)
+    (ignored / "test_hidden.py").write_text("def test_hidden(): pass\n")
+    scope = RepositoryScopeResolver().resolve(repository)
+
+    commands = ValidationPolicy(scope=scope).commands(repository)
+
+    pytest_command = next(command for command in commands if command.name == "pytest")
+    assert pytest_command.required is False
 
 
 def test_configuration_fingerprint_is_canonical_and_order_independent() -> None:

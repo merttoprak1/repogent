@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repogent Repository Readiness"
+  short_description: "Diagnose Repogent readiness without changing anything"
+  default_prompt: "Use $repository-readiness to inspect this repository and explain any blockers without changing files or running repository code."

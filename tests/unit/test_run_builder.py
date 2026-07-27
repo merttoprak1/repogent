@@ -4,13 +4,21 @@ from pathlib import Path
 import pytest
 
 from repogent.approvals import FakeApprover
-from repogent.domain import Decision, ExecutionMode, IsolationLevel, ProviderReadiness, RunStatus
+from repogent.domain import (
+    Decision,
+    ExecutionMode,
+    IsolationLevel,
+    ProviderReadiness,
+    RunStatus,
+    WorkflowOutcome,
+)
 from repogent.executor_selection import (
     ExecutorSelectionError,
     FixedExecutorSelector,
     PreparedExecutor,
 )
 from repogent.preflight import PreflightReport
+from repogent.repository_scope import RepositoryScope, ScopeSource
 from repogent.run_builder import (
     RunBuildError,
     RunOptions,
@@ -61,6 +69,52 @@ def test_validate_run_options_rejects_regular_file_repository(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="repository must be a directory"):
         validate_run_options(RunOptions(repository=repository, request="change"))
+
+
+def test_build_run_resolves_and_retains_one_repository_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    script = tmp_path / "script.json"
+    script.write_text("[]")
+    scope = RepositoryScope(
+        root=target.resolve(),
+        source=ScopeSource.FILESYSTEM,
+        paths=(),
+    )
+    calls: list[Path] = []
+
+    class RecordingResolver:
+        def resolve(self, root: Path) -> RepositoryScope:
+            calls.append(root)
+            return scope
+
+    monkeypatch.setattr(
+        run_builder,
+        "RepositoryScopeResolver",
+        RecordingResolver,
+    )
+
+    prepared = build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="scripted",
+            script=script,
+            executor="deferred",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+        executor_selector_factory=lambda *_args: object(),  # type: ignore[arg-type]
+    )
+
+    assert calls == [target.resolve()]
+    assert prepared.scope is scope
+    assert prepared.workflow.scope is scope
 
 
 def test_validate_run_options_accepts_deferred_executor(tmp_path: Path) -> None:
@@ -372,6 +426,7 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
     assert provider_constructed is False
     assert caught.value.manifest is not None
     assert caught.value.manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert caught.value.manifest.outcome is WorkflowOutcome.HUMAN_INTERVENTION_REQUIRED
 
 
 def test_build_run_constructs_scripted_workflow(tmp_path: Path) -> None:
