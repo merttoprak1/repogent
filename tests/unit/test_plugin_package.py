@@ -13,9 +13,11 @@ def test_plugin_manifest_and_mcp_command() -> None:
     root = PLUGIN_ROOT
     manifest = json.loads((root / ".codex-plugin/plugin.json").read_text())
     mcp = json.loads((root / ".mcp.json").read_text())
+    project = tomllib.loads(Path("pyproject.toml").read_text())
 
     assert manifest["name"] == "repogent"
-    assert manifest["version"] == "0.1.0"
+    assert project["project"]["version"] == "0.2.0"
+    assert manifest["version"] == project["project"]["version"]
     assert manifest["skills"] == "./skills/"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["interface"]["category"] == "Developer Tools"
