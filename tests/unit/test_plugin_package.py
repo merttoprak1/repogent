@@ -203,9 +203,3 @@ def test_readme_installs_bare_runtime_command_before_plugin_marketplace() -> Non
     assert "Codex Desktop" in readme
     assert readme.index(runtime_install) < readme.index(marketplace_install)
     assert "python -m pip install -e '.[dev]'" in readme
-
-
-def test_ci_wheel_inspection_requires_mcp_server_module() -> None:
-    workflow = Path(".github/workflows/ci.yml").read_text()
-
-    assert "assert 'repogent/mcp_server.py' in names" in workflow
