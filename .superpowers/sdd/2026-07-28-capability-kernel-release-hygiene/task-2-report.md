@@ -115,9 +115,12 @@ The pre-existing modified roadmap plan was intentionally not staged.
 - Error wording remains untyped in this task; Task 3 was not started.
 - No report envelope or capability result work from Task 4 was introduced.
 
-## Commit
+## Commits
 
-Pending at report creation; populated in the task handoff after commit.
+- `e37e85f feat: bind executor consent to validation targets` — implementation,
+  tests, and initial evidence report.
+- A report-only finalization commit records the implementation hash above; see
+  the task handoff for that commit hash.
 
 ## Concerns
 
