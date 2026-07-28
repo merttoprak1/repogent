@@ -92,6 +92,15 @@ so a scope failure is diagnosable.
 - `cancelled`: a human rejected an approval gate or interrupted normal execution.
 - `human_intervention_required`: policy, provider, timeout, budget, or repair limits stopped the run.
 
+## Verification gate
+
+`make verify` is the single local and CI quality gate. It uses `python3` by
+default and accepts an explicit interpreter through `PYTHON`, for example
+`make verify PYTHON=.venv/bin/python`. The gate owns tests, lint, format, type,
+security, package build and wheel inspection, plugin-package validation, and
+the real stdio integration suite. CI installs the development environment and
+invokes the same target rather than carrying a second package policy.
+
 ## Evidence
 
 Each external run directory contains `run.json`, `events.jsonl`, `report.md`, inventory/graph/localization/context artifacts, role inputs and outputs, approvals, candidate records and evidence, selection, diffs, validation output, and, as applicable, provider readiness; successful-call usage and per-call evidence; or provider-failure evidence, plus repairs and QA results. Versioned domain/model artifacts use `schema_version: "1"`; raw role-input JSON/text payloads are retained but are not versioned model envelopes. `run.json` atomically records fingerprints, candidate IDs, selected candidate, typed checkout state (`not_applied`, `applied`, or `recovery_unknown`), applied paths, final-validation state, recovery guidance, generated-but-not-consumed artifacts, event linkage, and terminal state while stage artifacts remain append-only.
