@@ -128,3 +128,47 @@ The canonical full suite did not complete after the final integration fixture
 migration. Focused, all-unit, and affected integration evidence is green, but a
 later release gate should run the complete suite with the global coverage
 threshold.
+
+## Fix round 1: selector preview integrity
+
+Review found that the workflow passed a detached mutable preview dictionary to
+the selector but verified only the untouched original `PatchPreview` after the
+selector returned. A selector could therefore mutate nested human-visible
+preview content without invalidating consent.
+
+The workflow now deep-copies the exact dictionary supplied to the selector and
+compares that dictionary with its immutable baseline after return. The existing
+deep-copied target comparison remains independent and unchanged.
+
+### RED evidence
+
+`PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m pytest tests/unit/test_workflow.py::test_nested_selector_preview_mutation_fails_before_candidate_evaluation -q --no-cov`
+
+Exit 1. The workflow continued past executor selection and eventually reported
+`changed validation evidence` instead of rejecting the nested preview mutation
+at the consent boundary.
+
+### GREEN evidence
+
+- Nested preview mutation and target mutation regressions: 2 passed.
+- Same digest with a different `ValidationTargetKind`: 1 passed; the pending
+  choice remained usable for the correct target afterward.
+- Covering focused suite: 124 passed with `--no-cov`.
+- Ruff for the three changed Python files: `All checks passed!`.
+- `git diff --check`: exit 0.
+
+### Files changed
+
+- `src/repogent/workflow.py`
+- `tests/unit/test_workflow.py`
+- `tests/unit/test_execution_gate.py`
+- this evidence report
+
+### Self-review
+
+- Preview equality is checked against a deep copy of the exact mutable object
+  passed across the selector boundary, including nested values.
+- Target authority still uses the independent exact-target comparison.
+- The original `PatchPreview` digest check remains as an additional binding
+  defense.
+- No Task 3 typed-error or Task 4 report-envelope behavior was introduced.

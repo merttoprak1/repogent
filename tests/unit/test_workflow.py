@@ -183,6 +183,26 @@ class MutatingExecutorSelector(RecordingExecutorSelector):
         return prepared
 
 
+class NestedPreviewMutatingExecutorSelector(RecordingExecutorSelector):
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
+        candidate = preview["candidate"]
+        assert isinstance(candidate, dict)
+        proposal = candidate["proposal"]
+        assert isinstance(proposal, dict)
+        proposal["diff"] = (
+            "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+            " def value():\n-    return 1\n+    return 99\n"
+        )
+        return prepared
+
+
 class InvalidIsolationExecutorSelector(RecordingExecutorSelector):
     def select(
         self,
@@ -509,6 +529,29 @@ def test_selector_mutation_fails_before_candidate_evaluation(tmp_path: Path) -> 
 
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
     assert manifest.reason == "validation target changed after persistence"
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert workflow.candidate_evidence == []
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+
+
+def test_nested_selector_preview_mutation_fails_before_candidate_evaluation(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = NestedPreviewMutatingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "patch preview changed after persistence"
     assert validator.statuses == [CheckStatus.PASSED]
     assert workflow.candidate_evidence == []
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
