@@ -1,23 +1,38 @@
 # Repogent
 
-**From issue to verified patch.**
+**From request to an approval-gated, evidence-backed Python change.**
 
-> Repogent is an auditable multi-agent software engineering platform that transforms feature requests into tested, reviewed, and traceable repository changes.
+Repogent is an open-source CLI and Codex plugin for narrowly scoped Python
+repository work. It lets a model propose requirements, a plan, and a patch, but
+keeps repository inspection, patch policy, validation, evidence, and mutation
+under deterministic controls. A change is never applied until you approve the
+exact displayed patch.
 
-Repogent is an open-source, synchronous, approval-gated CLI for narrowly scoped Python changes. It covers conventional Python libraries, command-line packages, data transforms, and the bundled FastAPI web-service MVP. Model roles propose typed requirements, plans, patches, repairs, and QA findings. Deterministic services alone inspect the repository, validate and apply diffs, select validation commands, execute checks, enforce limits, and update workflow state.
+Repogent is released under the [MIT License](LICENSE).
 
-Repogent is open-source software released under the [MIT License](LICENSE).
+## What it does
+
+The Codex plugin exposes two focused capabilities:
+
+- **Repository Readiness** inspects a Git-bounded repository, provider
+  readiness, validation-command availability, and executor options without
+  editing files or running repository code.
+- **Verified Change** prepares a bounded change through explicit requirements,
+  plan, executor, and patch approvals. It validates the selected patch before
+  it can touch the real checkout.
+
+Repogent supports conventional Python packages, CLIs, data transforms, and the
+bundled FastAPI example. The standalone `repogent analyze` and `repogent run`
+commands remain available for terminal workflows and automation.
 
 ## Install for Codex
 
-Repogent requires Python 3.11 or newer. The plugin's MCP configuration launches
-the bare `repogent` command, so the executable must be installed on a persistent
-`PATH` visible to Codex Desktop. A repository-only virtual environment is not a
-runtime installation for the desktop app.
+Repogent requires Python 3.11 or newer. Codex starts the plugin's MCP server
+with the bare `repogent` command, so install it on a persistent `PATH`; a
+repository-only virtual environment is not sufficient for Codex Desktop.
 
-Install [pipx](https://pipx.pypa.io/) with your operating-system package manager,
-then install Repogent in its own persistent environment before adding the
-marketplace:
+Install [pipx](https://pipx.pypa.io/) with your operating-system package
+manager, then run:
 
 ```bash
 pipx install 'git+https://github.com/merttoprak1/repogent.git'
@@ -27,13 +42,53 @@ codex plugin marketplace add merttoprak1/repogent
 ```
 
 `command -v repogent` must print an executable path. If it does not, open a new
-login shell after `pipx ensurepath` and check again. Fully quit and reopen Codex
-Desktop after the PATH change, then install Repogent from the Plugin Directory
-and start a new task. Repogent never downloads or installs its CLI automatically.
+login shell after `pipx ensurepath`. Then fully restart Codex Desktop, install
+**Repogent** from the Plugin Directory, and start a new task.
+
+## Use it from Codex
+
+Start with readiness when you want a safe diagnosis:
+
+```text
+Use Repogent Repository Readiness for /path/to/repository.
+```
+
+For a change, invoke the mutating capability explicitly:
+
+```text
+Use Repogent Verified Change to safely add a health endpoint to /path/to/repository.
+Show the requirements, plan, and exact patch before applying it.
+```
+
+Repogent first inspects repository readiness, then starts the verified-change
+workflow with a deferred executor. Requirements, the plan, and the final patch
+each require a separate approval bound to the displayed digest. Executor
+selection is a separate target-bound decision, not an additional patch
+approval.
+
+## Safety model
+
+Repogent treats repository content and tests as untrusted.
+
+- It uses a Git-bounded input scope and explicit size limits.
+- It previews and validates candidate patches in disposable copies.
+- Docker is the default validation executor; local execution requires explicit
+  acceptance of reduced isolation.
+- It never silently falls back from Docker to local execution and never
+  installs target-repository dependencies automatically.
+- It records durable evidence, checkout state, validation status, trust label,
+  and bounded typed errors for every terminal run.
+
+Only the final, explicitly approved patch can modify the real checkout. If
+recovery cannot be proved, validation is incomplete, or evidence is ambiguous,
+Repogent stops and asks for human intervention rather than guessing.
+
+Read the full [security model](docs/security.md) and
+[architecture](docs/architecture.md) before using Repogent on sensitive code.
 
 ## Development setup
 
-For repository development, keep an independent editable environment:
+Create an independent editable environment for repository development:
 
 ```bash
 python3.11 -m venv .venv
@@ -41,208 +96,79 @@ source .venv/bin/activate
 python -m pip install -e '.[dev]'
 ```
 
-Run the canonical local and CI gate with `make verify` when `python3` resolves to
-the development interpreter. For an existing repository environment, use
-`make verify PYTHON=.venv/bin/python`. The gate runs tests, lint, format, type,
-security, wheel, plugin-package, and real stdio integration checks. Docker is
-optional for development, but it is the default executor for Repogent runs.
-This `.venv` is for terminal development and does not replace the persistent
-CLI installation required by Codex Desktop.
-
-## Use Repogent from Codex
-
-**Docker recommended for isolated verification, not required for patch preview.**
-The Codex plugin starts every run with a deferred executor: base readiness — the
-repository, provider, and validation commands — gates requirements, the plan, and
-an unvalidated patch preview, so you can review the exact diff even on a machine
-without Docker.
-
-After adding the marketplace, open the Codex Plugin Directory, install
-**Repogent**, and start a new task so its skill and local MCP server are loaded.
-The plugin exposes two focused capabilities:
-
-- **Repository Readiness** is read-only. It inspects the Git-bounded file set,
-  validation-command readiness, provider readiness, and executor options without
-  editing files or running repository code.
-- **Verified Change** prepares and independently validates an exact patch through
-  explicit requirements, plan, executor, and patch decisions.
-
-Choose **Repogent Repository Readiness** for diagnosis, or invoke the mutating
-workflow explicitly with **Repogent Verified Change**, for example:
-
-```text
-Use Repogent Verified Change to safely add a health endpoint to /path/to/repository and show me the
-requirements, plan, and exact patch before changing anything.
-```
-
-You can also ask naturally for a safe, independently validated, evidence-backed
-Python change with approval before apply. Repogent first runs
-`inspect_repository_readiness`, then starts `start_verified_change` with a
-deferred executor and conducts the workflow in chat. Requirements, the
-plan, and the final exact patch each require a separate explicit approval bound
-to the displayed digest.
-
-After the plan is approved, the run pauses at an `UNVALIDATED` preview and asks
-you to choose how to validate it. Choosing Docker keeps the isolated boundary and
-can report `ISOLATED VERIFIED` once the required checks pass. Choosing local needs
-an explicit, current-digest acceptance of reduced isolation and always reports
-`REDUCED ISOLATION`. Executor selection is a separate digest-bound decision, never
-a fourth approval; Repogent never silently falls back from Docker to local and
-never runs target-repository code before you select an executor. The patch is not
-applied until the final exact-patch approval. Terminal results include checkout
-state, final validation, the trust label, and the local evidence directory
-containing `run.json`, `events.jsonl`, and `report.md` (by default beside the
-target at `.repogent/runs/run-<id>/`).
-
-The plugin is the chat-facing adapter. The existing standalone `repogent analyze`
-and `repogent run` commands remain available for terminal workflows and
-automation; the CLI still defaults to Docker and supports an explicit
-`--executor local`.
-
-## Analyze a repository
-
-`analyze` is read-only. It prints a JSON inventory, deterministic Python symbol graph, and request-ranked localization. This command is covered by the local reliability integration fixtures:
+Run the same quality gate used by CI:
 
 ```bash
-repogent analyze ./tests/fixtures/python_library --request "Reject inverted clamp bounds"
+make verify
+# or, when using an existing environment:
+make verify PYTHON=.venv/bin/python
 ```
 
-The static graph understands conventional root packages and `src/` layouts (plus simple setuptools `package-dir` configuration), while preserving original filesystem paths in evidence. Dynamic imports, reflection, generated code, runtime framework wiring, and non-Python code can still reduce localization confidence. Repogent records ambiguity rather than pretending an uncertain location is decisive.
+The gate runs tests, coverage, linting, formatting, type checking, security
+checks, package build and inspection, isolated wheel installation, plugin
+checks, and real stdio integration.
 
-## v0.3 local workflow
+## CLI quick start
 
-Repogent describes five conceptual, user-facing phases — **Understand → Localize → Propose → Validate → Decide** — rather than claiming those labels are literal emitted `RunStage` event values:
+`analyze` is read-only and prints a bounded repository inventory, deterministic
+Python symbol graph, and request-ranked localization:
 
-1. **Understand** — preflight, bounded repository inventory, deterministic Python symbol graph construction, and typed requirements/specification generation with its approval gate.
-2. **Localize** — consume the already-built graph to localize after requirements and acceptance criteria are known.
-3. **Propose** — generate the implementation plan after localization, obtain plan approval, then generate a candidate patch.
-4. **Validate** — policy-check and validate candidates only in disposable copies, retaining their evidence.
-5. **Decide** — select evidence or surface ambiguity for human review; after patch approval, apply once to the real checkout, run isolated final validation and QA, then finalize the run.
-
-Repogent starts with `candidate-1`. It can generate `candidate-2` and then `candidate-3` only when validation fails, localization remains ambiguous, the patch is high risk or broad, or acceptance coverage is incomplete. It never exceeds three candidates. Equal eligible evidence is an ambiguity, not an arbitrary selection; no patch is applied and the terminal status is `human_intervention_required`.
-
-```text
-[stage] analyzed
-[approval] requirements approved
-[approval] plan approved
-[candidate] candidate-1 generated
-[validation] candidate validation completed (4 passed, 0 failed, 0 skipped)
-[approval] patch approved
-[validation] final validation completed (4 passed, 0 failed, 0 skipped)
-[terminal] workflow finished: completed
+```bash
+repogent analyze ./tests/fixtures/python_library \
+  --request "Reject inverted clamp bounds"
 ```
 
-## Reproducible scripted demo
-
-Repogent modifies the approved target checkout after the requirements, plan, and patch are each approved. Copy the bundled demo before running it so the tracked example remains unchanged:
+For a reproducible local demo, copy the bundled project first so tracked files
+remain unchanged:
 
 ```bash
 REPOGENT_DEMO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repogent-demo.XXXXXX")"
 cp -R examples/fastapi_demo/. "$REPOGENT_DEMO_DIR"/
-repogent run --repository "$REPOGENT_DEMO_DIR" --request "Add a health endpoint" \
+repogent run --repository "$REPOGENT_DEMO_DIR" \
+  --request "Add a health endpoint" \
   --provider scripted --script ./examples/scripted_run.json \
   --executor local --output-dir ./.repogent/runs
 ```
 
-Review each displayed artifact and answer `y` at the three approval prompts. A successful run adds `GET /health` and its test to `$REPOGENT_DEMO_DIR`, validates the checkout, performs independent scripted QA, and prints the external evidence directory. The local executor is selected explicitly here so the demo works without Docker; it is a weaker development fallback that runs allowlisted argument arrays on the host with a minimal environment and timeouts. It is not equivalent to container isolation.
+The demo asks for three approvals: requirements, plan, and exact patch. The
+explicit local executor keeps the demo usable without Docker, but it is a
+weaker boundary than container isolation.
 
-## Docker validator image
+## Executors and providers
 
-Docker is the default executor. Preflight checks the repository, selected executor, and availability of every deterministic validation command before a provider is constructed; Docker availability probes the actual module or executable inside the fixed image and caches the result per image and tool. A missing required command writes terminal evidence and stops without spending model budget, while a missing optional command is a warning. Pytest becomes required when bounded discovery finds nested `test_*.py` or `*_test.py` files, test directories, or supported pytest configuration. Discovery fails closed—depth, entry, configuration-size, parse, race, or access uncertainty makes pytest required instead of silently skipping it. Recognized root configuration must be a regular file; symlinks and special files are never read. Before using Docker, review and approve the pinned packages in `docker/validator.Dockerfile`, then build the fixed local image:
+Docker is the default executor. Build the reviewed validator image before a
+Docker-backed local run:
 
 ```bash
 make validator-image
 ```
 
-The runtime uses `repogent-validator:py311` with `--pull=never`, no network, a read-only checkout mount and container filesystem, bounded CPU, memory, PIDs, output, and time. The image supports the bundled MVP dependency set, not arbitrary project dependencies. Repogent does not install target-repository dependencies automatically. If Docker or the image is unavailable, Repogent does not silently downgrade: choose `--executor local` explicitly when its weaker host boundary is acceptable.
+The fixed image runs without network access, uses a read-only checkout mount,
+and applies bounded CPU, memory, process, output, and time limits. If Docker or
+the image is unavailable, choose local execution explicitly; Repogent will not
+downgrade silently.
 
-## Live OpenAI run
+Repogent can use OpenAI structured outputs or a locally authenticated Codex CLI
+as proposal intelligence. These providers propose artifacts only; Repogent
+still independently validates schemas and patches, records evidence, and
+enforces approvals. Keep credentials out of the target repository and use a
+disposable checkout for live runs.
 
-Use a disposable checkout, review every approval artifact, keep the evidence directory outside the target repository, and do not expose credentials to repository code:
+## Evidence and terminal states
 
-```bash
-OPENAI_API_KEY=... repogent run --repository /path/to/fastapi-repo \
-  --request "Add a health endpoint" --provider openai --executor docker \
-  --output-dir ./.repogent/runs
-```
+Evidence is written outside the target repository by default, under
+`.repogent/runs/run-<id>/`. A completed run includes `run.json`, `events.jsonl`,
+`report.json`, `report.md`, approval artifacts, candidate evidence, and bounded
+validation output. The report records whether the checkout changed, final
+validation, trust label, and recovery guidance.
 
-The OpenAI provider uses structured outputs. Provider-facing context is centralized and globally bounded to 64,000 serialized characters: requirements receive inventory metadata without file bodies; later roles receive the highest-ranked locations and complete-line snippets; repair and QA receive capped command summaries. A deterministic structured allocator progressively shortens or omits low-priority bulk fields, records truncation and omission counts, and preserves critical identifiers, statuses, and reasons without chopping serialized JSON. Docker remains the default if `--executor` is omitted. If Docker or the fixed validator image is unavailable, `DockerExecutor` reports unavailable execution as skipped rather than silently switching to local execution; select `--executor local` only when you accept the weaker boundary. `ValidationPipeline` treats an unavailable required check as failed, while optional checks are skipped.
+Terminal statuses are `completed`, `completed_with_findings`,
+`changes_requested`, `cancelled`, and `human_intervention_required`. Only the
+two completed states return a successful CLI exit.
 
-## Codex CLI provider
+## Scope
 
-Repogent can use the locally installed Codex CLI as interchangeable proposal intelligence. Install Codex separately, then initiate authentication yourself with `codex login`; Repogent checks readiness but never starts an interactive login flow. Codex has its own authentication and sandbox controls. This provider does not turn a Codex, ChatGPT, or other account entitlement into an OpenAI API billing arrangement.
-
-Use a disposable checkout and the normal Repogent approval flow:
-
-```bash
-repogent run --repository /path/to/fastapi-repo \
-  --request "Add a health endpoint" --provider codex-cli --executor docker \
-  --output-dir ./.repogent/runs
-```
-
-When `--model` is omitted, Repogent leaves model choice to Codex and records `default` in its evidence. Pass `--model NAME` to request an explicit Codex model; Repogent passes that value once to each `codex exec` invocation. The provider performs separate readiness checks (executable, structured-exec capability, and login state) and writes a `provider-readiness` artifact. A successful role generation writes `provider-usage` and `provider-call` artifacts; a `ProviderError` writes `provider-failure` evidence and terminalizes without usage accounting. Each role generation is one structured `codex exec` call—there is no provider-side retry or hidden second proposal call.
-
-Codex does not replace Repogent's gate: it proposes typed artifacts, while Repogent independently bounds context, validates schemas and patches, runs deterministic checks, records evidence, and requires human approval before mutation. The CLI subprocess runs in a provider-owned temporary directory and uses Codex's read-only sandbox mode, but this is practical isolation rather than strict OS-enforced read isolation of the host or repository. Keep credentials out of the target repository and follow the [security model](docs/security.md).
-
-## Approvals and mutation
-
-A normal successful run pauses for approval of:
-
-1. extracted requirements;
-2. the implementation plan;
-3. the exact policy-checked unified diff.
-
-A rejection or normal user interruption ends the run as `cancelled`. The checkout is unchanged before patch approval. Candidate patches are policy-checked and evaluated in disposable copies, then fully restored before evidence selection. After approval, Repogent durably records a write-ahead `recovery_unknown` intent with every touched path before invoking the single real-checkout application; if that intent cannot be persisted, mutation does not begin. A normal successful return is immediately persisted as `applied`. Any failure or interruption before that transition is durable compares the checkout with a pre-apply, detect-only baseline: a proven match becomes `not_applied`, while drift or comparison uncertainty remains `recovery_unknown` with manual guidance. Final validation is isolated from the real checkout. If any later validation, QA, event, or artifact step fails, the manifest and report explicitly say that the real patch remains applied, list its paths and final-validation state, and give the next recovery action.
-
-## Evidence
-
-`--output-dir` names the external base directory. If it is omitted, Repogent uses a safe `.repogent/runs` evidence root beside the target repository. Repogent creates a unique `run-<id>/` beneath the selected root and refuses an evidence directory inside the target repository. Each run contains:
-
-- atomic `run.json` state, a monotonic `events.jsonl`, and a final `report.md`;
-- numbered `inventory-*.json`, `symbol-graph-*.json`, `localization-*.json`, and role inputs and outputs;
-- `candidate-*.json`, `candidate-evidence-*.json`, `candidate-selection-*.json`, approvals, proposed/applied diffs, and repair history;
-- raw validation status, fixed argument arrays, output, exit codes, durations, and reasons for skipped checks;
-- as applicable, provider readiness; successful-call usage and per-call evidence; or provider-failure evidence; and the independent QA result.
-
-Versioned domain/model artifacts currently declare `schema_version: "1"` (for example, manifests, events, localization, candidates, evidence, selection, and validation models). Raw role-input JSON/text payload artifacts, such as `requirements-input`, `planning-input`, `candidate-input`, and `qa-input`, preserve bounded provider context but are not versioned model envelopes. Stage artifacts are append-only, while `run.json` is atomically replaced as the state changes. It records fingerprints, candidate IDs, selected-candidate and real-checkout `checkout_state` (`not_applied`, `applied`, or `recovery_unknown`), applied paths, final-validation state, recovery guidance, generated-but-not-consumed outputs, event linkage, and terminal reason. A provider output and its usage are persisted before its budget is enforced, so an output that crosses a limit remains inspectable but is not approved, evaluated, or used to start another stage. Common credential forms and configured secrets are redacted before persistence, but evidence still deserves careful handling.
-
-## Terminal statuses
-
-- `completed`: deterministic validation passed and QA approved.
-- `completed_with_findings`: validation passed and QA reported non-blocking findings.
-- `changes_requested`: validation passed but QA found blocking issues.
-- `cancelled`: a human rejected an approval gate or interrupted the workflow.
-- `human_intervention_required`: policy, provider, timeout, budget, ambiguous evidence, validation integrity, or candidate limits stopped the run.
-
-Only `completed` and `completed_with_findings` produce a successful CLI exit. A skipped optional validation tool is visibly recorded with its reason; it is never represented as having passed. Candidate evaluation restoration and the selected patch's real-checkout state are tracked separately. If recovery cannot be proved, a required check fails, the real checkout drifts before application, or final isolated validation differs from candidate evidence, Repogent stops for human intervention and retains the partial evidence and exact recovery state in the report.
-
-## Security and scope
-
-Repository content and tests are untrusted. Docker reduces their authority but cannot make execution risk-free. Use disposable checkouts, keep Docker and the host patched, inspect the validator image and every patch, never mount credentials, and read the [security model](docs/security.md). See [architecture](docs/architecture.md) for component boundaries and workflow states.
-
-Repogent does not scan every byte under the repository directory. In a Git
-checkout it selects tracked files plus non-ignored untracked files, excludes
-ignored build artifacts and dependencies, then applies file-count and aggregate
-byte limits to that selected scope. Readiness reports the selected file count,
-selected bytes, scope source, and skipped paths. A limit failure means the
-bounded workflow input is too broad; it does not mean the repository itself may
-contain only that many megabytes.
-
-The CLI intentionally uses conservative fixed workflow budgets and patch limits. Applications that need custom `Budget` or `PatchLimits` values can configure them through the Python API; the MVP does not expose limit flags.
-
-The MVP deliberately defers:
-
-- a real-repository benchmark harness and published metrics;
-- headless CI policy, stable exit codes, and reusable workflows;
-- GitHub issue, status-check, notification, and pull-request integration;
-- semantic embeddings, Qdrant, or another vector database;
-- LangGraph;
-- PostgreSQL or resumable background workers;
-- a web dashboard or FastAPI control API;
-- automated dependency installation;
-- arbitrary model-authored commands;
-- autonomous deployment;
-- support for languages other than Python;
-- the 20–30-task benchmark suite.
-
-These are future milestones, not capabilities of this release.
+Repogent intentionally does not provide autonomous deployment, arbitrary
+model-authored commands, automatic dependency installation, background workers,
+or non-Python repository support. These are deliberate boundaries, not hidden
+capabilities.
