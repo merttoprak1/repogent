@@ -2,7 +2,8 @@
 
 ## Status
 
-Implemented and committed as `9481692` (`feat: enforce typed capability operations`).
+Implemented as `9481692` (`feat: enforce typed capability operations`) and
+corrected after review in `26a0618` (`fix: type gate error classification`).
 
 The implementation adds the stable typed error contract, enforces the existing
 `CapabilityRegistry` before mutation-gate delegation, converts the required
@@ -116,9 +117,9 @@ Boundary mappings are:
 | Other invalid approval state | `policy_error` | `reconcile_first` |
 | Executor selection unavailable/current-state mismatch | `executor_unavailable` | `reconcile_first` |
 
-All public messages and remediations are fixed allowlisted strings. Raw caught
-exception text is used only to distinguish the internal digest-mismatch branch
-and is never copied into `ErrorDetail`.
+All public messages and remediations are fixed allowlisted strings. Gate errors
+carry an explicit `ErrorCode`; caught exception text is never inspected to
+classify or populate `ErrorDetail`.
 
 ## Exact MCP error representation
 
@@ -173,6 +174,8 @@ workflow production code was created.
 ## Changed files
 
 - `src/repogent/errors.py` — new typed error and retry contract.
+- `src/repogent/approval_gate.py` — explicit policy/stale error-code signal.
+- `src/repogent/execution_gate.py` — explicit executor/stale error-code signal.
 - `src/repogent/run_sessions.py` — typed boundary conversion and capability-aware
   mutation dispatch.
 - `src/repogent/mcp_server.py` — sanitized supported `ToolError` mapping while
@@ -204,6 +207,8 @@ actual FastMCP API.
   run.
 - Error JSON is bounded by `ErrorDetail`, recursively sanitized, validated after
   sanitization, deterministic, and contains no raw exception message.
+- Public classification is derived from `ApprovalGateError.code` and
+  `ExecutionGateError.code`, never exception wording.
 - Mutation check: removing any gate mapping, swapping a `RunOperation`, allowing
   a read-only workflow, returning raw typed exception text, changing retry
   classes, or falling back to generic text for `RepogentError` fails at least
@@ -217,8 +222,70 @@ actual FastMCP API.
 - Capability registry prerequisite: `a9cf2ed` (`feat: define capability operation policy`).
 - Validation-target prerequisite through: `65e5b1d` (`fix: preserve executor preview consent binding`).
 - Task 3 implementation: `9481692` (`feat: enforce typed capability operations`).
+- Review correction: `26a0618` (`fix: type gate error classification`).
 - This report is committed separately after the implementation so it can record
   the implementation hash.
+
+## Review follow-up: explicit gate classification
+
+Review identified that `_decision_error` and `_executor_error` classified stale
+conflicts by searching human-readable exception text for `digest`. The concrete
+failure path was:
+
+```text
+ExecutorRegistry.prepare
+  -> ExecutorSelectionError("executor digest metadata is unavailable")
+  -> ExecutionGateError(str(error))
+  -> _executor_error sees "digest"
+  -> stale_digest (incorrect)
+```
+
+The end-to-end regression was written first and run with the existing true
+target/option digest-conflict test:
+
+```text
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m pytest \
+  tests/unit/test_run_sessions.py -q --no-cov \
+  -k 'true_stale_execution_digest_conflicts or non_stale_executor_failure_that_mentions_digest'
+```
+
+RED result: one passed and one failed. The non-stale injected executor failure
+returned `ErrorCode.STALE_DIGEST` instead of the hand-derived expected
+`ErrorCode.EXECUTOR_UNAVAILABLE`.
+
+The fix gives `ApprovalGateError` and `ExecutionGateError` explicit typed
+`ErrorCode` attributes. Their defaults are `POLICY` and
+`EXECUTOR_UNAVAILABLE`; only actual approval, validation-target, and executor
+option digest conflicts are constructed with `STALE_DIGEST`. Session mapping
+branches only on that attribute. Consequently, wording changes and injected
+unavailability messages cannot change the public error code.
+
+Targeted GREEN result: both regression cases passed. Broader focused validation:
+
+```text
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m pytest \
+  tests/unit/test_errors.py tests/unit/test_approval_gate.py \
+  tests/unit/test_execution_gate.py tests/unit/test_run_sessions.py \
+  tests/unit/test_mcp_server.py -q --no-cov
+# exit 0; all focused tests passed
+
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m ruff check \
+  src/repogent/errors.py src/repogent/approval_gate.py \
+  src/repogent/execution_gate.py src/repogent/run_sessions.py \
+  tests/unit/test_run_sessions.py
+# All checks passed!
+
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m ruff format \
+  --check src/repogent/errors.py src/repogent/approval_gate.py \
+  src/repogent/execution_gate.py src/repogent/run_sessions.py \
+  tests/unit/test_run_sessions.py
+# 5 files already formatted
+
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m mypy \
+  src/repogent/errors.py src/repogent/approval_gate.py \
+  src/repogent/execution_gate.py src/repogent/run_sessions.py
+# Success: no issues found in 4 source files
+```
 
 ## Concerns
 
@@ -226,7 +293,3 @@ actual FastMCP API.
   typed tools. Consumers must remove the standard
   `Error executing tool <name>: ` prefix and parse the compact JSON suffix. This
   exact TextContent representation is locked by the MCP contract test.
-- Digest classification currently recognizes the stable internal gate message
-  containing `digest`. If lower-level gate exceptions become typed in a future
-  task, this branch should switch to their typed discriminator and retain the
-  same public `ErrorDetail` values.
