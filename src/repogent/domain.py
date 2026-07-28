@@ -45,6 +45,13 @@ class WorkflowOutcome(StrEnum):
     PATCH_READY = "patch_ready"
     APPLIED = "applied"
     HUMAN_INTERVENTION_REQUIRED = "human_intervention_required"
+    APPROVE = "approve"
+    REQUEST_CHANGES = "request_changes"
+    INCONCLUSIVE = "inconclusive"
+    ROOT_CAUSE_IDENTIFIED = "root_cause_identified"
+    CANDIDATES_FOUND = "candidates_found"
+    RELEASE_VERIFIED = "release_verified"
+    RELEASE_BLOCKED = "release_blocked"
 
 
 class RunStage(StrEnum):
@@ -368,6 +375,13 @@ class Budget(VersionedModel):
     timeout_seconds: int = Field(default=1800, gt=0)
 
 
+def validate_terminal_outcome(manifest: RunManifest) -> None:
+    if manifest.outcome is not None:
+        from repogent.capabilities import CapabilityRegistry
+
+        CapabilityRegistry.defaults().validate_outcome(manifest.kind, manifest.outcome)
+
+
 class RunManifest(VersionedModel):
     run_id: str
     request: str
@@ -407,3 +421,8 @@ class RunManifest(VersionedModel):
         ):
             return {**value, "checkout_state": CheckoutState.APPLIED}
         return value
+
+    @model_validator(mode="after")
+    def validate_terminal_outcome(self) -> RunManifest:
+        validate_terminal_outcome(self)
+        return self
