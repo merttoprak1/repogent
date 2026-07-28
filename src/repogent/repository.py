@@ -281,9 +281,7 @@ class RepositoryInspector:
                     self._ensure_deadline(deadline)
                     state.directory_entries += 1
                     if state.directory_entries > self.max_directory_entries:
-                        raise RepositoryLimitError(
-                            "repository directory entries limit exceeded"
-                        )
+                        raise RepositoryLimitError("repository directory entries limit exceeded")
                     names.append(entry.name)
         except OSError:
             return
@@ -349,9 +347,7 @@ class RepositoryInspector:
             return
         try:
             if stat.S_ISDIR(os.fstat(child_fd).st_mode):
-                self._inspect_directory(
-                    child_fd, relative_path, records, skipped, state, deadline
-                )
+                self._inspect_directory(child_fd, relative_path, records, skipped, state, deadline)
             else:
                 skipped.add(relative_path.as_posix())
         finally:
@@ -398,9 +394,7 @@ class RepositoryInspector:
             return True
         parts = tuple(part.lower() for part in path.parts)
         return (
-            len(parts) >= 2
-            and parts[-2] == ".config"
-            and parts[-1] in SENSITIVE_CONFIG_DIRECTORIES
+            len(parts) >= 2 and parts[-2] == ".config" and parts[-1] in SENSITIVE_CONFIG_DIRECTORIES
         )
 
     @staticmethod
@@ -413,9 +407,7 @@ class RepositoryInspector:
             return True
         if name in SENSITIVE_FILENAMES or path.suffix.lower() in SENSITIVE_SUFFIXES:
             return True
-        return bool(
-            re.fullmatch(r"id_(?:rsa|dsa|ecdsa|ed25519)", name)
-        )
+        return bool(re.fullmatch(r"id_(?:rsa|dsa|ecdsa|ed25519)", name))
 
     @staticmethod
     def _kind(path: Path) -> str:
@@ -492,9 +484,11 @@ class LexicalRetriever:
                 frequency = frequencies[token]
                 if not frequency:
                     continue
-                inverse = math.log(1 + (len(documents) - document_frequency[token] + 0.5) / (
-                    document_frequency[token] + 0.5
-                ))
+                inverse = math.log(
+                    1
+                    + (len(documents) - document_frequency[token] + 0.5)
+                    / (document_frequency[token] + 0.5)
+                )
                 denominator = frequency + 1.5 * (
                     1 - 0.75 + 0.75 * len(document) / max(average_length, 1)
                 )
@@ -516,9 +510,4 @@ class LexicalRetriever:
 
     @staticmethod
     def _tokens(value: str) -> list[str]:
-        return [
-            part.lower()
-            for token in TOKEN.findall(value)
-            for part in token.split("_")
-            if part
-        ]
+        return [part.lower() for token in TOKEN.findall(value) for part in token.split("_") if part]

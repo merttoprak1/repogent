@@ -59,9 +59,7 @@ class PatchPreview(VersionedModel):
 
 
 def patch_preview_digest(preview: PatchPreview) -> str:
-    canonical = json.dumps(
-        preview.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    )
+    canonical = json.dumps(preview.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -91,9 +89,7 @@ class PatchPreviewer:
         candidate: CandidateRecord,
         acceptance_criteria: Sequence[str],
     ) -> PatchPreview:
-        unknown = set(candidate.proposal.acceptance_criteria_addressed) - set(
-            acceptance_criteria
-        )
+        unknown = set(candidate.proposal.acceptance_criteria_addressed) - set(acceptance_criteria)
         if unknown:
             raise CandidateEvaluationError(
                 "proposal addresses criteria outside the supplied requirements"
@@ -145,9 +141,7 @@ class RepositoryIntegritySnapshot:
     entries: dict[Path, NodeFingerprint]
 
     @classmethod
-    def capture(
-        cls, root: Path, *, deadline: float | None = None
-    ) -> RepositoryIntegritySnapshot:
+    def capture(cls, root: Path, *, deadline: float | None = None) -> RepositoryIntegritySnapshot:
         if deadline is not None:
             _remaining(deadline)
         repository = root.resolve(strict=True)
@@ -170,9 +164,7 @@ class RepositoryIntegritySnapshot:
                     mode = stat.S_IMODE(metadata.st_mode)
                     if stat.S_ISDIR(metadata.st_mode):
                         entries[path] = NodeFingerprint("directory", mode)
-                        child = os.open(
-                            name, PatchApplier._directory_flags(), dir_fd=directory_fd
-                        )
+                        child = os.open(name, PatchApplier._directory_flags(), dir_fd=directory_fd)
                         walk(child, path)
                     elif stat.S_ISREG(metadata.st_mode):
                         entries[path] = NodeFingerprint(
@@ -246,9 +238,7 @@ def _copy_for_evaluation(source: Path, destination: Path, *, deadline: float) ->
                 target = target_directory / name
                 if stat.S_ISDIR(metadata.st_mode):
                     target.mkdir(mode=stat.S_IMODE(metadata.st_mode))
-                    child = os.open(
-                        name, PatchApplier._directory_flags(), dir_fd=directory_fd
-                    )
+                    child = os.open(name, PatchApplier._directory_flags(), dir_fd=directory_fd)
                     copy_tree(child, source_directory / name, target)
                     os.chmod(target, stat.S_IMODE(metadata.st_mode))
                 elif stat.S_ISREG(metadata.st_mode):
@@ -430,8 +420,7 @@ def _is_better_duplicate(
     contender_rank = _rank(*contender)
     incumbent_rank = _rank(*incumbent)
     return contender_rank > incumbent_rank or (
-        contender_rank == incumbent_rank
-        and contender[0].candidate_id < incumbent[0].candidate_id
+        contender_rank == incumbent_rank and contender[0].candidate_id < incumbent[0].candidate_id
     )
 
 
@@ -483,7 +472,8 @@ def _decisive_fields(
     winner_rank = _rank(candidate, evidence)
     runner_up_rank = _rank(*alternatives[0])
     return [
-        name for name, winner, runner_up in zip(names, winner_rank, runner_up_rank, strict=True)
+        name
+        for name, winner, runner_up in zip(names, winner_rank, runner_up_rank, strict=True)
         if winner != runner_up
     ]
 

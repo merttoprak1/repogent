@@ -79,9 +79,7 @@ def run_command(
         # path, which always supplies an executor_selector_factory. The CLI has no
         # way to prompt for executor selection, so reject it as an invalid choice
         # instead of letting build_run raise an uncaught ValueError.
-        raise typer.BadParameter(
-            "executor must be docker or local", param_hint="--executor"
-        )
+        raise typer.BadParameter("executor must be docker or local", param_hint="--executor")
     options = RunOptions(
         repository=repository,
         request=request,
@@ -126,9 +124,7 @@ def run_command(
 
     store = prepared.store
     cli_events.bind(
-        CompositeEventSink(
-            (store.event_store(), ConsoleEventSink(typer.echo, store.secrets))
-        )
+        CompositeEventSink((store.event_store(), ConsoleEventSink(typer.echo, store.secrets)))
     )
     try:
         result = prepared.workflow.run()
@@ -140,9 +136,7 @@ def run_command(
             RunStatus.CANCELLED,
         )
     except Exception as error:
-        result = _terminalize_cli_failure(
-            store, prepared.workflow.manifest, str(error)
-        )
+        result = _terminalize_cli_failure(store, prepared.workflow.manifest, str(error))
     typer.echo(f"Run {result.run_id}: {result.status.value}")
     typer.echo(f"Evidence: {store.root}")
     if result.status not in {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FINDINGS}:

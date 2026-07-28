@@ -113,10 +113,8 @@ def render_persistent_report(
         [
             "## Verified change result",
             "",
-            "Selected candidate: "
-            + _markdown_text(report.result.selected_candidate_id or "none"),
-            "Applied paths: "
-            + _markdown_text(", ".join(report.result.applied_paths) or "none"),
+            "Selected candidate: " + _markdown_text(report.result.selected_candidate_id or "none"),
+            "Applied paths: " + _markdown_text(", ".join(report.result.applied_paths) or "none"),
             f"Final validation: {report.result.final_validation_status.value}",
             "",
         ]
@@ -220,9 +218,7 @@ def _render_selection(selection: CandidateSelection | None) -> list[str]:
     if selection is None:
         return [*lines, "Not reached.", ""]
     selected = selection.selected_candidate_id or "none"
-    eligible = _markdown_text(
-        ", ".join(selection.eligible_candidate_ids) or "none"
-    )
+    eligible = _markdown_text(", ".join(selection.eligible_candidate_ids) or "none")
     lines.extend(
         [
             f"- Selected candidate: {_markdown_text(selected)}",
@@ -293,10 +289,7 @@ def _render_recovery(
                 ),
             ]
         )
-    elif (
-        manifest.checkout_state is CheckoutState.APPLIED
-        or manifest.selected_patch_applied
-    ):
+    elif manifest.checkout_state is CheckoutState.APPLIED or manifest.selected_patch_applied:
         paths = ", ".join(manifest.applied_paths) or "affected paths unavailable"
         lines.extend(
             [

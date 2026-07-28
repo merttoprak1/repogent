@@ -131,9 +131,7 @@ def test_inspector_fails_closed_when_traversal_depth_is_exceeded(tmp_path: Path)
         RepositoryInspector(max_depth=1).inspect(tmp_path)
 
 
-def test_inspector_honors_external_deadline(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_inspector_honors_external_deadline(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     (tmp_path / "app.py").write_text("value = 1\n")
     monkeypatch.setattr("repogent.repository.time.monotonic", lambda: 10.0)
 

@@ -264,9 +264,7 @@ def _source_roots(inventory: RepositoryInventory) -> tuple[str, ...]:
             payload = {}
         tool = payload.get("tool", {}) if isinstance(payload, dict) else {}
         setuptools = tool.get("setuptools", {}) if isinstance(tool, dict) else {}
-        package_dir = (
-            setuptools.get("package-dir", {}) if isinstance(setuptools, dict) else {}
-        )
+        package_dir = setuptools.get("package-dir", {}) if isinstance(setuptools, dict) else {}
         if isinstance(package_dir, dict):
             roots.update(
                 value.strip("/")

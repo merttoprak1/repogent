@@ -101,9 +101,7 @@ def test_policy_requires_pytest_when_entry_bound_is_exhausted(
     assert ValidationPolicy().commands(tmp_path)[0].required is True
 
 
-@pytest.mark.parametrize(
-    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
-)
+@pytest.mark.parametrize("config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"])
 def test_policy_requires_pytest_when_recognized_config_is_oversized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_name: str
 ) -> None:
@@ -136,9 +134,7 @@ def test_policy_requires_pytest_when_config_cannot_be_read(
     assert ValidationPolicy().commands(tmp_path)[0].required is True
 
 
-@pytest.mark.parametrize(
-    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
-)
+@pytest.mark.parametrize("config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"])
 def test_policy_requires_pytest_without_following_recognized_config_symlinks(
     tmp_path: Path, config_name: str
 ) -> None:
@@ -149,9 +145,7 @@ def test_policy_requires_pytest_without_following_recognized_config_symlinks(
     assert ValidationPolicy().commands(tmp_path)[0].required is True
 
 
-@pytest.mark.parametrize(
-    "config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
-)
+@pytest.mark.parametrize("config_name", ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"])
 def test_policy_requires_pytest_without_opening_recognized_config_fifos(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_name: str
 ) -> None:
@@ -342,7 +336,7 @@ def test_local_executor_rejects_invalid_or_enlarged_timeout(
 
 
 def test_executors_report_an_unapproved_timeout_as_unavailable(
-    monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
     monkeypatch.setattr(
@@ -508,9 +502,7 @@ def test_docker_image_preflight_is_capped_by_command_timeout(
     monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
     timeouts: list[int] = []
 
-    def fake_bounded_run(
-        _argv: list[str], *, timeout_seconds: int, **_kwargs: object
-    ) -> object:
+    def fake_bounded_run(_argv: list[str], *, timeout_seconds: int, **_kwargs: object) -> object:
         timeouts.append(timeout_seconds)
         return execution_module._ProcessResult(0, "", "", False)
 
@@ -539,9 +531,7 @@ def test_docker_command_availability_probes_module_inside_existing_image(
         return execution_module._ProcessResult(1, "", "module missing", False)
 
     monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
-    command = CommandSpec(
-        "pytest", ("python", "-m", "pytest", "-q"), True, module="pytest"
-    )
+    command = CommandSpec("pytest", ("python", "-m", "pytest", "-q"), True, module="pytest")
     executor = DockerExecutor(allowed={command.name: command.argv})
 
     assert executor.readiness() == (True, None)
@@ -565,9 +555,7 @@ def test_docker_command_availability_accepts_present_module_and_caches_probe(
         return execution_module._ProcessResult(0, "", "", False)
 
     monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
-    command = CommandSpec(
-        "pytest", ("python", "-m", "pytest", "-q"), True, module="pytest"
-    )
+    command = CommandSpec("pytest", ("python", "-m", "pytest", "-q"), True, module="pytest")
     executor = DockerExecutor(allowed={command.name: command.argv})
 
     assert executor.available(command) is True
@@ -585,9 +573,7 @@ def test_docker_timeout_force_removes_the_internal_container_name(
     )
     calls: list[tuple[list[str], int]] = []
 
-    def fake_bounded_run(
-        argv: list[str], *, timeout_seconds: int, **_kwargs: object
-    ) -> object:
+    def fake_bounded_run(argv: list[str], *, timeout_seconds: int, **_kwargs: object) -> object:
         calls.append((argv, timeout_seconds))
         if "run" in argv:
             return execution_module._ProcessResult(None, "partial", "", True)

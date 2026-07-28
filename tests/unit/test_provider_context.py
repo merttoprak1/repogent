@@ -175,10 +175,7 @@ def test_worst_case_provider_contexts_fit_deterministically_without_mutating_mod
     plan = ImplementationPlan(
         files_to_inspect=[f"src/{index}-{huge}.py" for index in range(64)],
         files_to_modify=[f"src/change-{index}-{huge}.py" for index in range(64)],
-        steps=[
-            PlanStep(id=f"step_{index}", description=huge)
-            for index in range(32)
-        ],
+        steps=[PlanStep(id=f"step_{index}", description=huge) for index in range(32)],
         tests=[huge for _ in range(64)],
         security_considerations=[huge for _ in range(64)],
         regression_risks=[huge for _ in range(64)],
@@ -236,9 +233,7 @@ def test_worst_case_provider_contexts_fit_deterministically_without_mutating_mod
     factories = [
         lambda: builder.requirements(huge, _large_inventory()),
         lambda: builder.planning(requirements, localization),
-        lambda: builder.candidate(
-            requirements, plan, localization, "candidate-2"
-        ),
+        lambda: builder.candidate(requirements, plan, localization, "candidate-2"),
         lambda: builder.candidate(
             requirements,
             plan,

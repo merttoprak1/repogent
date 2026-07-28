@@ -131,11 +131,14 @@ def build_run(
 
     try:
         scope = RepositoryScopeResolver().resolve(repository)
-        effective_model = options.model or {
-            "openai": "gpt-5.6-sol",
-            "codex-cli": "default",
-            "scripted": "scripted",
-        }[options.provider]
+        effective_model = (
+            options.model
+            or {
+                "openai": "gpt-5.6-sol",
+                "codex-cli": "default",
+                "scripted": "scripted",
+            }[options.provider]
+        )
         policy = ValidationPolicy(scope=scope)
         commands = policy.commands(repository)
         manifest = manifest.model_copy(
@@ -194,13 +197,9 @@ def build_run(
     try:
         model_provider: ModelProvider
         if options.provider == "scripted":
-            model_provider = ScriptedProvider.from_json(
-                str(cast(Path, options.script))
-            )
+            model_provider = ScriptedProvider.from_json(str(cast(Path, options.script)))
         elif options.provider == "codex-cli":
-            codex_provider = CodexCliProvider(
-                model=options.model, target_root=repository
-            )
+            codex_provider = CodexCliProvider(model=options.model, target_root=repository)
             readiness = codex_provider.check_ready()
             store.write_model("provider-readiness", readiness)
             if not readiness.ready:
@@ -250,9 +249,7 @@ def build_run(
             approver=approver,
             patch_policy=PatchPolicy(),
             patch_applier=PatchApplier(),
-            validator=(
-                None if prepared_executor is None else prepared_executor.validator
-            ),
+            validator=(None if prepared_executor is None else prepared_executor.validator),
             executor_selector=executor_selector,
             artifacts=store,
             inspector=RepositoryInspector(),
@@ -276,9 +273,7 @@ def build_run(
     except Exception as error:
         _close_decision_channels(executor_selector, approver)
         terminal = terminalize_failure(store, manifest, str(error))
-        raise _RunConstructionError(
-            str(error), store=store, manifest=terminal
-        ) from error
+        raise _RunConstructionError(str(error), store=store, manifest=terminal) from error
 
     return PreparedRun(
         store=store,

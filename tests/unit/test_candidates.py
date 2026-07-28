@@ -25,9 +25,7 @@ from repogent.patching import PatchApplier, PatchPolicy
 
 
 class RecordingValidator:
-    def run(
-        self, root: Path, *, timeout_seconds: float | None = None
-    ) -> ValidationReport:
+    def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
         del timeout_seconds
         assert (root / "app.py").exists()
         return ValidationReport(
@@ -110,9 +108,7 @@ def candidate_evidence(
         changed_lines=changed_lines,
         duration_seconds=1,
         required_failures=(
-            required_failures
-            if required_failures is not None
-            else ([] if eligible else ["pytest"])
+            required_failures if required_failures is not None else ([] if eligible else ["pytest"])
         ),
         skipped_checks=skipped_checks or [],
         restored_to_baseline=True,
@@ -303,9 +299,7 @@ def test_candidate_evaluator_uses_same_baseline_for_each_candidate(tmp_path: Pat
 
 def test_candidate_evaluator_restores_after_validator_exception(tmp_path: Path) -> None:
     class ExplodingValidator:
-        def run(
-            self, root: Path, *, timeout_seconds: float | None = None
-        ) -> ValidationReport:
+        def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
             del root, timeout_seconds
             raise RuntimeError("validator exploded")
 
@@ -324,9 +318,7 @@ def test_candidate_evaluator_confines_validator_changes_to_disposable_copy(
     tmp_path: Path,
 ) -> None:
     class MutatingValidator:
-        def run(
-            self, root: Path, *, timeout_seconds: float | None = None
-        ) -> ValidationReport:
+        def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
             del timeout_seconds
             (root / "other.py").write_text("value = 99\n")
             (root / "created.py").write_text("created = True\n")
@@ -446,9 +438,7 @@ def test_candidate_evaluator_passes_remaining_timeout_after_copy_setup(
     class TimeoutRecordingValidator:
         received: float | None = None
 
-        def run(
-            self, root: Path, *, timeout_seconds: float | None = None
-        ) -> ValidationReport:
+        def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
             del root
             self.received = timeout_seconds
             return ValidationReport(

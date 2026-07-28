@@ -57,11 +57,7 @@ def test_report_separates_tool_evidence_from_qa_interpretation() -> None:
         tests=["pytest"],
     )
     validation = ValidationReport(
-        checks=[
-            CheckResult(
-                name="pytest", argv=["pytest"], status=CheckStatus.PASSED, exit_code=0
-            )
-        ]
+        checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED, exit_code=0)]
     )
     review = QAReview(
         acceptance_criteria_coverage=1,
@@ -131,7 +127,11 @@ def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
     localization = LocalizationReport(
         locations=[
             LocalizedSymbol(
-                symbol_id="route", path="app.py", start_line=1, end_line=4, score=1,
+                symbol_id="route",
+                path="app.py",
+                start_line=1,
+                end_line=4,
+                score=1,
                 signals=[],
             )
         ],

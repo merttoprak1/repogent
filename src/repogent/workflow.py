@@ -176,12 +176,8 @@ class Workflow:
     _sequence: int = field(default=0, init=False)
     _event_failed: bool = field(default=False, init=False)
     _legacy_validator_selector: bool = field(default=False, init=False)
-    _candidate_evaluators: dict[str, CandidateEvaluator] = field(
-        default_factory=dict, init=False
-    )
-    _candidate_executors: dict[str, PreparedExecutor] = field(
-        default_factory=dict, init=False
-    )
+    _candidate_evaluators: dict[str, CandidateEvaluator] = field(default_factory=dict, init=False)
+    _candidate_executors: dict[str, PreparedExecutor] = field(default_factory=dict, init=False)
     _candidate_previews: dict[str, PatchPreview] = field(default_factory=dict, init=False)
     _candidate_preview_digests: dict[str, str] = field(default_factory=dict, init=False)
     _candidate_provider_evidence: dict[str, ProviderCallEvidence | None] = field(
@@ -191,9 +187,7 @@ class Workflow:
     def __post_init__(self) -> None:
         self.symbol_builder = self.symbol_builder or PythonSymbolGraphBuilder()
         self.localizer = self.localizer or PythonLocalizer()
-        self.previewer = self.previewer or PatchPreviewer(
-            self.patch_policy, self.artifacts.secrets
-        )
+        self.previewer = self.previewer or PatchPreviewer(self.patch_policy, self.artifacts.secrets)
         if self.executor_selector is None:
             if self.validator is None:
                 raise ValueError("executor selector is required when validator is deferred")
@@ -417,9 +411,7 @@ class Workflow:
         self._assert_preview_binding(selected_preview, selected, selected_preview_digest)
         validated = self.patch_policy.validate(self.root, selected.proposal)
         paths = [path.as_posix() for path in validated.touched_paths]
-        pre_apply_baseline = selected_evaluator.capture_baseline(
-            self.root, deadline=self.deadline
-        )
+        pre_apply_baseline = selected_evaluator.capture_baseline(self.root, deadline=self.deadline)
         self._mark_checkout_recovery_unknown(paths)
         try:
             self.artifacts.update_manifest(self.manifest)
@@ -447,9 +439,7 @@ class Workflow:
         self.advance(RunStage.PATCH_APPLIED)
         self._set_final_validation_status(FinalValidationStatus.RUNNING)
         self.artifacts.update_manifest(self.manifest)
-        post_patch_baseline = selected_evaluator.capture_baseline(
-            self.root, deadline=self.deadline
-        )
+        post_patch_baseline = selected_evaluator.capture_baseline(self.root, deadline=self.deadline)
         self.validation, final_root_stable = selected_evaluator.validate_isolated(
             self.root,
             timeout_seconds=self.remaining_time(),
@@ -712,9 +702,7 @@ class Workflow:
                 self.candidate_evaluator
                 if self.candidate_evaluator is not None
                 and self.candidate_evaluator.validator is prepared.validator
-                else CandidateEvaluator(
-                    self.patch_policy, self.patch_applier, prepared.validator
-                )
+                else CandidateEvaluator(self.patch_policy, self.patch_applier, prepared.validator)
             )
             self._candidate_evaluators[candidate.candidate_id] = candidate_evaluator
             self._candidate_executors[candidate.candidate_id] = prepared
@@ -775,11 +763,9 @@ class Workflow:
         candidate: CandidateRecord,
         expected_digest: str,
     ) -> None:
-        if (
-            patch_preview_digest(preview) != expected_digest
-            or preview.candidate.model_dump(mode="json")
-            != candidate.model_dump(mode="json")
-        ):
+        if patch_preview_digest(preview) != expected_digest or preview.candidate.model_dump(
+            mode="json"
+        ) != candidate.model_dump(mode="json"):
             raise CandidateEvaluationError("patch preview changed after persistence")
 
     def ensure_time(self) -> None:
@@ -796,10 +782,7 @@ class Workflow:
     def _inspect_repository(self) -> RepositoryInventory:
         self.ensure_time()
         accepts_deadline = _accepts_keyword(self.inspector.inspect, "deadline")
-        accepts_scope = (
-            self.scope is not None
-            and _accepts_keyword(self.inspector.inspect, "scope")
-        )
+        accepts_scope = self.scope is not None and _accepts_keyword(self.inspector.inspect, "scope")
         if accepts_deadline and accepts_scope:
             return self.inspector.inspect(
                 self.root,
@@ -1102,8 +1085,7 @@ class Workflow:
             if evidence.candidate_id in known_ids and evidence.candidate_id not in evidence_by_id:
                 evidence_by_id[evidence.candidate_id] = evidence
         return tuple(
-            (candidate, evidence_by_id.get(candidate.candidate_id))
-            for candidate in self.candidates
+            (candidate, evidence_by_id.get(candidate.candidate_id)) for candidate in self.candidates
         )
 
     def _persist_final_manifest(self) -> Exception | None:
@@ -1113,9 +1095,7 @@ class Workflow:
             return error
         return None
 
-    def _terminalize_without_event(
-        self, status: RunStatus, reason: str
-    ) -> RunManifest:
+    def _terminalize_without_event(self, status: RunStatus, reason: str) -> RunManifest:
         """Last-resort, non-recursive durability path after terminalization itself fails."""
         self._set_final_manifest(status, reason)
         try:
@@ -1154,9 +1134,7 @@ def _validation_summary(
 def _check_payload(check: CheckResult) -> dict[str, object]:
     # Command output and elapsed time are inherently variable (for example pytest's
     # duration line). Candidate evidence compares the deterministic required result.
-    return check.model_dump(
-        exclude={"duration_seconds", "schema_version", "stdout", "stderr"}
-    )
+    return check.model_dump(exclude={"duration_seconds", "schema_version", "stdout", "stderr"})
 
 
 def _accepts_keyword(callable_object: object, name: str) -> bool:

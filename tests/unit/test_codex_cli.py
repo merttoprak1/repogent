@@ -148,9 +148,7 @@ else:
 
 
 def _set_behavior(capture_path: Path, **behavior: Any) -> None:
-    capture_path.with_name("behavior.json").write_text(
-        json.dumps(behavior), encoding="utf-8"
-    )
+    capture_path.with_name("behavior.json").write_text(json.dumps(behavior), encoding="utf-8")
 
 
 def _assert_provider_error(
@@ -323,14 +321,10 @@ def test_generate_uses_explicit_target_root_when_process_cwd_differs(
     assert not Path(capture["cwd"]).is_relative_to(target_root)
     assert not Path(capture["workdir"]).is_relative_to(target_root)
     schema_path = Path(capture["argv"][capture["argv"].index("--output-schema") + 1])
-    result_path = Path(
-        capture["argv"][capture["argv"].index("--output-last-message") + 1]
-    )
+    result_path = Path(capture["argv"][capture["argv"].index("--output-last-message") + 1])
     assert not schema_path.is_relative_to(target_root)
     assert not result_path.is_relative_to(target_root)
-    assert prompt["payload"]["repository_context"] == [
-        {"path": "src/repogent/codex_cli.py"}
-    ]
+    assert prompt["payload"]["repository_context"] == [{"path": "src/repogent/codex_cli.py"}]
     assert prompt["system_prompt"] == "prefix[REDACTED]/systemsuffix"
     assert prompt["payload"]["request"] == "value[REDACTED]/valuesuffix"
     assert prompt["payload"]["key[REDACTED]/keysuffix"] == "nested"
@@ -346,9 +340,7 @@ def test_check_ready_rejects_executable_inside_target_root_without_invoking_it(
     process_cwd = tmp_path / "process-cwd"
     process_cwd.mkdir()
     monkeypatch.chdir(process_cwd)
-    provider = CodexCliProvider(
-        executable=str(executable), target_root=executable.parent
-    )
+    provider = CodexCliProvider(executable=str(executable), target_root=executable.parent)
 
     readiness = provider.check_ready()
 
@@ -406,8 +398,7 @@ def test_generate_revalidates_model_after_successful_readiness(
         forbidden=(_SECRET, str(target_root)),
     )
     calls = [
-        json.loads(line)
-        for line in capture_path.with_name("calls.jsonl").read_text().splitlines()
+        json.loads(line) for line in capture_path.with_name("calls.jsonl").read_text().splitlines()
     ]
     assert calls == [["--version"], ["exec", "--help"], ["login", "status"]]
 
@@ -421,9 +412,7 @@ def test_generate_rejects_windows_equivalent_target_root_in_model(
     target_root = tmp_path / "TargetRoot"
     target_root.mkdir()
     windows_root = str(target_root).upper().replace("/", "\\")
-    monkeypatch.setattr(
-        codex_cli_module, "os", _WindowsOs(codex_cli_module.os)
-    )
+    monkeypatch.setattr(codex_cli_module, "os", _WindowsOs(codex_cli_module.os))
     provider = CodexCliProvider(
         executable=str(executable),
         model=f"provider{windows_root}suffix",
@@ -448,9 +437,7 @@ def test_generate_redacts_windows_equivalent_target_root_from_prompt(
     provider = CodexCliProvider(executable=str(executable), target_root=target_root)
     assert provider.check_ready().ready is True
     windows_root = str(target_root).upper().replace("/", "\\")
-    monkeypatch.setattr(
-        codex_cli_module, "os", _WindowsOs(codex_cli_module.os)
-    )
+    monkeypatch.setattr(codex_cli_module, "os", _WindowsOs(codex_cli_module.os))
     safe_path_entries = ["/usr/bin", "/bin"]
     monkeypatch.setenv("HTTPS_PROXY", f"https://prefix{windows_root}\\proxysuffix")
     monkeypatch.setenv(
@@ -494,9 +481,7 @@ def test_generate_redacts_windows_equivalent_adjacent_root_from_diagnostic(
     provider = CodexCliProvider(executable=str(executable), target_root=target_root)
     assert provider.check_ready().ready is True
     windows_root = str(target_root).upper().replace("/", "\\")
-    monkeypatch.setattr(
-        codex_cli_module, "os", _WindowsOs(codex_cli_module.os)
-    )
+    monkeypatch.setattr(codex_cli_module, "os", _WindowsOs(codex_cli_module.os))
     _set_behavior(
         capture_path,
         exec_exit=7,
@@ -545,14 +530,9 @@ def test_generate_ignores_target_root_tempdir_configuration(
     assert str(target_root.resolve()) not in json.dumps(capture, sort_keys=True)
     assert not Path(capture["workdir"]).is_relative_to(target_root)
     assert not Path(capture["cwd"]).is_relative_to(target_root)
-    assert all(
-        not Path(record["cwd"]).is_relative_to(target_root)
-        for record in capture["records"]
-    )
+    assert all(not Path(record["cwd"]).is_relative_to(target_root) for record in capture["records"])
     schema_path = Path(capture["argv"][capture["argv"].index("--output-schema") + 1])
-    result_path = Path(
-        capture["argv"][capture["argv"].index("--output-last-message") + 1]
-    )
+    result_path = Path(capture["argv"][capture["argv"].index("--output-last-message") + 1])
     assert not schema_path.is_relative_to(target_root)
     assert not result_path.is_relative_to(target_root)
 
@@ -697,8 +677,7 @@ def test_generate_rejects_oversized_prompt_before_exec(
 
     _assert_provider_error(captured, ProviderCallStatus.OUTPUT_TOO_LARGE)
     calls = [
-        json.loads(line)
-        for line in capture_path.with_name("calls.jsonl").read_text().splitlines()
+        json.loads(line) for line in capture_path.with_name("calls.jsonl").read_text().splitlines()
     ]
     assert calls == [["--version"], ["exec", "--help"], ["login", "status"]]
 
@@ -711,8 +690,7 @@ def test_generate_classifies_nonzero_exit_and_redacts_bounded_diagnostics(
     credential_path = str(Path.home() / ".codex" / "auth.json")
     stderr = (
         f"token={_SECRET} root=prefix{target_root}/srcsuffix "
-        f"credentials={credential_path} "
-        + ("failure " * 1000)
+        f"credentials={credential_path} " + ("failure " * 1000)
     )
     _set_behavior(capture_path, exec_exit=7, exec_stderr=stderr)
     provider = CodexCliProvider(executable=str(executable))
@@ -753,9 +731,7 @@ def test_generate_classifies_structured_output_failures(
 ) -> None:
     executable, capture_path = fake_codex
     _set_behavior(capture_path, **behavior)
-    provider = CodexCliProvider(
-        executable=str(executable), max_output_bytes=max_output_bytes
-    )
+    provider = CodexCliProvider(executable=str(executable), max_output_bytes=max_output_bytes)
 
     with pytest.raises(ProviderError) as captured:
         _generate(provider)
@@ -820,14 +796,10 @@ def test_generate_classifies_nonzero_exit_with_unavailable_diagnostic_excerpt(
     provider = CodexCliProvider(executable=str(executable))
     real_diagnostic_excerpt = provider._diagnostic_excerpt
 
-    def replace_before_excerpt(
-        stdout_path: Path, stderr_path: Path, *, fallback: str
-    ) -> str:
+    def replace_before_excerpt(stdout_path: Path, stderr_path: Path, *, fallback: str) -> str:
         stderr_path.unlink()
         stderr_path.mkdir()
-        return real_diagnostic_excerpt(
-            stdout_path, stderr_path, fallback=fallback
-        )
+        return real_diagnostic_excerpt(stdout_path, stderr_path, fallback=fallback)
 
     monkeypatch.setattr(provider, "_diagnostic_excerpt", replace_before_excerpt)
 

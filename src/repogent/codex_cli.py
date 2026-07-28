@@ -78,13 +78,10 @@ class CodexCliProvider:
         self.secrets = tuple(secrets)
         self.max_prompt_bytes = max_prompt_bytes
         self.max_output_bytes = max_output_bytes
-        self._target_root = (
-            Path.cwd() if target_root is None else target_root
-        ).resolve()
+        self._target_root = (Path.cwd() if target_root is None else target_root).resolve()
         self._target_root_pattern = re.compile(re.escape(str(self._target_root)))
         windows_root_fragment = r"[/\\]".join(
-            re.escape(part)
-            for part in str(self._target_root).replace("\\", "/").split("/")
+            re.escape(part) for part in str(self._target_root).replace("\\", "/").split("/")
         )
         self._windows_target_root_contains_pattern = re.compile(
             windows_root_fragment, re.IGNORECASE
@@ -195,9 +192,7 @@ class CodexCliProvider:
                     )
                     if login.returncode != 0:
                         return self._not_ready(
-                            self._failure_with_diagnostic(
-                                "Codex CLI is not authenticated", login
-                            ),
+                            self._failure_with_diagnostic("Codex CLI is not authenticated", login),
                             ProviderCallStatus.AUTHENTICATION_FAILED,
                         )
                     self._login_checked = True
@@ -248,12 +243,8 @@ class CodexCliProvider:
 
         prompt = json.dumps(
             {
-                "payload": self._redact_target_root_data(
-                    sanitize_data(payload, self.secrets)
-                ),
-                "system_prompt": self._redact_target_root(
-                    redact_text(system_prompt, self.secrets)
-                ),
+                "payload": self._redact_target_root_data(sanitize_data(payload, self.secrets)),
+                "system_prompt": self._redact_target_root(redact_text(system_prompt, self.secrets)),
             },
             sort_keys=True,
         )
@@ -293,9 +284,9 @@ class CodexCliProvider:
             prompt_path = self._owner_only_file(workdir, "prompt-", ".json")
             stdout_path = self._owner_only_file(workdir, "stdout-", ".log")
             stderr_path = self._owner_only_file(workdir, "stderr-", ".log")
-            schema_bytes = json.dumps(
-                output_type.model_json_schema(), sort_keys=True
-            ).encode("utf-8")
+            schema_bytes = json.dumps(output_type.model_json_schema(), sort_keys=True).encode(
+                "utf-8"
+            )
             if len(schema_bytes) > self.max_output_bytes:
                 raise self._provider_error(
                     role=role,
@@ -492,9 +483,7 @@ class CodexCliProvider:
         stderr_text = self._read_bounded_file(stderr_path, "readiness diagnostic").decode(
             "utf-8", errors="replace"
         )
-        return subprocess.CompletedProcess(
-            argv, returncode, stdout=stdout_text, stderr=stderr_text
-        )
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout_text, stderr=stderr_text)
 
     def _run_exec(
         self,
@@ -597,9 +586,7 @@ class CodexCliProvider:
         exit_code: Callable[[], int | None],
     ) -> Iterator[Path]:
         try:
-            with self._temporary_directory(
-                prefix="repogent-codex-", parent=parent
-            ) as workdir:
+            with self._temporary_directory(prefix="repogent-codex-", parent=parent) as workdir:
                 yield workdir
         except OSError as error:
             raise self._provider_error(
@@ -626,19 +613,13 @@ class CodexCliProvider:
             if not stat.S_ISREG(metadata.st_mode):
                 raise OSError(f"{label} was not a regular file")
             if metadata.st_size > self.max_output_bytes:
-                raise _OutputTooLargeError(
-                    f"Codex CLI {label} exceeded the configured limit"
-                )
+                raise _OutputTooLargeError(f"Codex CLI {label} exceeded the configured limit")
             content = stream.read(self.max_output_bytes + 1)
         if len(content) > self.max_output_bytes:
-            raise _OutputTooLargeError(
-                f"Codex CLI {label} exceeded the configured limit"
-            )
+            raise _OutputTooLargeError(f"Codex CLI {label} exceeded the configured limit")
         return content
 
-    def _diagnostic_excerpt(
-        self, stdout_path: Path, stderr_path: Path, *, fallback: str
-    ) -> str:
+    def _diagnostic_excerpt(self, stdout_path: Path, stderr_path: Path, *, fallback: str) -> str:
         stderr = self._read_bounded_file(stderr_path, "diagnostic").decode(
             "utf-8", errors="replace"
         )
@@ -663,9 +644,7 @@ class CodexCliProvider:
     def _bounded_redacted_text(self, text: str, *, fallback: str) -> str:
         placeholder = "\ue000repogent-redacted\ue001"
         protected = text.replace("[REDACTED]", placeholder)
-        redacted = self._redact_target_root(
-            redact_text(protected, self.secrets)
-        )
+        redacted = self._redact_target_root(redact_text(protected, self.secrets))
         for credential_location in self._credential_locations():
             redacted = redacted.replace(credential_location, "[REDACTED]")
         redacted = redacted.replace(placeholder, "[REDACTED]").strip()
@@ -699,8 +678,7 @@ class CodexCliProvider:
         if "\x00" in self.model or not self.model.isprintable():
             return "Codex CLI model must contain 1 to 200 printable characters"
         if str(self._target_root) in self.model or (
-            os.name == "nt"
-            and self._windows_target_root_contains_pattern.search(self.model)
+            os.name == "nt" and self._windows_target_root_contains_pattern.search(self.model)
         ):
             return "Codex CLI model must not contain the target repository path"
         return None
@@ -734,9 +712,7 @@ class CodexCliProvider:
             candidates.append(Path(tempfile.gettempdir()))
         if os.name == "nt":
             candidates.extend(
-                Path(value)
-                for key in ("TEMP", "TMP")
-                if (value := os.environ.get(key))
+                Path(value) for key in ("TEMP", "TMP") if (value := os.environ.get(key))
             )
             if local_app_data := os.environ.get("LOCALAPPDATA"):
                 candidates.append(Path(local_app_data) / "Temp")
@@ -772,9 +748,7 @@ class CodexCliProvider:
     def _redact_target_root(self, text: str) -> str:
         redacted = self._target_root_pattern.sub("[REDACTED]", text)
         if os.name == "nt":
-            redacted = self._windows_target_root_contains_pattern.sub(
-                "[REDACTED]", redacted
-            )
+            redacted = self._windows_target_root_contains_pattern.sub("[REDACTED]", redacted)
         return redacted
 
     def _redact_target_root_data(self, value: Any) -> Any:
@@ -796,10 +770,7 @@ class CodexCliProvider:
     def _contains_target_root_path(self, value: str) -> bool:
         return (
             bool(self._target_root_pattern.search(value))
-            or (
-                os.name == "nt"
-                and bool(self._windows_target_root_contains_pattern.search(value))
-            )
+            or (os.name == "nt" and bool(self._windows_target_root_contains_pattern.search(value)))
             or self._is_target_root_path(value)
         )
 
@@ -813,18 +784,14 @@ class CodexCliProvider:
             resolved = candidate
         return resolved == self._target_root or self._target_root in resolved.parents
 
-    def _not_ready(
-        self, reason: str, status: ProviderCallStatus
-    ) -> ProviderReadiness:
+    def _not_ready(self, reason: str, status: ProviderCallStatus) -> ProviderReadiness:
         self._readiness_failure_status = status
         return ProviderReadiness(
             provider="codex-cli",
             model=self._model_name,
             ready=False,
             backend_version=self._backend_version,
-            reason=self._bounded_redacted_text(
-                reason, fallback="Codex CLI is not ready"
-            ),
+            reason=self._bounded_redacted_text(reason, fallback="Codex CLI is not ready"),
         )
 
     def _provider_error(
@@ -837,9 +804,7 @@ class CodexCliProvider:
         message: str,
         exit_code: int | None = None,
     ) -> ProviderError:
-        bounded_message = self._bounded_redacted_text(
-            message, fallback="Codex CLI provider failed"
-        )
+        bounded_message = self._bounded_redacted_text(message, fallback="Codex CLI provider failed")
         return ProviderError(
             bounded_message,
             retryable=False,

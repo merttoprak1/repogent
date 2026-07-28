@@ -69,8 +69,7 @@ PLAN_OUTPUT = {
 VALID_PATCH_OUTPUT = {
     "summary": "Change value",
     "diff": (
-        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
-        " def value():\n-    return 1\n+    return 2\n"
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 1\n+    return 2\n"
     ),
     "acceptance_criteria_addressed": ["tests pass"],
     "focused_tests": ["pytest"],
@@ -79,8 +78,7 @@ ALTERNATIVE_PATCH_OUTPUT = {
     **VALID_PATCH_OUTPUT,
     "summary": "Change value alternatively",
     "diff": (
-        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
-        " def value():\n-    return 1\n+    return 3\n"
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 1\n+    return 3\n"
     ),
 }
 BROADER_PATCH_OUTPUT = {
@@ -117,9 +115,7 @@ class SequenceValidator:
     def __init__(self, statuses: list[CheckStatus]) -> None:
         self.statuses = statuses
 
-    def run(
-        self, root: Path, *, timeout_seconds: float | None = None
-    ) -> ValidationReport:
+    def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
         del root, timeout_seconds
         status = self.statuses.pop(0)
         return ValidationReport(
@@ -382,9 +378,7 @@ def test_workflow_persists_unvalidated_preview_before_executor_selection(
     assert selector.preview_stages == [RunStage.PATCH_PREVIEWED]
     assert manifest.evaluated_target is not None
     assert manifest.evaluated_target.kind is ValidationTargetKind.PATCH
-    preview = json.loads(
-        next(workflow.artifacts.root.glob("patch-preview-*.json")).read_text()
-    )
+    preview = json.loads(next(workflow.artifacts.root.glob("patch-preview-*.json")).read_text())
     assert preview["verification_status"] == "unvalidated"
     assert preview["candidate"]["candidate_id"] == "candidate-1"
 
@@ -470,9 +464,7 @@ def test_rejected_static_preview_accounts_completed_provider_once(tmp_path: Path
                 ),
             )
 
-    provider = AccountingProvider(
-        [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT]
-    )
+    provider = AccountingProvider([REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT])
     workflow.roles = RoleSet.from_provider(provider)
 
     manifest = workflow.run()
@@ -875,9 +867,7 @@ def test_candidate_and_final_validation_run_only_in_disposable_roots(tmp_path: P
         def __init__(self) -> None:
             self.roots: list[Path] = []
 
-        def run(
-            self, root: Path, *, timeout_seconds: float | None = None
-        ) -> ValidationReport:
+        def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
             del timeout_seconds
             self.roots.append(root)
             (root / "other.py").write_text("validator side effect\n")
@@ -1225,9 +1215,7 @@ def test_generated_role_output_is_persisted_before_budget_enforcement(
         validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
         budget=Budget(max_tokens=5),
     )
-    provider = MeteredProvider(
-        [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT]
-    )
+    provider = MeteredProvider([REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT])
     workflow.roles = RoleSet.from_provider(provider)
 
     manifest = workflow.run()
@@ -1236,9 +1224,10 @@ def test_generated_role_output_is_persisted_before_budget_enforcement(
     assert manifest.reason == "token budget exceeded"
     assert artifact_name in manifest.generated_but_not_consumed
     assert list(workflow.artifacts.root.glob(f"{artifact_name}-*.json"))
-    assert f"Generated but not consumed: {artifact_name}" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        f"Generated but not consumed: {artifact_name}"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
     assert len(provider.calls) == cross_at
     if cross_at == 3:
         assert manifest.candidate_ids == ["candidate-1"]
@@ -1327,9 +1316,7 @@ def test_cancellation_after_durable_apply_reports_applied_checkout(tmp_path: Pat
         outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
         validation_statuses=[CheckStatus.PASSED],
     )
-    workflow.cancel_requested = (
-        lambda: workflow.manifest.checkout_state is CheckoutState.APPLIED
-    )
+    workflow.cancel_requested = lambda: workflow.manifest.checkout_state is CheckoutState.APPLIED
 
     manifest = workflow.run()
     report = (workflow.artifacts.root / "report.md").read_text()
@@ -1413,9 +1400,10 @@ def test_post_apply_artifact_failure_preserves_truthful_recovery_state(
     assert manifest.selected_patch_applied is True
     assert manifest.applied_paths == ["app.py"]
     assert manifest.final_validation_status is FinalValidationStatus.INTERRUPTED
-    assert "Real checkout patch: remains applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        "Real checkout patch: remains applied"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
 
 
 def test_post_apply_qa_interrupt_keeps_applied_patch_and_final_validation_state(
@@ -1460,9 +1448,10 @@ def test_post_apply_qa_provider_failure_keeps_applied_patch_and_guidance(
     assert manifest.reason == "QA provider unavailable"
     assert manifest.selected_patch_applied is True
     assert manifest.final_validation_status is FinalValidationStatus.PASSED
-    assert "Real checkout patch: remains applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        "Real checkout patch: remains applied"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
 
 
 def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
@@ -1481,9 +1470,7 @@ def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
         status=ProviderCallStatus.AUTHENTICATION_FAILED,
         structured_output_valid=False,
     )
-    error = ProviderError(
-        "Codex CLI is not authenticated", retryable=False, evidence=evidence
-    )
+    error = ProviderError("Codex CLI is not authenticated", retryable=False, evidence=evidence)
 
     class FailingProvider:
         def generate(self, **_kwargs: object) -> object:
@@ -1598,9 +1585,10 @@ def test_post_apply_event_failure_keeps_real_checkout_state_in_manifest_and_repo
     assert manifest.final_validation_status is FinalValidationStatus.PASSED
     persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
     assert persisted["selected_patch_applied"] is True
-    assert "Real checkout patch: remains applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        "Real checkout patch: remains applied"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
 
 
 def test_terminal_event_keyboard_interrupt_is_durably_recorded_without_recursion(
@@ -1654,9 +1642,7 @@ def test_real_apply_interrupt_restores_checkout_and_cancels_as_not_applied(
     assert manifest.selected_patch_applied is False
     assert manifest.applied_paths == []
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
-    assert "Real checkout patch: not applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert "Real checkout patch: not applied" in (workflow.artifacts.root / "report.md").read_text()
 
 
 def test_real_apply_interrupt_with_failed_restore_reports_recovery_unknown(
@@ -1675,9 +1661,7 @@ def test_real_apply_interrupt_with_failed_restore_reports_recovery_unknown(
         if root.resolve() == workflow.root.resolve() and not check:
             raise KeyboardInterrupt
 
-    def fail_real_restore(
-        root: Path, snapshots: object, missing_directories: object
-    ) -> None:
+    def fail_real_restore(root: Path, snapshots: object, missing_directories: object) -> None:
         if root.resolve() == workflow.root.resolve():
             raise RuntimeError("real checkout restore failed")
         original_restore(root, snapshots, missing_directories)  # type: ignore[arg-type]

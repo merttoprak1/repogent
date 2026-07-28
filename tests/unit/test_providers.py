@@ -57,9 +57,7 @@ def test_openai_provider_recursively_redacts_secrets_at_request_boundary() -> No
         return response
 
     client = SimpleNamespace(responses=SimpleNamespace(parse=parse))
-    provider = OpenAIProvider(
-        client=cast(OpenAI, client), secrets=["explicit-configured-secret"]
-    )
+    provider = OpenAIProvider(client=cast(OpenAI, client), secrets=["explicit-configured-secret"])
     secrets = {
         "openai": "sk-proj-abcdefghijklmnop",
         "nested": [

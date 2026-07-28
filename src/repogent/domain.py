@@ -434,10 +434,7 @@ class RunManifest(VersionedModel):
                 "kind": ValidationTargetKind.PATCH,
                 "digest": legacy_preview_digest,
             }
-        if (
-            "checkout_state" not in migrated
-            and migrated.get("selected_patch_applied") is True
-        ):
+        if "checkout_state" not in migrated and migrated.get("selected_patch_applied") is True:
             migrated["checkout_state"] = CheckoutState.APPLIED
         return migrated
 

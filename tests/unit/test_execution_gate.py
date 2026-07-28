@@ -208,9 +208,7 @@ class CapacityBlockingInspectionRegistry(RecordingRegistry):
         with self._lock:
             self.inspect_calls += 1
             self.active_inspections += 1
-            self.max_active_inspections = max(
-                self.max_active_inspections, self.active_inspections
-            )
+            self.max_active_inspections = max(self.max_active_inspections, self.active_inspections)
             self.inspection_daemons.append(threading.current_thread().daemon)
             if self.active_inspections == self._capacity:
                 self.capacity_reached.set()
@@ -225,10 +223,7 @@ class CapacityBlockingInspectionRegistry(RecordingRegistry):
 
 
 def preview(*, replacement: str = "value = 2") -> PatchPreview:
-    diff = (
-        "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n"
-        f"-value = 1\n+{replacement}\n"
-    )
+    diff = f"--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\n+{replacement}\n"
     proposal = PatchProposal(
         summary="Change value",
         diff=diff,
@@ -300,9 +295,7 @@ def pending_choice(gate: GateExecutorSelector) -> PendingExecutionChoice:
     return pending
 
 
-def option(
-    pending: PendingExecutionChoice, mode: ExecutionMode
-) -> ExecutorOption:
+def option(pending: PendingExecutionChoice, mode: ExecutionMode) -> ExecutorOption:
     return next(item for item in pending.options if item.mode is mode)
 
 
@@ -347,9 +340,7 @@ def test_local_selection_requires_matching_target_and_option_digest(
     local = option(pending, ExecutionMode.LOCAL)
     try:
         with pytest.raises(ExecutionGateError, match="target digest mismatch"):
-            gate.submit(
-                local_decision(pending, local, preview_digest="f" * 64)
-            )
+            gate.submit(local_decision(pending, local, preview_digest="f" * 64))
         with pytest.raises(ExecutionGateError, match="option digest mismatch"):
             gate.submit(local_decision(pending, local, option_digest="e" * 64))
 
@@ -410,17 +401,13 @@ def test_plain_approval_without_local_option_digest_is_rejected() -> None:
 def test_selection_rejects_decision_for_another_gate_binding(
     tmp_path: Path, field: str, expected: str
 ) -> None:
-    gate = GateExecutorSelector(
-        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
-    )
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), RecordingRegistry())
     worker, _outcome = start_selection(gate, preview())
     pending = pending_choice(gate)
     selected = option(pending, ExecutionMode.LOCAL)
     decision = local_decision(pending, selected)
     decision = decision.model_copy(
-        update={
-            field: "run-2" if field == "run_id" else ExecutionMode.DOCKER
-        }
+        update={field: "run-2" if field == "run_id" else ExecutionMode.DOCKER}
     )
     try:
         with pytest.raises(ExecutionGateError, match=expected):
@@ -448,9 +435,7 @@ def test_unavailable_option_is_rejected_without_prepare(tmp_path: Path) -> None:
 
 def test_prepare_rechecks_readiness_before_releasing_selector(tmp_path: Path) -> None:
     registry = RecordingRegistry()
-    registry.prepare_error = ExecutorSelectionError(
-        "selected executor is unavailable"
-    )
+    registry.prepare_error = ExecutorSelectionError("selected executor is unavailable")
     gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), registry)
     worker, _outcome = start_selection(gate, preview())
     pending = pending_choice(gate)
@@ -486,16 +471,12 @@ def test_unexpected_prepare_failure_releases_generation_for_retry(
 def test_rejected_selection_wakes_worker_with_selection_rejection(
     tmp_path: Path,
 ) -> None:
-    gate = GateExecutorSelector(
-        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
-    )
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), RecordingRegistry())
     worker, outcome = start_selection(gate, preview())
     pending = pending_choice(gate)
     local = option(pending, ExecutionMode.LOCAL)
     try:
-        gate.submit(
-            local_decision(pending, local, decision=Decision.REJECTED)
-        )
+        gate.submit(local_decision(pending, local, decision=Decision.REJECTED))
 
         with pytest.raises(ExecutorSelectionRejected, match="rejected"):
             outcome.result(timeout=1)
@@ -504,9 +485,7 @@ def test_rejected_selection_wakes_worker_with_selection_rejection(
 
 
 def test_close_wakes_selector_and_public_waiters(tmp_path: Path) -> None:
-    gate = GateExecutorSelector(
-        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
-    )
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), RecordingRegistry())
     worker, outcome = start_selection(gate, preview())
     pending_choice(gate)
 
@@ -577,9 +556,7 @@ def test_gate_rejects_preview_changed_by_recursive_sanitization(
 def test_resolved_generation_rejects_duplicate_or_stale_decision(
     tmp_path: Path,
 ) -> None:
-    gate = GateExecutorSelector(
-        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
-    )
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), RecordingRegistry())
     worker, outcome = start_selection(gate, preview())
     pending = pending_choice(gate)
     local = option(pending, ExecutionMode.LOCAL)
@@ -597,13 +574,9 @@ def test_resolved_generation_rejects_duplicate_or_stale_decision(
 def test_identical_preview_rejects_decision_from_earlier_generation(
     tmp_path: Path,
 ) -> None:
-    gate = GateExecutorSelector(
-        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
-    )
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), RecordingRegistry())
     first_worker, first_outcome = start_selection(gate, preview())
-    first_generation, first_pending = gate.wait(
-        after_generation=0, timeout_seconds=1
-    )
+    first_generation, first_pending = gate.wait(after_generation=0, timeout_seconds=1)
     assert first_pending is not None
     first_local = option(first_pending, ExecutionMode.LOCAL)
     stale_approval = local_decision(first_pending, first_local)
@@ -644,12 +617,8 @@ def test_obsolete_prepare_cannot_clear_newer_generation_reservation(
 ) -> None:
     registry = OverlappingPrepareRegistry()
     gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), registry)
-    old_worker, old_outcome = start_selection(
-        gate, preview(), timeout_seconds=0.1
-    )
-    old_generation, old_pending = gate.wait(
-        after_generation=0, timeout_seconds=1
-    )
+    old_worker, old_outcome = start_selection(gate, preview(), timeout_seconds=0.1)
+    old_generation, old_pending = gate.wait(after_generation=0, timeout_seconds=1)
     assert old_pending is not None
     old_local = option(old_pending, ExecutionMode.LOCAL)
     old_errors: list[BaseException] = []
@@ -713,9 +682,7 @@ def test_obsolete_prepare_cannot_clear_newer_generation_reservation(
 def test_timeout_advances_generation_to_publish_pending_removal(
     tmp_path: Path,
 ) -> None:
-    gate = GateExecutorSelector(
-        "run-1", tmp_path, ValidationPolicy(), RecordingRegistry()
-    )
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), RecordingRegistry())
     worker, outcome = start_selection(gate, preview(), timeout_seconds=0.1)
     generation, pending = gate.wait(after_generation=0, timeout_seconds=1)
     assert pending is not None
@@ -832,14 +799,10 @@ def test_inspection_capacity_rejects_repeated_work_and_recovers_after_release(
         registry.release_inspections.set()
         assert registry.all_inspections_finished.wait(timeout=1)
         assert coordinator.wait_for_idle(timeout_seconds=1)
-        assert admitted_gates[0].wait(
-            after_generation=0, timeout_seconds=0
-        ) == (0, None)
+        assert admitted_gates[0].wait(after_generation=0, timeout_seconds=0) == (0, None)
 
         assert pending_choice(admitted_gates[1]) is not None
-        recovered_worker, recovered_outcome = start_selection(
-            saturated_gates[0], preview()
-        )
+        recovered_worker, recovered_outcome = start_selection(saturated_gates[0], preview())
         assert pending_choice(saturated_gates[0]) is not None
         assert registry.inspect_calls == capacity + 1
         assert registry.max_active_inspections == capacity
