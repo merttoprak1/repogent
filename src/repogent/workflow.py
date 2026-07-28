@@ -60,6 +60,7 @@ from repogent.domain import (
     utc_now,
     validated_manifest_update,
 )
+from repogent.errors import ErrorDetail
 from repogent.events import EventSink
 from repogent.executor_selection import (
     FixedExecutorSelector,
@@ -74,7 +75,7 @@ from repogent.providers import ProviderError
 from repogent.reporting import render_persistent_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
 from repogent.repository_scope import RepositoryScope
-from repogent.run_reports import build_persistent_report
+from repogent.run_reports import build_persistent_report, provider_failure_error
 from repogent.symbols import PythonSymbolGraph, PythonSymbolGraphBuilder
 
 
@@ -184,6 +185,7 @@ class Workflow:
     _candidate_provider_evidence: dict[str, ProviderCallEvidence | None] = field(
         default_factory=dict, init=False
     )
+    _terminal_errors: list[ErrorDetail] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         self.symbol_builder = self.symbol_builder or PythonSymbolGraphBuilder()
@@ -242,6 +244,9 @@ class Workflow:
             reason = "workflow interrupted by user"
         except ProviderError as error:
             self._mark_post_apply_interrupted()
+            self._terminal_errors = [
+                provider_failure_error(self.manifest, retryable=error.retryable)
+            ]
             if error.evidence is not None:
                 try:
                     self.artifacts.write_model("provider-failure", error.evidence)
@@ -1056,6 +1061,7 @@ class Workflow:
                 self.manifest,
                 self.validation,
                 evidence_path=str(self.artifacts.root),
+                errors=self._terminal_errors,
             )
             self.artifacts.write_final(
                 "report.json",

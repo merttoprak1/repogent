@@ -44,6 +44,7 @@ from repogent.domain import (
     WorkflowKind,
     WorkflowOutcome,
 )
+from repogent.errors import ErrorCode, RetryClass
 from repogent.events import EventSink
 from repogent.executor_selection import PreparedExecutor
 from repogent.localization import PythonLocalizer
@@ -1504,6 +1505,18 @@ def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
     failure = json.loads((workflow.artifacts.root / "provider-failure-001.json").read_text())
     assert failure == evidence.model_dump(mode="json")
+    persistent_report = json.loads((workflow.artifacts.root / "report.json").read_text())
+    assert persistent_report["errors"] == [
+        {
+            "code": ErrorCode.PROVIDER_UNAVAILABLE.value,
+            "message": "The model provider could not complete the run.",
+            "remediation": "Check provider readiness and retry the run when it is available.",
+            "retry": RetryClass.NON_RETRYABLE.value,
+            "run_id": manifest.run_id,
+            "run_kind": manifest.kind.value,
+            "schema_version": "1",
+        }
+    ]
 
 
 def test_retryable_provider_failure_writes_final_attempt_evidence(

@@ -17,6 +17,7 @@ from repogent.domain import (
     WorkflowKind,
     WorkflowOutcome,
 )
+from repogent.errors import ErrorCode
 from repogent.run_reports import (
     PersistentRunReport,
     VerifiedChangeResult,
@@ -78,6 +79,72 @@ def test_verified_change_report_states_checkout_fact_and_trust() -> None:
     assert report.checks.skipped == ["ruff"]
     assert isinstance(report.result, VerifiedChangeResult)
     assert report.result.applied_paths == ["src/app.py"]
+    assert report.errors == []
+
+
+@pytest.mark.parametrize(
+    ("reason", "checkout_state", "final_validation_status", "expected_code"),
+    [
+        (
+            "provider request failed token=sk-proj-1234567890abcdef",
+            CheckoutState.NOT_APPLIED,
+            FinalValidationStatus.NOT_STARTED,
+            ErrorCode.PROVIDER_UNAVAILABLE,
+        ),
+        (
+            "required checks failed",
+            CheckoutState.NOT_APPLIED,
+            FinalValidationStatus.FAILED,
+            ErrorCode.VALIDATION_FAILED,
+        ),
+        (
+            "repository preflight failed",
+            CheckoutState.NOT_APPLIED,
+            FinalValidationStatus.NOT_STARTED,
+            ErrorCode.POLICY,
+        ),
+        (
+            "workflow timeout exceeded",
+            CheckoutState.NOT_APPLIED,
+            FinalValidationStatus.NOT_STARTED,
+            ErrorCode.LIMIT_EXCEEDED,
+        ),
+        (
+            "checkout recovery could not be proved",
+            CheckoutState.RECOVERY_UNKNOWN,
+            FinalValidationStatus.INTERRUPTED,
+            ErrorCode.INTERNAL,
+        ),
+    ],
+)
+def test_terminal_failure_derives_a_safe_typed_error(
+    reason: str,
+    checkout_state: CheckoutState,
+    final_validation_status: FinalValidationStatus,
+    expected_code: ErrorCode,
+) -> None:
+    manifest = RunManifest(
+        run_id="run-failure",
+        request="change",
+        status=RunStatus.HUMAN_INTERVENTION_REQUIRED,
+        outcome=WorkflowOutcome.HUMAN_INTERVENTION_REQUIRED,
+        reason=reason,
+        checkout_state=checkout_state,
+        final_validation_status=final_validation_status,
+    )
+
+    report = build_persistent_report(
+        manifest,
+        None,
+        evidence_path="/bounded/evidence/run-failure",
+    )
+
+    assert len(report.errors) == 1
+    assert report.errors[0].code is expected_code
+    assert report.errors[0].run_id == manifest.run_id
+    assert report.errors[0].run_kind is manifest.kind
+    assert "sk-proj-1234567890abcdef" not in report.errors[0].message
+    assert report.errors[0].remediation is not None
 
 
 def test_report_rejects_result_for_wrong_kind() -> None:
@@ -117,3 +184,4 @@ def test_cancelled_report_preserves_absent_outcome() -> None:
 
     assert report.outcome is None
     assert report.checkout_changed is False
+    assert report.errors == []
