@@ -246,9 +246,7 @@ async def test_stdio_success_redacts_requirements_and_plan_before_digest_binding
     scripted = json.loads(Path("examples/scripted_run.json").read_text())
     password_marker = "pass" + "word"
     scripted[0]["objective"] = "keep token=sk-proj-1234567890abcdef private"
-    scripted[0]["assumptions"] = [
-        f"{password_marker}=redaction-fixture-one"
-    ]
+    scripted[0]["assumptions"] = [f"{password_marker}=redaction-fixture-one"]
     scripted[1]["security_considerations"] = [
         f"{password_marker}=redaction-fixture-two must stay private"
     ]

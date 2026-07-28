@@ -44,8 +44,7 @@ def make_repository(tmp_path: Path) -> Path:
 def safe_candidate(*, diff: str | None = None) -> CandidateRecord:
     proposal = PatchProposal(
         summary="Change value",
-        diff=diff
-        or "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\n+value = 2\n",
+        diff=diff or "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\n+value = 2\n",
         acceptance_criteria_addressed=["health endpoint exists"],
         focused_tests=["pytest"],
     )
@@ -88,9 +87,7 @@ def test_patch_preview_digest_is_canonical_and_sensitive_to_exact_diff(
     )
     changed = previewer.preview(
         repository,
-        safe_candidate(
-            diff="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\n+value = 3\n"
-        ),
+        safe_candidate(diff="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-value = 1\n+value = 3\n"),
         ["health endpoint exists"],
     )
 

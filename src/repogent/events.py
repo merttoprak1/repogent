@@ -42,9 +42,7 @@ class CompositeEventSink:
 class ConsoleEventSink:
     """Render a small, sanitized progress line without command output."""
 
-    def __init__(
-        self, write: Callable[[str], object], secrets: Sequence[str] = ()
-    ) -> None:
+    def __init__(self, write: Callable[[str], object], secrets: Sequence[str] = ()) -> None:
         self.write = write
         self.secrets = tuple(secrets)
 
@@ -160,8 +158,7 @@ class JsonlEventStore:
                     event = RunEvent.model_validate(json.loads(line))
                     if event.sequence <= last_sequence:
                         raise ValueError(
-                            "event sequence must increase monotonically "
-                            f"(line {line_number})"
+                            f"event sequence must increase monotonically (line {line_number})"
                         )
                     last_sequence = event.sequence
         except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as error:

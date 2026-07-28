@@ -34,9 +34,7 @@ class CapabilityDefinition:
     allowed_outcomes: frozenset[WorkflowOutcome]
 
 
-_READ_OPERATIONS = frozenset(
-    {RunOperation.GET, RunOperation.CANCEL, RunOperation.GET_REPORT}
-)
+_READ_OPERATIONS = frozenset({RunOperation.GET, RunOperation.CANCEL, RunOperation.GET_REPORT})
 _MUTATING_OPERATIONS = _READ_OPERATIONS | frozenset(
     {
         RunOperation.APPROVE_REQUIREMENTS,

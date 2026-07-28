@@ -267,12 +267,7 @@ def test_localizer_resolves_calls_with_statement_ordered_rebinding(tmp_path: Pat
         {
             "a.py": "def login():\n    return True\n",
             "b.py": "def login():\n    return False\n",
-            "consumer.py": (
-                "from a import login\n"
-                "login()\n"
-                "from b import login\n"
-                "login()\n"
-            ),
+            "consumer.py": ("from a import login\nlogin()\nfrom b import login\nlogin()\n"),
         },
     )
 
@@ -349,9 +344,7 @@ def test_localizer_excludes_class_bindings_from_methods_but_keeps_function_bindi
     )
 
     incoming, _source_paths = _incoming_edges(graph.edges, graph.nodes)
-    call_lines = [
-        edge.line for edge in incoming["a.py:a.login"] if edge.kind == "calls"
-    ]
+    call_lines = [edge.line for edge in incoming["a.py:a.login"] if edge.kind == "calls"]
 
     assert call_lines == [9]
 
@@ -363,9 +356,7 @@ def test_localizer_connects_src_layout_source_to_importing_tests(tmp_path: Path)
         tmp_path,
         {
             "src/example_math/__init__.py": "from .core import clamp as limit\n",
-            "src/example_math/core.py": (
-                "def clamp(value: int) -> int:\n    return value\n"
-            ),
+            "src/example_math/core.py": ("def clamp(value: int) -> int:\n    return value\n"),
             "tests/test_math.py": (
                 "from example_math import limit\n"
                 "from example_math.core import clamp as bound\n"
@@ -396,9 +387,7 @@ def test_localizer_tokenizes_each_file_lexical_document_once(
         tmp_path,
         {
             "service.py": (
-                "class Service:\n"
-                "    def first(self): return 1\n"
-                "    def second(self): return 2\n"
+                "class Service:\n    def first(self): return 1\n    def second(self): return 2\n"
             )
         },
     )

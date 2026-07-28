@@ -34,16 +34,12 @@ def _passing_preflight() -> PreflightReport:
 
 
 @pytest.mark.parametrize("provider", ["other", "", "OPENAI"])
-def test_validate_run_options_rejects_invalid_provider(
-    tmp_path: Path, provider: str
-) -> None:
+def test_validate_run_options_rejects_invalid_provider(tmp_path: Path, provider: str) -> None:
     target = tmp_path / "target"
     target.mkdir()
 
     with pytest.raises(ValueError, match="provider must be openai"):
-        validate_run_options(
-            RunOptions(repository=target, request="change", provider=provider)
-        )
+        validate_run_options(RunOptions(repository=target, request="change", provider=provider))
 
 
 def test_validate_run_options_requires_script_for_scripted_provider(
@@ -53,9 +49,7 @@ def test_validate_run_options_requires_script_for_scripted_provider(
     target.mkdir()
 
     with pytest.raises(ValueError, match="--script is required"):
-        validate_run_options(
-            RunOptions(repository=target, request="change", provider="scripted")
-        )
+        validate_run_options(RunOptions(repository=target, request="change", provider="scripted"))
 
 
 def test_validate_run_options_rejects_filesystem_root() -> None:
@@ -121,9 +115,7 @@ def test_validate_run_options_accepts_deferred_executor(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
 
-    validate_run_options(
-        RunOptions(repository=repository, request="change", executor="deferred")
-    )
+    validate_run_options(RunOptions(repository=repository, request="change", executor="deferred"))
 
 
 def test_build_run_rejects_evidence_inside_repository(tmp_path: Path) -> None:
@@ -212,9 +204,7 @@ def test_build_run_prepares_selected_executor_with_registry(
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        def prepare(
-            self, root: Path, mode: ExecutionMode, _policy: object
-        ) -> PreparedExecutor:
+        def prepare(self, root: Path, mode: ExecutionMode, _policy: object) -> PreparedExecutor:
             calls.append((root, mode))
             return PreparedExecutor(
                 mode=mode,
@@ -254,9 +244,7 @@ def test_build_run_wraps_explicit_executor_in_fixed_selector(
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        def prepare(
-            self, _root: Path, mode: ExecutionMode, _policy: object
-        ) -> PreparedExecutor:
+        def prepare(self, _root: Path, mode: ExecutionMode, _policy: object) -> PreparedExecutor:
             return PreparedExecutor(
                 mode=mode,
                 isolation_level=IsolationLevel.REDUCED_ISOLATION,
@@ -320,9 +308,7 @@ def test_build_run_deferred_uses_only_base_preflight_and_selector_factory(
     assert prepared.executor_selector is selector
     assert prepared.workflow.executor_selector is selector
     assert prepared.workflow.validator is None
-    assert factory_calls == [
-        (prepared.manifest.run_id, target.resolve(), factory_calls[0][2])
-    ]
+    assert factory_calls == [(prepared.manifest.run_id, target.resolve(), factory_calls[0][2])]
 
 
 def test_deferred_construction_failure_closes_both_decision_channels(
@@ -404,9 +390,7 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        def prepare(
-            self, _root: Path, mode: ExecutionMode, _policy: object
-        ) -> PreparedExecutor:
+        def prepare(self, _root: Path, mode: ExecutionMode, _policy: object) -> PreparedExecutor:
             assert mode is ExecutionMode.DOCKER
             raise ExecutorSelectionError("selected executor is unavailable")
 

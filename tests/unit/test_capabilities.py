@@ -43,9 +43,10 @@ def test_every_kind_has_disjoint_allowed_outcomes() -> None:
     assert registry.definition(WorkflowKind.RELEASE_GATE).allowed_outcomes == frozenset(
         {WorkflowOutcome.RELEASE_VERIFIED, WorkflowOutcome.RELEASE_BLOCKED}
     )
-    assert WorkflowOutcome.APPLIED not in registry.definition(
-        WorkflowKind.PATCH_REVIEW
-    ).allowed_outcomes
+    assert (
+        WorkflowOutcome.APPLIED
+        not in registry.definition(WorkflowKind.PATCH_REVIEW).allowed_outcomes
+    )
 
 
 @pytest.mark.parametrize(

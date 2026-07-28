@@ -22,9 +22,7 @@ class CliApprover:
         typer.echo(f"\n--- {kind.value} approval ---\n{render_artifact(artifact)}\n")
         approved = typer.confirm(f"Approve {kind.value}?", default=False)
         feedback = (
-            None
-            if approved
-            else typer.prompt("Reason for rejection", default="Rejected by user")
+            None if approved else typer.prompt("Reason for rejection", default="Rejected by user")
         )
         return ApprovalRecord(
             kind=kind,

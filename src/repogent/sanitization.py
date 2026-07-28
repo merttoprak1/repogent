@@ -54,8 +54,9 @@ def redact_text(text: str, explicit_secrets: Sequence[str] = ()) -> str:
     """Redact known secret values while preserving surrounding text delimiters."""
     result = text
     result = _QUOTED_ASSIGNMENT.sub(
-        lambda match: f"{match.group('prefix')}{match.group('quote')}"
-        f"{REDACTED}{match.group('quote')}",
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}{REDACTED}{match.group('quote')}"
+        ),
         result,
     )
     result = _UNQUOTED_ASSIGNMENT.sub(
@@ -77,9 +78,7 @@ def sanitize_data(value: Any, explicit_secrets: Sequence[str] = ()) -> Any:
         return {
             key: (
                 REDACTED
-                if isinstance(key, str)
-                and isinstance(item, str)
-                and _is_sensitive_field(key)
+                if isinstance(key, str) and isinstance(item, str) and _is_sensitive_field(key)
                 else sanitize_data(item, explicit_secrets)
             )
             for key, item in value.items()

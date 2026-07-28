@@ -113,9 +113,7 @@ class ProviderContextBuilder:
         if previous_evidence is not None:
             payload["previous_failure"] = _failure_summary(previous_evidence)
         if generation_reason is not None:
-            payload["generation_reason"] = _truncate(
-                generation_reason, _MAX_CONTEXT_STRING_CHARS
-            )
+            payload["generation_reason"] = _truncate(generation_reason, _MAX_CONTEXT_STRING_CHARS)
         return _fit_payload(payload)
 
     def qa(
@@ -346,19 +344,11 @@ def _fit_payload(payload: dict[str, object]) -> dict[str, object]:
         if strings:
             path, string_value = max(strings, key=lambda item: len(item[1]))
             target = max(_MIN_COMPACTED_STRING_CHARS, len(string_value) // 2)
-            omitted, omitted_items = _shorten_string(
-                fitted, path, string_value, target
-            )
+            omitted, omitted_items = _shorten_string(fitted, path, string_value, target)
             if omitted_items == 0:
-                truncation["strings_shortened"] = (
-                    int(truncation["strings_shortened"]) + 1
-                )
-            truncation["items_omitted"] = (
-                int(truncation["items_omitted"]) + omitted_items
-            )
-            truncation["characters_omitted"] = (
-                int(truncation["characters_omitted"]) + omitted
-            )
+                truncation["strings_shortened"] = int(truncation["strings_shortened"]) + 1
+            truncation["items_omitted"] = int(truncation["items_omitted"]) + omitted_items
+            truncation["characters_omitted"] = int(truncation["characters_omitted"]) + omitted
             continue
         lists = _shrinkable_lists(fitted)
         if lists:
@@ -414,9 +404,7 @@ def _reported_omission_count(value: object) -> int:
     return 0
 
 
-def _shrinkable_strings(
-    value: object, path: ContextPath = ()
-) -> list[tuple[ContextPath, str]]:
+def _shrinkable_strings(value: object, path: ContextPath = ()) -> list[tuple[ContextPath, str]]:
     candidates: list[tuple[ContextPath, str]] = []
     if isinstance(value, dict):
         for key in sorted(value):
@@ -492,9 +480,7 @@ def _shorten_string(
             parent["text"] = text
             parent["end_line"] = int(parent["start_line"]) + line_count - 1
             parent["text_truncated"] = True
-            parent["omitted_line_count"] = int(
-                parent.get("omitted_line_count", 0)
-            ) + omitted_lines
+            parent["omitted_line_count"] = int(parent.get("omitted_line_count", 0)) + omitted_lines
             return (len(current) - len(text), 0)
         snippets = _resolve_path(payload, path[:-2])
         snippet_index = path[-2]
@@ -506,9 +492,9 @@ def _shorten_string(
         ):
             snippets.pop(snippet_index)
             localization["snippets_truncated"] = True
-            localization["omitted_snippet_count"] = int(
-                localization.get("omitted_snippet_count", 0)
-            ) + 1
+            localization["omitted_snippet_count"] = (
+                int(localization.get("omitted_snippet_count", 0)) + 1
+            )
             return (len(current), 1)
     replacement = _truncate(current, target)
     if isinstance(key, int) and isinstance(parent, list):  # noqa: SIM114

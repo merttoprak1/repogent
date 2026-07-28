@@ -202,9 +202,7 @@ def _file_lexical_tokens(path: str, text: str) -> set[str]:
     return set(_tokens(" ".join((path, text))))
 
 
-def _matches(
-    query_tokens: Sequence[str], document_tokens: Sequence[str] | set[str]
-) -> list[str]:
+def _matches(query_tokens: Sequence[str], document_tokens: Sequence[str] | set[str]) -> list[str]:
     return sorted(set(query_tokens) & set(document_tokens))
 
 
@@ -231,9 +229,7 @@ def _incoming_edges(
     visited: set[str] = set()
 
     def walk(root_id: str, module_name: str | None) -> None:
-        work: list[tuple[bool, str, str | None, list[str]]] = [
-            (False, root_id, module_name, [])
-        ]
+        work: list[tuple[bool, str, str | None, list[str]]] = [(False, root_id, module_name, [])]
         while work:
             exiting, node_id, current_module, pushed_bindings = work.pop()
             if exiting:
@@ -337,7 +333,6 @@ def _ambiguity(locations: list[LocalizedSymbol]) -> tuple[bool, str | None]:
         return True, "top location score is below 0.35"
     if len(locations) > 1 and top_score < 1.20 * locations[1].score:
         return True, (
-            "top locations are not concentrated "
-            "(top score is less than 1.20 times second score)"
+            "top locations are not concentrated (top score is less than 1.20 times second score)"
         )
     return False, None

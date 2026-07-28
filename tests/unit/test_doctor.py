@@ -267,7 +267,7 @@ def test_doctor_codex_readiness_uses_only_noninteractive_login_status(
     executable.write_text(
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> {str(calls)!r}\n"
-        "case \"$*\" in\n"
+        'case "$*" in\n'
         "  --version) echo codex-cli-1.2.3 ;;\n"
         f"  'exec --help') echo {help_flags!r} ;;\n"
         "  'login status') echo 'Logged in' ;;\n"

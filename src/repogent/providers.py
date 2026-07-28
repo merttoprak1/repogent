@@ -123,9 +123,7 @@ class OpenAIProvider:
             raise ProviderError("provider timeout exhausted")
         request_client = self.client
         if timeout_seconds is not None:
-            request_client = self.client.with_options(
-                timeout=timeout_seconds, max_retries=0
-            )
+            request_client = self.client.with_options(timeout=timeout_seconds, max_retries=0)
         try:
             response = request_client.responses.parse(
                 model=self.model,
@@ -133,9 +131,7 @@ class OpenAIProvider:
                     {"role": "system", "content": redact_text(system_prompt, self.secrets)},
                     {
                         "role": "user",
-                        "content": json.dumps(
-                            sanitize_data(payload, self.secrets), sort_keys=True
-                        ),
+                        "content": json.dumps(sanitize_data(payload, self.secrets), sort_keys=True),
                     },
                 ],
                 text_format=output_type,

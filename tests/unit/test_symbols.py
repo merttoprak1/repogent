@@ -36,12 +36,7 @@ def test_builder_adds_module_nodes_and_top_level_containment(tmp_path: Path) -> 
     package = tmp_path / "package"
     package.mkdir()
     (package / "__init__.py").write_text("def initialize():\n    return 1\n")
-    (tmp_path / "service.py").write_text(
-        "import helpers\n"
-        "run()\n"
-        "def execute():\n"
-        "    return 1\n"
-    )
+    (tmp_path / "service.py").write_text("import helpers\nrun()\ndef execute():\n    return 1\n")
 
     graph = PythonSymbolGraphBuilder().build(RepositoryInspector().inspect(tmp_path))
     symbols = {node.qualified_name: node for node in graph.nodes}

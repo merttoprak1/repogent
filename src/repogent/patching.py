@@ -166,17 +166,13 @@ class PatchApplier:
             try:
                 self.restore(repository, snapshots, missing_directories)
             except (Exception, KeyboardInterrupt, SystemExit) as restore_error:
-                raise CheckoutRecoveryError(
-                    validated.touched_paths, restore_error
-                ) from apply_error
+                raise CheckoutRecoveryError(validated.touched_paths, restore_error) from apply_error
             raise
 
     def transaction(self, root: Path, patch: ValidatedPatch) -> PatchTransaction:
         return PatchTransaction(self, root, patch)
 
-    def snapshot(
-        self, root: Path, patch: ValidatedPatch
-    ) -> tuple[dict[Path, Snapshot], set[Path]]:
+    def snapshot(self, root: Path, patch: ValidatedPatch) -> tuple[dict[Path, Snapshot], set[Path]]:
         repository = root.resolve(strict=True)
         if not repository.is_dir():
             raise PatchPolicyError("repository root must be a directory")
