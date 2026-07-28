@@ -1,14 +1,33 @@
 # Repogent
 
-**From request to an approval-gated, evidence-backed Python change.**
+**Approval-gated, evidence-backed Python repository changes for Codex.**
 
-Repogent is an open-source CLI and Codex plugin for narrowly scoped Python
-repository work. It lets a model propose requirements, a plan, and a patch, but
-keeps repository inspection, patch policy, validation, evidence, and mutation
-under deterministic controls. A change is never applied until you approve the
-exact displayed patch.
+Repogent is an open-source CLI and Codex plugin for turning scoped repository
+requests into safe, reviewable Python changes. A model can propose requirements,
+a plan, and a patch; deterministic services retain control of repository scope,
+patch policy, validation, evidence, and mutation. A change is never applied
+until you approve the exact displayed patch.
 
 Repogent is released under the [MIT License](LICENSE).
+
+## Why Repogent
+
+Most coding agents optimize for producing a patch. Repogent optimizes for being
+able to explain and verify that patch:
+
+- **Explicit human control** — requirements, plan, executor, and exact patch
+  decisions are bounded to the artifact being approved.
+- **Deterministic guardrails** — Git-bounded scope, typed MCP contracts, patch
+  policy, and allowlisted validation commands do not depend on model judgment.
+- **Evidence you can inspect** — each terminal run preserves its checkout state,
+  validation result, trust label, and bounded audit artifacts.
+- **Honest execution boundaries** — Docker is the default validator; local
+  execution requires explicit reduced-isolation consent and is never a silent
+  fallback.
+
+This makes Repogent useful both as a practical Codex capability and as a
+reference implementation for building AI developer tooling with clear authority
+boundaries.
 
 ## What it does
 
