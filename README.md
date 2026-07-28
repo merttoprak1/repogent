@@ -172,3 +172,17 @@ Repogent intentionally does not provide autonomous deployment, arbitrary
 model-authored commands, automatic dependency installation, background workers,
 or non-Python repository support. These are deliberate boundaries, not hidden
 capabilities.
+
+## Roadmap
+
+Future work will extend Repogent without weakening its explicit approval and
+evidence boundaries:
+
+- additional read-only and mutation capabilities built on the capability kernel;
+- GitHub and headless CI integrations that preserve human authorization;
+- published benchmark scenarios, reliability metrics, and broader fixture
+  coverage;
+- broader Python project and validator-image support; and
+- optional operational interfaces for reviewing runs and evidence.
+
+These are planned directions, not capabilities of the current release.
