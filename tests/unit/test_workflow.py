@@ -41,6 +41,7 @@ from repogent.domain import (
     ValidationTarget,
     ValidationTargetKind,
     VerificationStatus,
+    WorkflowKind,
     WorkflowOutcome,
 )
 from repogent.events import EventSink
@@ -355,6 +356,26 @@ def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) 
     assert [event["sequence"] for event in _events(workflow)] == list(
         range(1, len(_events(workflow)) + 1)
     )
+
+
+def test_terminalization_revalidates_a_read_only_workflow_outcome(tmp_path: Path) -> None:
+    """Catch terminalization bypassing the manifest capability-policy validator."""
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+    )
+    workflow.manifest = RunManifest(
+        run_id="run-1",
+        request="review",
+        kind=WorkflowKind.PATCH_REVIEW,
+        stage=RunStage.REVIEWED,
+        selected_patch_applied=True,
+        final_validation_status=FinalValidationStatus.PASSED,
+    )
+
+    with pytest.raises(ValueError, match="applied is not valid for patch_review"):
+        workflow._set_final_manifest(RunStatus.COMPLETED, None)
 
 
 def test_workflow_persists_unvalidated_preview_before_executor_selection(

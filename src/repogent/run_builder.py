@@ -24,6 +24,7 @@ from repogent.domain import (
     RunStatus,
     WorkflowKind,
     WorkflowOutcome,
+    validated_manifest_update,
 )
 from repogent.events import EventSink
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
@@ -309,13 +310,14 @@ def terminalize_failure(
         if status is RunStatus.HUMAN_INTERVENTION_REQUIRED
         else None
     )
-    terminal = manifest.model_copy(
-        update={
+    terminal = validated_manifest_update(
+        manifest,
+        {
             "status": status,
             "outcome": outcome,
             "stage": RunStage.FINISHED,
             "reason": reason,
-        }
+        },
     )
     store.update_manifest(terminal)
     persistent_report = build_persistent_report(

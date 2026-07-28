@@ -58,6 +58,7 @@ from repogent.domain import (
     VerificationStatus,
     WorkflowOutcome,
     utc_now,
+    validated_manifest_update,
 )
 from repogent.events import EventSink
 from repogent.executor_selection import (
@@ -1038,14 +1039,15 @@ class Workflow:
             and self.manifest.final_validation_status is FinalValidationStatus.PASSED
         ):
             outcome = WorkflowOutcome.APPLIED
-        self.manifest = self.manifest.model_copy(
-            update={
+        self.manifest = validated_manifest_update(
+            self.manifest,
+            {
                 "status": status,
                 "outcome": outcome,
                 "stage": final_stage,
                 "reason": reason,
                 "updated_at": utc_now(),
-            }
+            },
         )
 
     def _write_final_report(self) -> Exception | None:
