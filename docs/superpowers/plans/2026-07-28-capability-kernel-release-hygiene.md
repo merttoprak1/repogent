@@ -144,10 +144,13 @@ git commit -m "feat: define capability operation policy"
 ### Task 2: Bind executor selection to a generic validation target
 
 **Files:**
+- Modify: `src/repogent/domain.py`
 - Modify: `src/repogent/mcp_models.py`
 - Modify: `src/repogent/executor_selection.py`
 - Modify: `src/repogent/execution_gate.py`
 - Modify: `src/repogent/workflow.py`
+- Modify: `src/repogent/run_sessions.py`
+- Modify: `src/repogent/mcp_server.py`
 - Test: `tests/unit/test_executor_selection.py`
 - Test: `tests/unit/test_execution_gate.py`
 - Test: `tests/unit/test_workflow.py`
@@ -204,6 +207,11 @@ class ValidationDecision(VersionedModel):
     decision: Decision
 ```
 
+Define `ValidationTargetKind` and `ValidationTarget` in `domain.py`, not
+`mcp_models.py`, because manifests and workflow services must use them without
+creating a domain-to-MCP import cycle. `mcp_models.py` imports and exposes those
+domain types in its schemas.
+
 Rename `PendingExecutionChoice.preview_digest` to `target` and rename
 `ExecutionDecision` to `ValidationDecision`. Keep input compatibility with the
 old shape through `AliasChoices("target", "preview_digest")` only where stored
@@ -212,16 +220,33 @@ Add `evaluated_target: ValidationTarget | None = None` to `RunManifest`; verifie
 change sets it whenever a preview becomes current and clears obsolete consent
 when that value changes.
 
-- [ ] **Step 4: Generalize selector protocols and digests**
+Keep `PendingExecutionChoice.preview: dict[str, object]` as the bounded
+human-visible artifact; it is not the authority token. Change the selector
+boundary to accept both values:
 
 ```python
 class ExecutorSelector(Protocol):
     def select(
-        self, target: ValidationTarget, *, timeout_seconds: float
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
     ) -> PreparedExecutor:
-        """Return the explicitly selected executor for this exact target."""
+        """Select an executor for the exact target and retain safe preview data."""
+```
 
+Verified change creates `ValidationTarget(kind=PATCH, digest=preview.digest)`
+and passes `preview.model_dump(mode="json")`. `GateExecutorSelector` binds both
+the target and preview to one generation. Preserve `RunManifest.preview_digest`
+only as a legacy read field: a before-validator maps it to
+`evaluated_target=ValidationTarget(PATCH, preview_digest)` when the new field is
+absent. New workflow writes set `evaluated_target`; MCP snapshots emit `target`
+and never `preview_digest`.
 
+- [ ] **Step 4: Generalize selector protocols and digests**
+
+```python
 def option_digest(
     run_id: str,
     target: ValidationTarget,
@@ -476,34 +501,47 @@ git commit -m "feat: type persistent capability reports"
 - Modify: `.github/workflows/ci.yml`
 - Modify: `README.md`
 - Modify: `docs/architecture.md`
-- Test: `tests/unit/test_package_data.py`
+- Create: `tests/integration/test_quality_gate.py`
+- Modify: `tests/unit/test_package_data.py`
 
 **Interfaces:**
 - Produces: `make verify` as the single local and CI gate
 - Guarantees: interpreter override through `PYTHON`, defaulting to `python3`
 - Guarantees: lint, format, type, security, build, wheel inspection, plugin tests, and stdio integration are not duplicated with divergent arguments
 
-- [ ] **Step 1: Write failing gate contract tests**
+- [ ] **Step 1: Write failing executable gate contract tests**
 
 ```python
-def test_make_verify_is_portable_and_complete() -> None:
-    makefile = Path("Makefile").read_text()
-    assert "PYTHON ?= python3" in makefile
-    for target in ("test", "lint", "format-check", "typecheck", "security", "package-check"):
-        assert target in makefile
+def test_make_verify_dry_run_uses_overridden_interpreter() -> None:
+    result = subprocess.run(
+        ["make", "-n", "verify", "PYTHON=python3"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "python3 -m pytest" in result.stdout
+    assert "python3 -m ruff format --check ." in result.stdout
+    assert "python3 -m build" in result.stdout
 
 
-def test_ci_invokes_only_canonical_verify_gate() -> None:
-    workflow = Path(".github/workflows/ci.yml").read_text()
-    assert workflow.count("make verify") == 1
-    assert "python -m pytest tests/unit/test_plugin_package.py" not in workflow
+def test_package_check_executes_plugin_stdio_contract() -> None:
+    result = subprocess.run(
+        ["make", "-n", "package-check", "PYTHON=python3"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "tests/integration/test_plugin_end_to_end.py" in result.stdout
 ```
 
 - [ ] **Step 2: Run package tests and verify RED**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_package_data.py -q`
 
-Expected: assertions fail because the current Makefile uses `python` and omits format/package checks.
+Expected: assertions fail because the current Makefile uses `python` and omits
+format/package checks.
 
 - [ ] **Step 3: Define the canonical Make targets**
 
@@ -552,7 +590,9 @@ git commit -m "style: normalize Ruff formatting"
 
 - [ ] **Step 6: Update CI and documentation, then run the canonical gate**
 
-Set CI's gate step to `make verify PYTHON=python`. Document
+Set CI's gate step to `make verify PYTHON=python`; CI itself is the executable
+proof that the canonical gate is used. Do not add a source-text assertion for
+the YAML file. Document
 `make verify PYTHON=.venv/bin/python` for an existing local environment and
 `make verify` when `python3` resolves to the development interpreter.
 
@@ -563,7 +603,7 @@ Expected: all tests and package checks pass; format check reports no changes.
 - [ ] **Step 7: Commit Task 5**
 
 ```bash
-git add Makefile .github/workflows/ci.yml README.md docs/architecture.md tests/unit/test_package_data.py
+git add Makefile .github/workflows/ci.yml README.md docs/architecture.md tests/integration/test_quality_gate.py tests/unit/test_package_data.py
 git commit -m "build: unify local and CI verification"
 ```
 
