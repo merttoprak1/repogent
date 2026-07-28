@@ -4,12 +4,15 @@ from pathlib import Path
 import pytest
 
 from repogent.approvals import FakeApprover
+from repogent.artifacts import ArtifactStore
 from repogent.domain import (
     Decision,
     ExecutionMode,
     IsolationLevel,
     ProviderReadiness,
+    RunManifest,
     RunStatus,
+    WorkflowKind,
     WorkflowOutcome,
 )
 from repogent.executor_selection import (
@@ -23,6 +26,7 @@ from repogent.run_builder import (
     RunBuildError,
     RunOptions,
     build_run,
+    terminalize_failure,
     validate_run_options,
 )
 
@@ -33,17 +37,33 @@ def _passing_preflight() -> PreflightReport:
     )
 
 
-@pytest.mark.parametrize("provider", ["other", "", "OPENAI"])
-def test_validate_run_options_rejects_invalid_provider(
-    tmp_path: Path, provider: str
+def test_failure_terminalization_revalidates_a_read_only_workflow_outcome(
+    tmp_path: Path,
 ) -> None:
+    """Catch failure handling persisting a terminal result outside its capability policy."""
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    store = ArtifactStore.create(tmp_path / "runs", repository, "review", run_id="run-1")
+    manifest = RunManifest(
+        run_id="run-1",
+        request="review",
+        kind=WorkflowKind.PATCH_REVIEW,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="human_intervention_required is not valid for patch_review",
+    ):
+        terminalize_failure(store, manifest, "interrupted")
+
+
+@pytest.mark.parametrize("provider", ["other", "", "OPENAI"])
+def test_validate_run_options_rejects_invalid_provider(tmp_path: Path, provider: str) -> None:
     target = tmp_path / "target"
     target.mkdir()
 
     with pytest.raises(ValueError, match="provider must be openai"):
-        validate_run_options(
-            RunOptions(repository=target, request="change", provider=provider)
-        )
+        validate_run_options(RunOptions(repository=target, request="change", provider=provider))
 
 
 def test_validate_run_options_requires_script_for_scripted_provider(
@@ -53,9 +73,7 @@ def test_validate_run_options_requires_script_for_scripted_provider(
     target.mkdir()
 
     with pytest.raises(ValueError, match="--script is required"):
-        validate_run_options(
-            RunOptions(repository=target, request="change", provider="scripted")
-        )
+        validate_run_options(RunOptions(repository=target, request="change", provider="scripted"))
 
 
 def test_validate_run_options_rejects_filesystem_root() -> None:
@@ -121,9 +139,7 @@ def test_validate_run_options_accepts_deferred_executor(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
 
-    validate_run_options(
-        RunOptions(repository=repository, request="change", executor="deferred")
-    )
+    validate_run_options(RunOptions(repository=repository, request="change", executor="deferred"))
 
 
 def test_build_run_rejects_evidence_inside_repository(tmp_path: Path) -> None:
@@ -212,9 +228,7 @@ def test_build_run_prepares_selected_executor_with_registry(
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        def prepare(
-            self, root: Path, mode: ExecutionMode, _policy: object
-        ) -> PreparedExecutor:
+        def prepare(self, root: Path, mode: ExecutionMode, _policy: object) -> PreparedExecutor:
             calls.append((root, mode))
             return PreparedExecutor(
                 mode=mode,
@@ -254,9 +268,7 @@ def test_build_run_wraps_explicit_executor_in_fixed_selector(
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        def prepare(
-            self, _root: Path, mode: ExecutionMode, _policy: object
-        ) -> PreparedExecutor:
+        def prepare(self, _root: Path, mode: ExecutionMode, _policy: object) -> PreparedExecutor:
             return PreparedExecutor(
                 mode=mode,
                 isolation_level=IsolationLevel.REDUCED_ISOLATION,
@@ -320,9 +332,7 @@ def test_build_run_deferred_uses_only_base_preflight_and_selector_factory(
     assert prepared.executor_selector is selector
     assert prepared.workflow.executor_selector is selector
     assert prepared.workflow.validator is None
-    assert factory_calls == [
-        (prepared.manifest.run_id, target.resolve(), factory_calls[0][2])
-    ]
+    assert factory_calls == [(prepared.manifest.run_id, target.resolve(), factory_calls[0][2])]
 
 
 def test_deferred_construction_failure_closes_both_decision_channels(
@@ -404,9 +414,7 @@ def test_build_run_does_not_fallback_when_docker_preflight_fails(
         def __init__(self, **_kwargs: object) -> None:
             pass
 
-        def prepare(
-            self, _root: Path, mode: ExecutionMode, _policy: object
-        ) -> PreparedExecutor:
+        def prepare(self, _root: Path, mode: ExecutionMode, _policy: object) -> PreparedExecutor:
             assert mode is ExecutionMode.DOCKER
             raise ExecutorSelectionError("selected executor is unavailable")
 

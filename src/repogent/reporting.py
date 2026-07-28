@@ -14,6 +14,7 @@ from repogent.domain import (
     compute_trust_label,
 )
 from repogent.localization import LocalizationReport
+from repogent.run_reports import PersistentRunReport, build_persistent_report
 
 
 def derive_trust_label(manifest: RunManifest) -> str:
@@ -37,19 +38,67 @@ def render_report(
     localization: LocalizationReport | None = None,
     candidates: Sequence[tuple[CandidateRecord, CandidateEvidence | None]] = (),
     selection: CandidateSelection | None = None,
+    evidence_path: str = "unavailable",
 ) -> str:
+    report = build_persistent_report(
+        manifest,
+        validation,
+        evidence_path=evidence_path,
+    )
+    return render_persistent_report(
+        report,
+        manifest,
+        requirements,
+        plan,
+        validation,
+        review,
+        localization=localization,
+        candidates=candidates,
+        selection=selection,
+    )
+
+
+def render_persistent_report(
+    report: PersistentRunReport,
+    manifest: RunManifest,
+    requirements: RequirementsSpec | None,
+    plan: ImplementationPlan | None,
+    validation: ValidationReport | None,
+    review: QAReview | None,
+    *,
+    localization: LocalizationReport | None = None,
+    candidates: Sequence[tuple[CandidateRecord, CandidateEvidence | None]] = (),
+    selection: CandidateSelection | None = None,
+) -> str:
+    required_checks = ", ".join(report.checks.required) or "none"
+    passed_checks = ", ".join(report.checks.passed) or "none"
+    failed_checks = ", ".join(report.checks.failed) or "none"
+    skipped_checks = ", ".join(report.checks.skipped) or "none"
     lines = [
-        f"# Repogent run {manifest.run_id}",
+        f"# Repogent run {report.run_id}",
         "",
-        f"Status: **{manifest.status.value}**",
-        f"Outcome: {manifest.outcome.value if manifest.outcome else 'none'}",
+        f"Kind: `{report.kind.value}`",
+        f"Status: **{report.status.value}**",
+        f"Outcome: {report.outcome.value if report.outcome else 'none'}",
         f"Stage: `{manifest.stage.value}`",
         f"Request: {_markdown_text(manifest.request)}",
         f"Repair attempts: {manifest.repair_attempts}",
         f"Reason: {_markdown_text(manifest.reason or 'none')}",
-        f"Verification: {derive_trust_label(manifest)}",
+        f"Verification: {report.trust_label.value}",
         f"Execution mode: {manifest.execution_mode.value if manifest.execution_mode else 'none'}",
-        f"Preview digest: {manifest.preview_digest or 'none'}",
+        "Evaluated target: "
+        + (
+            f"{report.evaluated_target.kind.value}:{report.evaluated_target.digest}"
+            if report.evaluated_target is not None
+            else "none"
+        ),
+        f"Checkout changed: {'yes' if report.checkout_changed else 'no'}",
+        f"Checkout state: {report.checkout_state.value}",
+        f"Required checks: {_markdown_text(required_checks)}",
+        f"Passed checks: {_markdown_text(passed_checks)}",
+        f"Failed checks: {_markdown_text(failed_checks)}",
+        f"Skipped checks: {_markdown_text(skipped_checks)}",
+        f"Evidence: {_markdown_text(report.evidence_path)}",
         "",
     ]
     if manifest.generated_but_not_consumed:
@@ -60,6 +109,16 @@ def render_report(
                 "",
             ]
         )
+    lines.extend(
+        [
+            "## Verified change result",
+            "",
+            "Selected candidate: " + _markdown_text(report.result.selected_candidate_id or "none"),
+            "Applied paths: " + _markdown_text(", ".join(report.result.applied_paths) or "none"),
+            f"Final validation: {report.result.final_validation_status.value}",
+            "",
+        ]
+    )
     if requirements:
         lines.extend(["## Requirements", "", requirements.model_dump_json(indent=2), ""])
     if plan:
@@ -159,9 +218,7 @@ def _render_selection(selection: CandidateSelection | None) -> list[str]:
     if selection is None:
         return [*lines, "Not reached.", ""]
     selected = selection.selected_candidate_id or "none"
-    eligible = _markdown_text(
-        ", ".join(selection.eligible_candidate_ids) or "none"
-    )
+    eligible = _markdown_text(", ".join(selection.eligible_candidate_ids) or "none")
     lines.extend(
         [
             f"- Selected candidate: {_markdown_text(selected)}",
@@ -232,10 +289,7 @@ def _render_recovery(
                 ),
             ]
         )
-    elif (
-        manifest.checkout_state is CheckoutState.APPLIED
-        or manifest.selected_patch_applied
-    ):
+    elif manifest.checkout_state is CheckoutState.APPLIED or manifest.selected_patch_applied:
         paths = ", ".join(manifest.applied_paths) or "affected paths unavailable"
         lines.extend(
             [

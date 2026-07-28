@@ -2,12 +2,87 @@
 
 import json
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
+
+from repogent.mcp_server import create_server
 
 PLUGIN_ROOT = Path("plugins/repogent")
 READINESS_SKILL_PATH = PLUGIN_ROOT / "skills/repository-readiness/SKILL.md"
 VERIFIED_CHANGE_SKILL_PATH = PLUGIN_ROOT / "skills/verified-change/SKILL.md"
 EVALS_PATH = Path("tests/plugin/evals.json")
+
+
+@dataclass(frozen=True)
+class ReleaseIdentity:
+    runtime_version: str
+    plugin_version: str
+    skills: frozenset[str]
+    start_tools: frozenset[str]
+    tools: frozenset[str]
+    select_executor_decision_fields: frozenset[str]
+    validation_target_fields: frozenset[str]
+
+
+def released_identity() -> ReleaseIdentity:
+    project = tomllib.loads(Path("pyproject.toml").read_text())
+    manifest = json.loads((PLUGIN_ROOT / ".codex-plugin/plugin.json").read_text())
+    skills = frozenset(path.name for path in (PLUGIN_ROOT / "skills").iterdir() if path.is_dir())
+    live_tools = create_server()._tool_manager.list_tools()
+    tools_by_name = {tool.name: tool for tool in live_tools}
+    select_executor_parameters = tools_by_name["select_executor"].parameters
+    definitions = select_executor_parameters["$defs"]
+    assert isinstance(definitions, dict)
+    decision_schema = definitions["ValidationDecision"]
+    target_schema = definitions["ValidationTarget"]
+    assert isinstance(decision_schema, dict)
+    assert isinstance(target_schema, dict)
+    decision_properties = decision_schema["properties"]
+    target_properties = target_schema["properties"]
+    assert isinstance(decision_properties, dict)
+    assert isinstance(target_properties, dict)
+
+    return ReleaseIdentity(
+        runtime_version=project["project"]["version"],
+        plugin_version=manifest["version"],
+        skills=skills,
+        start_tools=frozenset(
+            tool.name
+            for tool in live_tools
+            if tool.name in {"inspect_repository_readiness", "start_verified_change"}
+        ),
+        tools=frozenset(tools_by_name),
+        select_executor_decision_fields=frozenset(decision_properties),
+        validation_target_fields=frozenset(target_properties),
+    )
+
+
+def test_release_identity_agrees_across_surfaces() -> None:
+    identity = released_identity()
+
+    assert identity.runtime_version == identity.plugin_version
+    assert identity.skills == frozenset({"repository-readiness", "verified-change"})
+    assert identity.start_tools == frozenset(
+        {"inspect_repository_readiness", "start_verified_change"}
+    )
+    assert identity.tools == frozenset(
+        {
+            "inspect_repository_readiness",
+            "start_verified_change",
+            "get_run",
+            "approve_requirements",
+            "approve_plan",
+            "select_executor",
+            "approve_patch",
+            "cancel_run",
+            "get_report",
+        }
+    )
+    assert identity.select_executor_decision_fields == frozenset(
+        {"run_id", "target", "mode", "option_digest", "decision", "schema_version"}
+    )
+    assert identity.validation_target_fields == frozenset({"kind", "digest", "schema_version"})
+    assert "preview" not in identity.select_executor_decision_fields
 
 
 def test_plugin_manifest_and_mcp_command() -> None:
@@ -98,6 +173,14 @@ def test_verified_change_skill_declares_tools_and_three_gates() -> None:
     for gate_name in ("requirements", "plan", "patch"):
         assert f"{gate_name} gate" in skill.lower()
     assert "digest" in skill.lower()
+
+
+def test_verified_change_skill_teaches_validation_target_wire_contract() -> None:
+    skill = VERIFIED_CHANGE_SKILL_PATH.read_text()
+
+    assert "`ValidationDecision`" in skill
+    assert "`target`: `{kind, digest}`" in skill
+    assert "`ExecutionDecision`" not in skill
 
 
 def test_verified_change_skill_closes_baseline_safety_loopholes() -> None:
@@ -203,9 +286,3 @@ def test_readme_installs_bare_runtime_command_before_plugin_marketplace() -> Non
     assert "Codex Desktop" in readme
     assert readme.index(runtime_install) < readme.index(marketplace_install)
     assert "python -m pip install -e '.[dev]'" in readme
-
-
-def test_ci_wheel_inspection_requires_mcp_server_module() -> None:
-    workflow = Path(".github/workflows/ci.yml").read_text()
-
-    assert "assert 'repogent/mcp_server.py' in names" in workflow

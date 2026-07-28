@@ -24,9 +24,7 @@ def _event(sequence: int, *, data: dict[str, object] | None = None) -> RunEvent:
 
 
 def _canonical_line(event: RunEvent) -> str:
-    return json.dumps(
-        event.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    ) + "\n"
+    return json.dumps(event.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def test_jsonl_event_store_appends_versioned_sanitized_events(tmp_path: Path) -> None:

@@ -6,8 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from repogent.candidates import PatchPreview
-from repogent.domain import ExecutionMode, IsolationLevel
+from repogent.domain import ExecutionMode, IsolationLevel, ValidationTarget
 from repogent.execution import DockerExecutor, Executor, LocalExecutor, ValidationPolicy
 from repogent.mcp_models import ExecutorAvailability, ExecutorOption
 from repogent.preflight import Preflight, PreflightReport, ReadinessStatus
@@ -24,9 +23,7 @@ _COMMAND_REMEDIATION = "Install the required validation command in the selected 
 
 
 class ExecutorSelectionError(RuntimeError):
-    def __init__(
-        self, message: str, *, preflight: PreflightReport | None = None
-    ) -> None:
+    def __init__(self, message: str, *, preflight: PreflightReport | None = None) -> None:
         super().__init__(message)
         self.preflight = preflight
 
@@ -45,15 +42,16 @@ class FixedExecutorSelector:
 
     def select(
         self,
-        preview: PatchPreview,
+        target: ValidationTarget,
+        preview: dict[str, object],
         *,
         timeout_seconds: float,
     ) -> PreparedExecutor:
-        del timeout_seconds
-        if preview is None:
+        del preview, timeout_seconds
+        if target is None:
             from repogent.workflow import ExecutorSelectionRejected
 
-            raise ExecutorSelectionRejected("patch preview is required before selection")
+            raise ExecutorSelectionRejected("validation target is required before selection")
         return self._prepared
 
 
@@ -72,13 +70,13 @@ def validate_executor_isolation(
 
 def option_digest(
     run_id: str,
-    preview_digest: str,
+    target: ValidationTarget,
     mode: ExecutionMode,
     risk_statement: str | None,
 ) -> str:
     payload = {
         "run_id": run_id,
-        "preview_digest": preview_digest,
+        "target": target.model_dump(mode="json"),
         "mode": mode.value,
         "risk_statement": risk_statement,
     }
@@ -112,7 +110,7 @@ class ExecutorRegistry:
     def build_options(
         self,
         run_id: str,
-        preview_digest: str,
+        target: ValidationTarget,
         availability: Sequence[ExecutorAvailability],
     ) -> list[ExecutorOption]:
         return [
@@ -120,9 +118,7 @@ class ExecutorRegistry:
                 mode=item.mode,
                 available=item.available,
                 isolation_level=item.isolation_level,
-                option_digest=option_digest(
-                    run_id, preview_digest, item.mode, item.risk_statement
-                ),
+                option_digest=option_digest(run_id, target, item.mode, item.risk_statement),
                 message=item.message,
                 remediation=item.remediation,
                 risk_statement=item.risk_statement,
@@ -138,9 +134,7 @@ class ExecutorRegistry:
     ) -> PreparedExecutor:
         executor, preflight = self._preflight(root, mode, policy)
         if not preflight.passed:
-            raise ExecutorSelectionError(
-                "selected executor is unavailable", preflight=preflight
-            )
+            raise ExecutorSelectionError("selected executor is unavailable", preflight=preflight)
         return PreparedExecutor(
             mode=mode,
             isolation_level=_isolation_level(mode),
@@ -195,9 +189,7 @@ def _isolation_level(mode: ExecutionMode) -> IsolationLevel:
 
 
 def _remediation(preflight: PreflightReport, mode: ExecutionMode) -> str:
-    executor_check = next(
-        (check for check in preflight.checks if check.name == "executor"), None
-    )
+    executor_check = next((check for check in preflight.checks if check.name == "executor"), None)
     if executor_check is not None and executor_check.status is not ReadinessStatus.PASSED:
         if mode is ExecutionMode.DOCKER and "image" in (executor_check.reason or "").lower():
             return _IMAGE_REMEDIATION

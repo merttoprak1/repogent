@@ -30,9 +30,7 @@ class RoleAgent(Generic[T]):
         self, payload: Mapping[str, Any], *, timeout_seconds: float | None = None
     ) -> ProviderResult[T]:
         last_error: ProviderError | None = None
-        deadline = (
-            time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-        )
+        deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
         for _attempt in range(2):
             try:
                 options: dict[str, Any] = {

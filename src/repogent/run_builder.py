@@ -24,6 +24,7 @@ from repogent.domain import (
     RunStatus,
     WorkflowKind,
     WorkflowOutcome,
+    validated_manifest_update,
 )
 from repogent.events import EventSink
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
@@ -41,9 +42,10 @@ from repogent.preflight import (
     repository_preflight,
 )
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
-from repogent.reporting import render_report
+from repogent.reporting import render_persistent_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
 from repogent.repository_scope import RepositoryScope, RepositoryScopeResolver
+from repogent.run_reports import build_persistent_report
 from repogent.workflow import ExecutorSelector, Workflow
 
 ProviderName = Literal["openai", "codex-cli", "scripted"]
@@ -130,11 +132,14 @@ def build_run(
 
     try:
         scope = RepositoryScopeResolver().resolve(repository)
-        effective_model = options.model or {
-            "openai": "gpt-5.6-sol",
-            "codex-cli": "default",
-            "scripted": "scripted",
-        }[options.provider]
+        effective_model = (
+            options.model
+            or {
+                "openai": "gpt-5.6-sol",
+                "codex-cli": "default",
+                "scripted": "scripted",
+            }[options.provider]
+        )
         policy = ValidationPolicy(scope=scope)
         commands = policy.commands(repository)
         manifest = manifest.model_copy(
@@ -193,13 +198,9 @@ def build_run(
     try:
         model_provider: ModelProvider
         if options.provider == "scripted":
-            model_provider = ScriptedProvider.from_json(
-                str(cast(Path, options.script))
-            )
+            model_provider = ScriptedProvider.from_json(str(cast(Path, options.script)))
         elif options.provider == "codex-cli":
-            codex_provider = CodexCliProvider(
-                model=options.model, target_root=repository
-            )
+            codex_provider = CodexCliProvider(model=options.model, target_root=repository)
             readiness = codex_provider.check_ready()
             store.write_model("provider-readiness", readiness)
             if not readiness.ready:
@@ -249,9 +250,7 @@ def build_run(
             approver=approver,
             patch_policy=PatchPolicy(),
             patch_applier=PatchApplier(),
-            validator=(
-                None if prepared_executor is None else prepared_executor.validator
-            ),
+            validator=(None if prepared_executor is None else prepared_executor.validator),
             executor_selector=executor_selector,
             artifacts=store,
             inspector=RepositoryInspector(),
@@ -275,9 +274,7 @@ def build_run(
     except Exception as error:
         _close_decision_channels(executor_selector, approver)
         terminal = terminalize_failure(store, manifest, str(error))
-        raise _RunConstructionError(
-            str(error), store=store, manifest=terminal
-        ) from error
+        raise _RunConstructionError(str(error), store=store, manifest=terminal) from error
 
     return PreparedRun(
         store=store,
@@ -313,16 +310,33 @@ def terminalize_failure(
         if status is RunStatus.HUMAN_INTERVENTION_REQUIRED
         else None
     )
-    terminal = manifest.model_copy(
-        update={
+    terminal = validated_manifest_update(
+        manifest,
+        {
             "status": status,
             "outcome": outcome,
             "stage": RunStage.FINISHED,
             "reason": reason,
-        }
+        },
     )
     store.update_manifest(terminal)
-    store.write_final("report.md", render_report(terminal, None, None, None, None))
+    persistent_report = build_persistent_report(
+        terminal,
+        None,
+        evidence_path=str(store.root),
+    )
+    store.write_final("report.json", persistent_report.model_dump_json(indent=2))
+    store.write_final(
+        "report.md",
+        render_persistent_report(
+            persistent_report,
+            terminal,
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
     try:
         sequence = 1
         events_path = store.root / "events.jsonl"

@@ -13,6 +13,7 @@ from repogent.candidates import (
     CandidateEvaluator,
     CandidatePolicy,
     CandidateSelector,
+    PatchPreview,
     PatchPreviewer,
     patch_preview_digest,
 )
@@ -37,9 +38,13 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
+    WorkflowKind,
     WorkflowOutcome,
 )
+from repogent.errors import ErrorCode, RetryClass
 from repogent.events import EventSink
 from repogent.executor_selection import PreparedExecutor
 from repogent.localization import PythonLocalizer
@@ -66,8 +71,7 @@ PLAN_OUTPUT = {
 VALID_PATCH_OUTPUT = {
     "summary": "Change value",
     "diff": (
-        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
-        " def value():\n-    return 1\n+    return 2\n"
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 1\n+    return 2\n"
     ),
     "acceptance_criteria_addressed": ["tests pass"],
     "focused_tests": ["pytest"],
@@ -76,8 +80,7 @@ ALTERNATIVE_PATCH_OUTPUT = {
     **VALID_PATCH_OUTPUT,
     "summary": "Change value alternatively",
     "diff": (
-        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
-        " def value():\n-    return 1\n+    return 3\n"
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 1\n+    return 3\n"
     ),
 }
 BROADER_PATCH_OUTPUT = {
@@ -114,9 +117,7 @@ class SequenceValidator:
     def __init__(self, statuses: list[CheckStatus]) -> None:
         self.statuses = statuses
 
-    def run(
-        self, root: Path, *, timeout_seconds: float | None = None
-    ) -> ValidationReport:
+    def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
         del root, timeout_seconds
         status = self.statuses.pop(0)
         return ValidationReport(
@@ -134,18 +135,29 @@ class SequenceValidator:
 class RecordingExecutorSelector:
     def __init__(self, validator: SequenceValidator) -> None:
         self.validator = validator
+        self.targets: list[ValidationTarget] = []
         self.previews: list[object] = []
         self.preview_stages: list[RunStage] = []
         self.workflow: Workflow | None = None
 
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
         assert timeout_seconds > 0
-        self.previews.append(preview)
+        self.targets.append(target)
+        self.previews.append(PatchPreview.model_validate(preview))
         assert self.workflow is not None
         self.preview_stages.append(self.workflow.manifest.stage)
         persisted = json.loads((self.workflow.artifacts.root / "run.json").read_text())
-        assert persisted["preview_digest"] == self.workflow.manifest.preview_digest
+        assert persisted["evaluated_target"] == target.model_dump(mode="json")
+        assert "preview_digest" not in persisted
         assert persisted["verification_status"] == "unvalidated"
+        assert persisted["execution_mode"] is None
+        assert persisted["isolation_level"] is None
         return PreparedExecutor(
             mode=ExecutionMode.LOCAL,
             isolation_level=IsolationLevel.REDUCED_ISOLATION,
@@ -157,9 +169,32 @@ class RecordingExecutorSelector:
 
 
 class MutatingExecutorSelector(RecordingExecutorSelector):
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
-        prepared = super().select(preview, timeout_seconds=timeout_seconds)
-        preview.candidate.proposal.diff = (  # type: ignore[attr-defined]
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
+        target.digest = "f" * 64
+        return prepared
+
+
+class NestedPreviewMutatingExecutorSelector(RecordingExecutorSelector):
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
+        candidate = preview["candidate"]
+        assert isinstance(candidate, dict)
+        proposal = candidate["proposal"]
+        assert isinstance(proposal, dict)
+        proposal["diff"] = (
             "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
             " def value():\n-    return 1\n+    return 99\n"
         )
@@ -167,8 +202,14 @@ class MutatingExecutorSelector(RecordingExecutorSelector):
 
 
 class InvalidIsolationExecutorSelector(RecordingExecutorSelector):
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
-        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
         return PreparedExecutor(
             mode=ExecutionMode.LOCAL,
             isolation_level=IsolationLevel.ISOLATED,
@@ -178,8 +219,14 @@ class InvalidIsolationExecutorSelector(RecordingExecutorSelector):
 
 
 class DockerIsolatedExecutorSelector(RecordingExecutorSelector):
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
-        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
         return PreparedExecutor(
             mode=ExecutionMode.DOCKER,
             isolation_level=IsolationLevel.ISOLATED,
@@ -312,6 +359,26 @@ def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) 
     )
 
 
+def test_terminalization_revalidates_a_read_only_workflow_outcome(tmp_path: Path) -> None:
+    """Catch terminalization bypassing the manifest capability-policy validator."""
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[],
+        validation_statuses=[],
+    )
+    workflow.manifest = RunManifest(
+        run_id="run-1",
+        request="review",
+        kind=WorkflowKind.PATCH_REVIEW,
+        stage=RunStage.REVIEWED,
+        selected_patch_applied=True,
+        final_validation_status=FinalValidationStatus.PASSED,
+    )
+
+    with pytest.raises(ValueError, match="applied is not valid for patch_review"):
+        workflow._set_final_manifest(RunStatus.COMPLETED, None)
+
+
 def test_workflow_persists_unvalidated_preview_before_executor_selection(
     tmp_path: Path,
 ) -> None:
@@ -331,10 +398,9 @@ def test_workflow_persists_unvalidated_preview_before_executor_selection(
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
     assert len(selector.previews) == 1
     assert selector.preview_stages == [RunStage.PATCH_PREVIEWED]
-    assert manifest.preview_digest is not None
-    preview = json.loads(
-        next(workflow.artifacts.root.glob("patch-preview-*.json")).read_text()
-    )
+    assert manifest.evaluated_target is not None
+    assert manifest.evaluated_target.kind is ValidationTargetKind.PATCH
+    preview = json.loads(next(workflow.artifacts.root.glob("patch-preview-*.json")).read_text())
     assert preview["verification_status"] == "unvalidated"
     assert preview["candidate"]["candidate_id"] == "candidate-1"
 
@@ -420,9 +486,7 @@ def test_rejected_static_preview_accounts_completed_provider_once(tmp_path: Path
                 ),
             )
 
-    provider = AccountingProvider(
-        [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT]
-    )
+    provider = AccountingProvider([REQUIREMENTS_OUTPUT, PLAN_OUTPUT, CUSTOM_SECRET_PATCH_OUTPUT])
     workflow.roles = RoleSet.from_provider(provider)
 
     manifest = workflow.run()
@@ -438,7 +502,7 @@ def test_rejected_static_preview_accounts_completed_provider_once(tmp_path: Path
     assert not list(workflow.artifacts.root.glob("patch-preview-*.json"))
 
 
-def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
+def test_candidate_artifact_is_exposed_only_after_validation_target_is_durable(
     tmp_path: Path,
 ) -> None:
     workflow = make_phase2_workflow(
@@ -446,13 +510,13 @@ def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
         outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
         validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
     )
-    persisted_digests: list[str | None] = []
+    persisted_targets: list[dict[str, object] | None] = []
     original_write = workflow.artifacts.write_model
 
     def record_manifest_binding(name: str, model: object) -> Path:
         if name == "candidate":
             manifest = json.loads((workflow.artifacts.root / "run.json").read_text())
-            persisted_digests.append(manifest["preview_digest"])
+            persisted_targets.append(manifest["evaluated_target"])
         return original_write(name, model)  # type: ignore[arg-type]
 
     workflow.artifacts.write_model = record_manifest_binding  # type: ignore[method-assign]
@@ -460,7 +524,7 @@ def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
     manifest = workflow.run()
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
-    assert persisted_digests == [manifest.preview_digest]
+    assert persisted_targets == [manifest.evaluated_target.model_dump(mode="json")]
 
 
 def test_selector_mutation_fails_before_candidate_evaluation(tmp_path: Path) -> None:
@@ -472,6 +536,29 @@ def test_selector_mutation_fails_before_candidate_evaluation(tmp_path: Path) -> 
     validator = workflow.validator
     assert isinstance(validator, SequenceValidator)
     selector = MutatingExecutorSelector(validator)
+    selector.workflow = workflow
+    workflow.executor_selector = selector
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.reason == "validation target changed after persistence"
+    assert validator.statuses == [CheckStatus.PASSED]
+    assert workflow.candidate_evidence == []
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+
+
+def test_nested_selector_preview_mutation_fails_before_candidate_evaluation(
+    tmp_path: Path,
+) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+    )
+    validator = workflow.validator
+    assert isinstance(validator, SequenceValidator)
+    selector = NestedPreviewMutatingExecutorSelector(validator)
     selector.workflow = workflow
     workflow.executor_selector = selector
 
@@ -526,6 +613,13 @@ def test_each_repair_gets_a_new_preview_and_executor_selection(tmp_path: Path) -
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
     assert len(selector.previews) == 2
+    assert [target.kind for target in selector.targets] == [
+        ValidationTargetKind.PATCH,
+        ValidationTargetKind.PATCH,
+    ]
+    assert [target.digest for target in selector.targets] == [
+        patch_preview_digest(preview) for preview in selector.previews
+    ]
     assert [preview.candidate.candidate_id for preview in selector.previews] == [  # type: ignore[attr-defined]
         "candidate-1",
         "candidate-2",
@@ -533,7 +627,7 @@ def test_each_repair_gets_a_new_preview_and_executor_selection(tmp_path: Path) -
     assert len({patch_preview_digest(preview) for preview in selector.previews}) == 2  # type: ignore[arg-type]
 
 
-def test_selected_candidate_restores_its_own_preview_digest(tmp_path: Path) -> None:
+def test_selected_candidate_restores_its_own_validation_target(tmp_path: Path) -> None:
     workflow = make_phase2_workflow(
         tmp_path,
         outputs=[
@@ -556,8 +650,9 @@ def test_selected_candidate_restores_its_own_preview_digest(tmp_path: Path) -> N
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
     assert manifest.selected_candidate_id == "candidate-1"
-    assert manifest.preview_digest == patch_preview_digest(selector.previews[0])  # type: ignore[arg-type]
-    assert manifest.preview_digest != patch_preview_digest(selector.previews[1])  # type: ignore[arg-type]
+    assert manifest.evaluated_target is not None
+    assert manifest.evaluated_target.digest == patch_preview_digest(selector.previews[0])  # type: ignore[arg-type]
+    assert manifest.evaluated_target.digest != patch_preview_digest(selector.previews[1])  # type: ignore[arg-type]
 
 
 def test_final_patch_approval_contains_passed_executor_evidence(tmp_path: Path) -> None:
@@ -794,9 +889,7 @@ def test_candidate_and_final_validation_run_only_in_disposable_roots(tmp_path: P
         def __init__(self) -> None:
             self.roots: list[Path] = []
 
-        def run(
-            self, root: Path, *, timeout_seconds: float | None = None
-        ) -> ValidationReport:
+        def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
             del timeout_seconds
             self.roots.append(root)
             (root / "other.py").write_text("validator side effect\n")
@@ -1144,9 +1237,7 @@ def test_generated_role_output_is_persisted_before_budget_enforcement(
         validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
         budget=Budget(max_tokens=5),
     )
-    provider = MeteredProvider(
-        [REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT]
-    )
+    provider = MeteredProvider([REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT])
     workflow.roles = RoleSet.from_provider(provider)
 
     manifest = workflow.run()
@@ -1155,9 +1246,10 @@ def test_generated_role_output_is_persisted_before_budget_enforcement(
     assert manifest.reason == "token budget exceeded"
     assert artifact_name in manifest.generated_but_not_consumed
     assert list(workflow.artifacts.root.glob(f"{artifact_name}-*.json"))
-    assert f"Generated but not consumed: {artifact_name}" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        f"Generated but not consumed: {artifact_name}"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
     assert len(provider.calls) == cross_at
     if cross_at == 3:
         assert manifest.candidate_ids == ["candidate-1"]
@@ -1246,9 +1338,7 @@ def test_cancellation_after_durable_apply_reports_applied_checkout(tmp_path: Pat
         outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
         validation_statuses=[CheckStatus.PASSED],
     )
-    workflow.cancel_requested = (
-        lambda: workflow.manifest.checkout_state is CheckoutState.APPLIED
-    )
+    workflow.cancel_requested = lambda: workflow.manifest.checkout_state is CheckoutState.APPLIED
 
     manifest = workflow.run()
     report = (workflow.artifacts.root / "report.md").read_text()
@@ -1332,9 +1422,10 @@ def test_post_apply_artifact_failure_preserves_truthful_recovery_state(
     assert manifest.selected_patch_applied is True
     assert manifest.applied_paths == ["app.py"]
     assert manifest.final_validation_status is FinalValidationStatus.INTERRUPTED
-    assert "Real checkout patch: remains applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        "Real checkout patch: remains applied"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
 
 
 def test_post_apply_qa_interrupt_keeps_applied_patch_and_final_validation_state(
@@ -1379,9 +1470,10 @@ def test_post_apply_qa_provider_failure_keeps_applied_patch_and_guidance(
     assert manifest.reason == "QA provider unavailable"
     assert manifest.selected_patch_applied is True
     assert manifest.final_validation_status is FinalValidationStatus.PASSED
-    assert "Real checkout patch: remains applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        "Real checkout patch: remains applied"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
 
 
 def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
@@ -1400,9 +1492,7 @@ def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
         status=ProviderCallStatus.AUTHENTICATION_FAILED,
         structured_output_valid=False,
     )
-    error = ProviderError(
-        "Codex CLI is not authenticated", retryable=False, evidence=evidence
-    )
+    error = ProviderError("Codex CLI is not authenticated", retryable=False, evidence=evidence)
 
     class FailingProvider:
         def generate(self, **_kwargs: object) -> object:
@@ -1415,6 +1505,18 @@ def test_non_retryable_provider_failure_writes_evidence_and_requires_human(
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
     failure = json.loads((workflow.artifacts.root / "provider-failure-001.json").read_text())
     assert failure == evidence.model_dump(mode="json")
+    persistent_report = json.loads((workflow.artifacts.root / "report.json").read_text())
+    assert persistent_report["errors"] == [
+        {
+            "code": ErrorCode.PROVIDER_UNAVAILABLE.value,
+            "message": "The model provider could not complete the run.",
+            "remediation": "Check provider readiness and retry the run when it is available.",
+            "retry": RetryClass.NON_RETRYABLE.value,
+            "run_id": manifest.run_id,
+            "run_kind": manifest.kind.value,
+            "schema_version": "1",
+        }
+    ]
 
 
 def test_retryable_provider_failure_writes_final_attempt_evidence(
@@ -1517,9 +1619,10 @@ def test_post_apply_event_failure_keeps_real_checkout_state_in_manifest_and_repo
     assert manifest.final_validation_status is FinalValidationStatus.PASSED
     persisted = json.loads((workflow.artifacts.root / "run.json").read_text())
     assert persisted["selected_patch_applied"] is True
-    assert "Real checkout patch: remains applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert (
+        "Real checkout patch: remains applied"
+        in (workflow.artifacts.root / "report.md").read_text()
+    )
 
 
 def test_terminal_event_keyboard_interrupt_is_durably_recorded_without_recursion(
@@ -1573,9 +1676,7 @@ def test_real_apply_interrupt_restores_checkout_and_cancels_as_not_applied(
     assert manifest.selected_patch_applied is False
     assert manifest.applied_paths == []
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
-    assert "Real checkout patch: not applied" in (
-        workflow.artifacts.root / "report.md"
-    ).read_text()
+    assert "Real checkout patch: not applied" in (workflow.artifacts.root / "report.md").read_text()
 
 
 def test_real_apply_interrupt_with_failed_restore_reports_recovery_unknown(
@@ -1594,9 +1695,7 @@ def test_real_apply_interrupt_with_failed_restore_reports_recovery_unknown(
         if root.resolve() == workflow.root.resolve() and not check:
             raise KeyboardInterrupt
 
-    def fail_real_restore(
-        root: Path, snapshots: object, missing_directories: object
-    ) -> None:
+    def fail_real_restore(root: Path, snapshots: object, missing_directories: object) -> None:
         if root.resolve() == workflow.root.resolve():
             raise RuntimeError("real checkout restore failed")
         original_restore(root, snapshots, missing_directories)  # type: ignore[arg-type]

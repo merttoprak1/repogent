@@ -83,9 +83,9 @@ def test_preflight_blocks_when_required_validation_command_is_unavailable(tmp_pa
     nested_test.parent.mkdir(parents=True)
     nested_test.write_text("def test_value(): pass\n")
 
-    report = Preflight(
-        FakeExecutor(ready=True, unavailable={"pytest"}), ValidationPolicy()
-    ).run(repository)
+    report = Preflight(FakeExecutor(ready=True, unavailable={"pytest"}), ValidationPolicy()).run(
+        repository
+    )
 
     pytest_check = next(check for check in report.checks if check.name == "command:pytest")
     assert report.passed is False
@@ -97,9 +97,9 @@ def test_preflight_blocks_when_required_validation_command_is_unavailable(tmp_pa
 def test_preflight_warns_when_optional_validation_command_is_unavailable(tmp_path: Path) -> None:
     repository = initialize_git_repository(tmp_path)
 
-    report = Preflight(
-        FakeExecutor(ready=True, unavailable={"ruff"}), ValidationPolicy()
-    ).run(repository)
+    report = Preflight(FakeExecutor(ready=True, unavailable={"ruff"}), ValidationPolicy()).run(
+        repository
+    )
 
     ruff_check = next(check for check in report.checks if check.name == "command:ruff")
     assert report.passed is True
@@ -118,9 +118,7 @@ def test_docker_preflight_warns_when_optional_module_is_missing_inside_image(
         if argv[1:3] == ["image", "inspect"]:
             return execution_module._ProcessResult(0, "", "", False)
         module = argv[-1]
-        return execution_module._ProcessResult(
-            1 if module == "ruff" else 0, "", "", False
-        )
+        return execution_module._ProcessResult(1 if module == "ruff" else 0, "", "", False)
 
     monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
 

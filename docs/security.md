@@ -15,6 +15,14 @@ Repository content and tests are untrusted. Repogent reduces authority; it does 
   patch digest binds directly to the exact displayed diff. The patch approval
   tool is non-idempotent and must not be retried blindly after uncertain
   delivery.
+- Runtime capability policy is enforced independently of skills and MCP tool
+  names. Every approval, executor selection, and patch application is checked
+  against the session's `WorkflowKind`; a skill can describe a tool but cannot
+  grant authority that the runtime policy denies. Wrong-kind operations return
+  sanitized, versioned typed errors with an explicit retry class. Clients may
+  repeat `read_only` requests, must reconcile evidence before retrying
+  `reconcile_first` decisions, and must not retry `non_retryable` policy
+  failures as if they could change authority.
 - A canonical repository root has at most one active MCP run. Aliases resolve
   to the same lock, and the reservation is released only when terminal state is
   safely publishable. This prevents two chat requests from racing mutations in
@@ -39,6 +47,11 @@ Repository content and tests are untrusted. Repogent reduces authority; it does 
 - Docker is the default, disables network access, mounts the checkout read-only for validation, uses a read-only container filesystem, and applies CPU, memory, PID, and time limits. Preflight probes each module or executable inside the fixed image without mounting the repository and caches readiness per image and tool.
 - Preflight runs before provider construction. It fingerprints repository/configuration state, checks every fixed validation command, and stops without model spend when a required command is unavailable; optional tools produce warnings. Bounded pytest discovery fails closed on traversal limits, malformed or oversized configuration, races, and filesystem access uncertainty. Recognized root configuration is read with fd-relative metadata and no-follow checks where available; only a stable, bounded regular file is accepted, so symlinks, FIFOs, devices, sockets, and other special files are not read.
 - The local executor is chosen explicitly through the digest-bound execution gate, has a minimal environment, and is weaker than Docker; Docker never silently falls back to local execution, and no target-repository code runs before an executor is selected.
+- Executor consent binds to a typed validation target (its kind and current
+  digest), while the preview is only the bounded display artifact shown to the
+  operator. This prevents a substituted preview payload from authorizing
+  validation and keeps future diff- and commit-bound read-only workflows within
+  the same consent boundary.
 - A local executor's command allowlist is not isolation. The allowlist only bounds which commands run; it does not sandbox them. Local tests execute on the host and may read, write, or reach any resource the host user is already authorized to access — the network, the filesystem outside the checkout, and ambient credentials. Local runs are therefore always labelled `REDUCED ISOLATION`; only a Docker run whose required checks pass may be labelled `ISOLATED VERIFIED`, and a local result is never presented as isolated.
 - Host credentials are not forwarded. Provider context has a deterministic global serialized-size ceiling: inventory bodies are excluded, localization is top-ranked and complete-line bounded, and a structured allocator progressively compacts low-priority bulk data while retaining critical identifiers, statuses, reasons, and explicit truncation counts. Configured and common secret forms are recursively redacted at the live-provider boundary and structurally sanitized before JSON persistence.
 - The optional Codex CLI provider runs `codex exec` from a provider-owned temporary directory with ephemeral, read-only-sandbox, and ignore-user-config/rules flags. It keeps its prompt, schema, output, and diagnostics in owner-only temporary files; refuses a Codex executable or temporary directory under the target repository; filters target-root paths from the child environment and provider payload; and records readiness and call evidence. This complements Codex's own controls, but does not provide strict OS-enforced read isolation: a local subprocess still has whatever host access the operating system and the Codex runtime permit.

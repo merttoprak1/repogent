@@ -10,7 +10,19 @@ from typing import Protocol, cast
 
 from repogent.approval_gate import ApprovalGateError, GateApprover
 from repogent.approvals import Approver
-from repogent.domain import PendingApproval, RunManifest, RunStatus
+from repogent.capabilities import (
+    CapabilityPolicyError,
+    CapabilityRegistry,
+    RunOperation,
+)
+from repogent.domain import (
+    ApprovalKind,
+    PendingApproval,
+    RunManifest,
+    RunStatus,
+    WorkflowKind,
+)
+from repogent.errors import ErrorCode, ErrorDetail, RepogentError, RetryClass
 from repogent.execution import ValidationPolicy
 from repogent.execution_gate import (
     ExecutionGateError,
@@ -19,11 +31,11 @@ from repogent.execution_gate import (
 )
 from repogent.executor_selection import ExecutorRegistry
 from repogent.mcp_models import (
-    ExecutionDecision,
     PendingExecutionChoice,
     RunDecision,
     RunReport,
     RunSnapshot,
+    ValidationDecision,
     VerifiedChangeStart,
 )
 from repogent.run_builder import (
@@ -32,6 +44,7 @@ from repogent.run_builder import (
     RunOptions,
     build_run,
 )
+from repogent.run_reports import PersistentRunReport
 from repogent.sanitization import redact_text, sanitize_data
 
 _ORIGINAL_OS_OPEN = os.open
@@ -40,6 +53,84 @@ _ORIGINAL_OS_STAT = os.stat
 
 class SessionError(RuntimeError):
     pass
+
+
+_DECISION_OPERATIONS = {
+    ApprovalKind.REQUIREMENTS: RunOperation.APPROVE_REQUIREMENTS,
+    ApprovalKind.PLAN: RunOperation.APPROVE_PLAN,
+    ApprovalKind.PATCH: RunOperation.APPLY_PATCH,
+}
+
+
+def _typed_error(
+    *,
+    code: ErrorCode,
+    message: str,
+    remediation: str | None,
+    retry: RetryClass,
+    run_id: str | None = None,
+    run_kind: WorkflowKind | None = None,
+) -> RepogentError:
+    return RepogentError(
+        ErrorDetail(
+            code=code,
+            message=message,
+            remediation=remediation,
+            retry=retry,
+            run_id=run_id,
+            run_kind=run_kind,
+        )
+    )
+
+
+def _decision_error(
+    error: ApprovalGateError,
+    *,
+    run_id: str,
+    run_kind: WorkflowKind,
+) -> RepogentError:
+    if error.code is ErrorCode.STALE_DIGEST:
+        return _typed_error(
+            code=ErrorCode.STALE_DIGEST,
+            message="The decision does not match the current pending artifact.",
+            remediation="Get the latest run state before deciding again.",
+            retry=RetryClass.RECONCILE_FIRST,
+            run_id=run_id,
+            run_kind=run_kind,
+        )
+    return _typed_error(
+        code=ErrorCode.POLICY,
+        message="The decision cannot be applied to the current run state.",
+        remediation="Get the latest run state before deciding again.",
+        retry=RetryClass.RECONCILE_FIRST,
+        run_id=run_id,
+        run_kind=run_kind,
+    )
+
+
+def _executor_error(
+    error: ExecutionGateError | None,
+    *,
+    run_id: str,
+    run_kind: WorkflowKind,
+) -> RepogentError:
+    if error is not None and error.code is ErrorCode.STALE_DIGEST:
+        return _typed_error(
+            code=ErrorCode.STALE_DIGEST,
+            message="The executor decision does not match the current validation target.",
+            remediation="Get the latest run state before selecting an executor again.",
+            retry=RetryClass.RECONCILE_FIRST,
+            run_id=run_id,
+            run_kind=run_kind,
+        )
+    return _typed_error(
+        code=ErrorCode.EXECUTOR_UNAVAILABLE,
+        message="Executor selection is unavailable for the current run state.",
+        remediation="Get the latest run state and select an available executor.",
+        retry=RetryClass.RECONCILE_FIRST,
+        run_id=run_id,
+        run_kind=run_kind,
+    )
 
 
 class _CancellationEvent(threading.Event):
@@ -123,10 +214,7 @@ class RunSession:
             with self._operation_lock:
                 self._refresh_execution_pending_locked()
                 manifest = self._result or self.prepared.workflow.manifest
-                if (
-                    manifest.status is RunStatus.RUNNING
-                    or self._root_released.is_set()
-                ):
+                if manifest.status is RunStatus.RUNNING or self._root_released.is_set():
                     return self._snapshot(manifest)
             self._root_released.wait()
 
@@ -140,19 +228,31 @@ class RunSession:
                     decision.feedback,
                 )
             except ApprovalGateError as error:
-                raise SessionError(str(error)) from error
+                raise _decision_error(
+                    error,
+                    run_id=decision.run_id,
+                    run_kind=self.prepared.workflow.manifest.kind,
+                ) from error
             self._pending = None
         return self.wait_for_change()
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
         with self._operation_lock:
             if self.executor_gate is None:
-                raise SessionError("no executor selection is pending")
+                raise _executor_error(
+                    None,
+                    run_id=decision.run_id,
+                    run_kind=self.prepared.workflow.manifest.kind,
+                )
             executor_gate = self.executor_gate
         try:
             submitted_generation = executor_gate.submit(decision)
         except ExecutionGateError as error:
-            raise SessionError(str(error)) from error
+            raise _executor_error(
+                error,
+                run_id=decision.run_id,
+                run_kind=self.prepared.workflow.manifest.kind,
+            ) from error
         with self._operation_lock:
             if self._execution_generation == submitted_generation:
                 self._pending_execution = None
@@ -212,17 +312,11 @@ class RunSession:
                     if execution_generation > self._execution_generation:
                         self._execution_generation = execution_generation
                         self._pending_execution = execution_pending
-                    if (
-                        self._pending is not None
-                        and self._pending_execution is not None
-                    ):
+                    if self._pending is not None and self._pending_execution is not None:
                         raise SessionError(
                             "content approval and executor selection cannot both be pending"
                         )
-                    if (
-                        self._pending is not None
-                        or self._pending_execution is not None
-                    ):
+                    if self._pending is not None or self._pending_execution is not None:
                         return self._snapshot()
                 self._done.wait(self._WAIT_INTERVAL_SECONDS)
             with self._operation_lock:
@@ -240,6 +334,12 @@ class RunSession:
         return self._done.is_set()
 
     def read_report(self) -> str:
+        return self._read_report_file("report.md", max_characters=64_000)
+
+    def read_report_data(self) -> str:
+        return self._read_report_file("report.json", max_characters=1_000_000)
+
+    def _read_report_file(self, filename: str, *, max_characters: int) -> str:
         if not _supports_secure_report_access():
             raise SessionError("secure report access is unavailable on this platform")
         root_descriptor = -1
@@ -265,14 +365,14 @@ class RunSession:
                 raise SessionError("run evidence directory changed while it was opened")
 
             inspected_report = os.stat(
-                "report.md",
+                filename,
                 dir_fd=root_descriptor,
                 follow_symlinks=False,
             )
             if not stat.S_ISREG(inspected_report.st_mode):
                 raise SessionError("run report must be a regular file")
             report_descriptor = os.open(
-                "report.md",
+                filename,
                 _read_flags(),
                 dir_fd=root_descriptor,
             )
@@ -288,7 +388,7 @@ class RunSession:
                 encoding="utf-8",
             ) as handle:
                 report_descriptor = -1
-                return handle.read(64_001)
+                return handle.read(max_characters + 1)
         except SessionError:
             raise
         except (OSError, UnicodeError) as error:
@@ -324,20 +424,14 @@ class RunSession:
         pending = None
         pending_execution = None
         if not terminal:
-            pending = (
-                self._pending.model_copy(deep=True)
-                if self._pending is not None
-                else None
-            )
+            pending = self._pending.model_copy(deep=True) if self._pending is not None else None
             pending_execution = (
                 self._pending_execution.model_copy(deep=True)
                 if self._pending_execution is not None
                 else None
             )
         if pending is not None and pending_execution is not None:
-            raise SessionError(
-                "content approval and executor selection cannot both be pending"
-            )
+            raise SessionError("content approval and executor selection cannot both be pending")
         snapshot = RunSnapshot(
             run_id=manifest.run_id,
             kind=manifest.kind,
@@ -426,19 +520,19 @@ class SessionManager:
         builder: RunBuilder = build_run,
         executor_registry: ExecutorRegistry | None = None,
         executor_inspection_coordinator: ExecutorInspectionCoordinator | None = None,
+        registry: CapabilityRegistry = CapabilityRegistry.defaults(),  # noqa: B008
         shutdown_timeout_seconds: float = 10.0,
     ) -> None:
         self._builder = builder
         self._executor_registry = (
-            executor_registry
-            if executor_registry is not None
-            else ExecutorRegistry()
+            executor_registry if executor_registry is not None else ExecutorRegistry()
         )
         self._executor_inspection_coordinator = (
             executor_inspection_coordinator
             if executor_inspection_coordinator is not None
             else ExecutorInspectionCoordinator()
         )
+        self._capability_registry = registry
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._lock = threading.RLock()
         self._sessions: dict[str, RunSession] = {}
@@ -455,12 +549,8 @@ class SessionManager:
             if root in self._active_roots:
                 active_run = self._active_roots[root]
                 if active_run is None:
-                    raise SessionError(
-                        "another run is being prepared for this repository"
-                    )
-                raise SessionError(
-                    f"repository already has an active run: {active_run}"
-                )
+                    raise SessionError("another run is being prepared for this repository")
+                raise SessionError(f"repository already has an active run: {active_run}")
             self._active_roots[root] = None
 
         registered = False
@@ -507,9 +597,7 @@ class SessionManager:
             approver = cast(GateApprover, prepared.approver)
             if request.executor == "deferred":
                 if executor_gate is None or prepared.executor_selector is not executor_gate:
-                    raise SessionError(
-                        "deferred run did not retain the manager execution gate"
-                    )
+                    raise SessionError("deferred run did not retain the manager execution gate")
             elif executor_gate is not None:
                 raise SessionError("non-deferred run constructed an execution gate")
             session = RunSession(
@@ -562,10 +650,16 @@ class SessionManager:
         return self._get_session(run_id).snapshot()
 
     def decide(self, decision: RunDecision) -> RunSnapshot:
-        return self._get_session(decision.run_id).decide(decision)
+        session = self._get_session(decision.run_id)
+        snapshot = session.snapshot()
+        self._require_operation(snapshot, _DECISION_OPERATIONS[decision.kind])
+        return session.decide(decision)
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
-        return self._get_session(decision.run_id).select_executor(decision)
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
+        session = self._get_session(decision.run_id)
+        snapshot = session.snapshot()
+        self._require_operation(snapshot, RunOperation.SELECT_EXECUTOR)
+        return session.select_executor(decision)
 
     def cancel(self, run_id: str) -> RunSnapshot:
         return self._get_session(run_id).cancel()
@@ -575,17 +669,28 @@ class SessionManager:
         if not session.is_done():
             raise SessionError("run is not terminal")
         snapshot = session.snapshot()
-        report = session.read_report()
-        if len(report) > 64_000:
+        report_data = session.read_report_data()
+        if len(report_data) > 1_000_000:
+            raise SessionError("run report data exceeds 1,000,000 characters")
+        try:
+            data = PersistentRunReport.model_validate_json(report_data)
+        except ValueError as error:
+            raise SessionError("run report data is invalid") from error
+        if (
+            data.run_id != run_id
+            or data.kind is not snapshot.kind
+            or data.status is not snapshot.status
+            or data.outcome is not snapshot.outcome
+            or data.checkout_state is not snapshot.checkout_state
+            or data.evidence_path != snapshot.evidence_path
+        ):
+            raise SessionError("run report data does not match terminal run state")
+        markdown = session.read_report()
+        if len(markdown) > 64_000:
             raise SessionError("run report exceeds 64,000 characters")
         return RunReport(
-            run_id=run_id,
-            kind=snapshot.kind,
-            outcome=snapshot.outcome,
-            status=snapshot.status,
-            checkout_state=snapshot.checkout_state,
-            evidence_path=snapshot.evidence_path,
-            report=redact_text(report),
+            data=data,
+            markdown=redact_text(markdown),
         )
 
     def shutdown(self) -> None:
@@ -615,8 +720,31 @@ class SessionManager:
         with self._lock:
             try:
                 return self._sessions[run_id]
-            except KeyError as error:
-                raise SessionError(f"unknown run: {run_id}") from error
+            except KeyError:
+                raise _typed_error(
+                    code=ErrorCode.UNKNOWN_RUN,
+                    message="No run exists for the supplied run ID.",
+                    remediation="Use a current run ID from an active or completed run.",
+                    retry=RetryClass.NON_RETRYABLE,
+                    run_id=run_id,
+                ) from None
+
+    def _require_operation(
+        self,
+        snapshot: RunSnapshot,
+        operation: RunOperation,
+    ) -> None:
+        try:
+            self._capability_registry.require(snapshot.kind, operation)
+        except CapabilityPolicyError:
+            raise _typed_error(
+                code=ErrorCode.OPERATION_NOT_ALLOWED,
+                message="This operation is not allowed for the run kind.",
+                remediation="Use an operation supported by the run capability.",
+                retry=RetryClass.NON_RETRYABLE,
+                run_id=snapshot.run_id,
+                run_kind=snapshot.kind,
+            ) from None
 
     def _release_root(self, run_id: str, root: Path) -> None:
         with self._lock:

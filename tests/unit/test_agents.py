@@ -31,9 +31,7 @@ def test_role_agent_does_not_retry_non_retryable_provider_error() -> None:
         status=ProviderCallStatus.AUTHENTICATION_FAILED,
         structured_output_valid=False,
     )
-    error = ProviderError(
-        "Codex CLI is not authenticated", retryable=False, evidence=evidence
-    )
+    error = ProviderError("Codex CLI is not authenticated", retryable=False, evidence=evidence)
 
     class FailingProvider:
         calls = 0

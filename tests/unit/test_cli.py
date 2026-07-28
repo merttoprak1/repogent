@@ -60,9 +60,7 @@ def test_run_delegates_construction_to_shared_builder(
                     message="builder event",
                 )
             )
-            return type(
-                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
-            )()
+            return type("Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED})()
 
     class FakeStore:
         root = evidence / "run-test"
@@ -84,9 +82,7 @@ def test_run_delegates_construction_to_shared_builder(
         captured["options"] = options
         captured["approver_factory"] = approver_factory
         captured["events"] = events
-        return type(
-            "Prepared", (), {"workflow": FakeWorkflow(events), "store": FakeStore()}
-        )()
+        return type("Prepared", (), {"workflow": FakeWorkflow(events), "store": FakeStore()})()
 
     monkeypatch.setattr(cli, "build_run", fake_build_run, raising=False)
 
@@ -129,9 +125,7 @@ def test_run_without_executor_still_builds_docker_mode(
             self.events = events
 
         def run(self) -> object:
-            return type(
-                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
-            )()
+            return type("Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED})()
 
     class FakeStore:
         root = evidence / "run-test"
@@ -147,9 +141,7 @@ def test_run_without_executor_still_builds_docker_mode(
         events: object,
     ) -> object:
         captured["options"] = options
-        return type(
-            "Prepared", (), {"workflow": FakeWorkflow(events), "store": FakeStore()}
-        )()
+        return type("Prepared", (), {"workflow": FakeWorkflow(events), "store": FakeStore()})()
 
     monkeypatch.setattr(cli, "build_run", fake_build_run, raising=False)
 
@@ -191,9 +183,7 @@ def test_explicit_local_cli_never_uses_deferred_gate(
             captured["executor_selector"] = kwargs["executor_selector"]
 
         def run(self) -> object:
-            return type(
-                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
-            )()
+            return type("Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED})()
 
     monkeypatch.setattr(run_builder, "Preflight", lambda *_args: PassingPreflight())
     monkeypatch.setattr(run_builder, "OpenAIProvider", lambda **_kwargs: object())
@@ -423,13 +413,9 @@ def test_run_constructs_ready_codex_after_preflight_and_records_default_model(
             captured["workflow_provider"] = kwargs["roles"]
 
         def run(self) -> object:
-            return type(
-                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
-            )()
+            return type("Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED})()
 
-    def record_fingerprint(
-        provider: str, model: str, executor: str, commands: object
-    ) -> str:
+    def record_fingerprint(provider: str, model: str, executor: str, commands: object) -> str:
         captured["fingerprint"] = (provider, model, executor, commands)
         return "fingerprint"
 
@@ -628,13 +614,12 @@ def test_run_uses_external_default_evidence_directory(
             },
         )(),
     )
+
     def fake_openai_provider(*, model: str) -> object:
         captured["model"] = model
         return object()
 
-    def record_fingerprint(
-        provider: str, model: str, executor: str, commands: object
-    ) -> str:
+    def record_fingerprint(provider: str, model: str, executor: str, commands: object) -> str:
         captured["fingerprint"] = (provider, model, executor, commands)
         return "fingerprint"
 
@@ -671,13 +656,9 @@ def test_run_fingerprints_scripted_provider_with_scripted_model(
             pass
 
         def run(self) -> object:
-            return type(
-                "Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED}
-            )()
+            return type("Result", (), {"run_id": "run-test", "status": RunStatus.COMPLETED})()
 
-    def record_fingerprint(
-        provider: str, model: str, executor: str, commands: object
-    ) -> str:
+    def record_fingerprint(provider: str, model: str, executor: str, commands: object) -> str:
         captured["fingerprint"] = (provider, model, executor, commands)
         return "fingerprint"
 
@@ -766,9 +747,7 @@ def test_run_blocks_required_missing_pytest_before_provider_construction(
     def provider_must_not_be_constructed(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("provider construction must be blocked by preflight")
 
-    monkeypatch.setattr(
-        run_builder, "LocalExecutor", lambda **_kwargs: MissingPytestExecutor()
-    )
+    monkeypatch.setattr(run_builder, "LocalExecutor", lambda **_kwargs: MissingPytestExecutor())
     monkeypatch.setattr(run_builder, "OpenAIProvider", provider_must_not_be_constructed)
 
     result = runner.invoke(
@@ -908,8 +887,7 @@ def test_run_reports_workflow_construction_failure_like_pre_refactor_cli(
     run_directory = next(evidence.iterdir())
     assert result.exit_code == 2
     assert result.output == (
-        f"Run {run_directory.name}: human_intervention_required\n"
-        f"Evidence: {run_directory}\n"
+        f"Run {run_directory.name}: human_intervention_required\nEvidence: {run_directory}\n"
     )
     manifest = json.loads((run_directory / "run.json").read_text())
     assert manifest["reason"] == message
@@ -1013,9 +991,7 @@ def test_run_rejects_filesystem_root_before_creating_artifacts(
     def artifact_creation_must_not_run(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("artifact creation must not run for filesystem root")
 
-    monkeypatch.setattr(
-        run_builder.ArtifactStore, "create", artifact_creation_must_not_run
-    )
+    monkeypatch.setattr(run_builder.ArtifactStore, "create", artifact_creation_must_not_run)
 
     result = runner.invoke(
         app,

@@ -1,3 +1,4 @@
+import json
 import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -14,22 +15,28 @@ from repogent.domain import (
     ExecutionMode,
     FinalValidationStatus,
     IsolationLevel,
+    RunManifest,
     RunStage,
     RunStatus,
+    ValidationTarget,
+    ValidationTargetKind,
+    WorkflowKind,
 )
+from repogent.errors import ErrorCode, ErrorDetail, RepogentError, RetryClass
 from repogent.mcp_models import (
     DoctorCheck,
     DoctorReport,
     DoctorRequest,
-    ExecutionDecision,
     ExecutorOption,
     PendingExecutionChoice,
     RunDecision,
     RunReport,
     RunSnapshot,
+    ValidationDecision,
     VerifiedChangeStart,
 )
 from repogent.mcp_server import create_server
+from repogent.run_reports import build_persistent_report
 
 
 @pytest.fixture
@@ -50,6 +57,19 @@ def _snapshot(run_id: str = "run-1") -> RunSnapshot:
     )
 
 
+def _run_report() -> RunReport:
+    data = build_persistent_report(
+        RunManifest(
+            run_id="run-1",
+            request="change",
+            status=RunStatus.COMPLETED,
+        ),
+        None,
+        evidence_path="/bounded/evidence",
+    )
+    return RunReport(data=data, markdown="bounded report")
+
+
 def _executor_option(mode: ExecutionMode, *, digest: str) -> ExecutorOption:
     return ExecutorOption(
         mode=mode,
@@ -67,12 +87,15 @@ def _executor_option(mode: ExecutionMode, *, digest: str) -> ExecutorOption:
 def _pending_execution(
     run_id: str = "run-1",
     *,
-    preview_digest: str = "a" * 64,
+    target_digest: str = "a" * 64,
     preview: dict[str, object] | None = None,
 ) -> PendingExecutionChoice:
     return PendingExecutionChoice(
         run_id=run_id,
-        preview_digest=preview_digest,
+        target=ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest=target_digest,
+        ),
         preview=preview if preview is not None else {"diff": "bounded preview"},
         options=[
             _executor_option(ExecutionMode.DOCKER, digest="b" * 64),
@@ -84,14 +107,17 @@ def _pending_execution(
 def _execution_decision(
     run_id: str = "run-1",
     *,
-    preview_digest: str = "a" * 64,
+    target_digest: str = "a" * 64,
     mode: ExecutionMode = ExecutionMode.LOCAL,
     option_digest: str = "c" * 64,
     decision: Decision = Decision.APPROVED,
-) -> ExecutionDecision:
-    return ExecutionDecision(
+) -> ValidationDecision:
+    return ValidationDecision(
         run_id=run_id,
-        preview_digest=preview_digest,
+        target=ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest=target_digest,
+        ),
         mode=mode,
         option_digest=option_digest,
         decision=decision,
@@ -101,13 +127,7 @@ def _execution_decision(
 class FakeManager:
     def __init__(self) -> None:
         self.snapshot = _snapshot()
-        self.report = RunReport(
-            run_id="run-1",
-            status=RunStatus.COMPLETED,
-            checkout_state=CheckoutState.NOT_APPLIED,
-            evidence_path="/bounded/evidence",
-            report="bounded report",
-        )
+        self.report = _run_report()
         self.calls: list[tuple[str, object]] = []
         self.shutdown_called = False
 
@@ -123,7 +143,7 @@ class FakeManager:
         self.calls.append(("decide", decision))
         return self.snapshot
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
         self.calls.append(("select_executor", decision))
         return self.snapshot
 
@@ -194,7 +214,7 @@ class FailingManager(FakeManager):
         self._fail()
         raise AssertionError("unreachable")
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
         self._fail()
         raise AssertionError("unreachable")
 
@@ -216,6 +236,23 @@ class FailingShutdownManager(FakeManager):
     def shutdown(self) -> None:
         self.shutdown_called = True
         raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
+
+
+class TypedFailingManager(FakeManager):
+    def get(self, run_id: str) -> RunSnapshot:
+        try:
+            raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
+        except RuntimeError as error:
+            raise RepogentError(
+                ErrorDetail(
+                    code=ErrorCode.OPERATION_NOT_ALLOWED,
+                    message="This operation is not allowed for the run kind.",
+                    remediation="Use an operation supported by the run capability.",
+                    retry=RetryClass.NON_RETRYABLE,
+                    run_id=run_id,
+                    run_kind=WorkflowKind.PATCH_REVIEW,
+                )
+            ) from error
 
 
 @pytest.fixture
@@ -295,10 +332,10 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
     }
     execution_decision_schema = tools["select_executor"].inputSchema
     assert execution_decision_schema["properties"]["decision"]["$ref"] == (
-        "#/$defs/ExecutionDecision"
+        "#/$defs/ValidationDecision"
     )
-    assert execution_decision_schema["$defs"]["ExecutionDecision"]["properties"] == {
-        key: value for key, value in ExecutionDecision.model_json_schema()["properties"].items()
+    assert execution_decision_schema["$defs"]["ValidationDecision"]["properties"] == {
+        key: value for key, value in ValidationDecision.model_json_schema()["properties"].items()
     }
     assert tools["inspect_repository_readiness"].outputSchema == DoctorReport.model_json_schema()
     assert tools["start_verified_change"].outputSchema == RunSnapshot.model_json_schema()
@@ -403,7 +440,7 @@ async def test_successful_structured_results_are_recursively_redacted() -> None:
         update={"reason": "token=sk-proj-1234567890abcdef password=do-not-show"}
     )
     manager.report = manager.report.model_copy(
-        update={"report": "credential token=sk-proj-1234567890abcdef"}
+        update={"markdown": "credential token=sk-proj-1234567890abcdef"}
     )
     doctor = FakeDoctor()
     doctor.report = doctor.report.model_copy(
@@ -601,8 +638,8 @@ async def test_select_executor_run_id_boundaries_route_to_manager(
     [
         ("run_id", ""),
         ("run_id", "x" * 257),
-        ("preview_digest", "a" * 63),
-        ("preview_digest", "a" * 65),
+        ("target_digest", "a" * 63),
+        ("target_digest", "a" * 65),
         ("option_digest", "A" * 64),
     ],
     ids=[
@@ -620,7 +657,10 @@ async def test_select_executor_rejects_out_of_bounds_fields_without_routing(
 ) -> None:
     session, manager, _doctor = client_session
     payload = _execution_decision().model_dump(mode="json")
-    payload[field] = value
+    if field == "target_digest":
+        payload["target"]["digest"] = value
+    else:
+        payload[field] = value
 
     result = await session.call_tool("select_executor", {"decision": payload})
 
@@ -865,6 +905,29 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
             assert "secret-value" not in message
             assert "/private/secret/path" not in message
             assert "subprocess stdout" not in message
+
+
+@pytest.mark.anyio
+async def test_typed_service_error_returns_sanitized_error_detail_json() -> None:
+    manager = TypedFailingManager()
+    server = create_server(manager=manager, doctor=FakeDoctor())
+
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
+        result = await session.call_tool("get_run", {"run_id": "run-1"})
+
+    prefix = "Error executing tool get_run: "
+    assert result.isError is True
+    assert result.structuredContent is None
+    assert result.content[0].text.startswith(prefix)
+    payload = json.loads(result.content[0].text.removeprefix(prefix))
+    assert payload["code"] == "operation_not_allowed"
+    assert payload["retry"] == "non_retryable"
+    assert payload["run_kind"] == "patch_review"
+    assert payload["schema_version"] == "1"
+    serialized = result.content[0].text
+    assert _INTERNAL_FAILURE_DETAIL not in serialized
+    assert "secret-value" not in serialized
+    assert "/private/secret/path" not in serialized
 
 
 def _walk_exception_graph(error: BaseException) -> list[BaseException]:

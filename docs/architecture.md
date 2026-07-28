@@ -18,6 +18,13 @@ evidence directory form one local trust boundary. A `SessionManager` owns all
 runs for that process and allows only one active run for a canonical repository
 root. Each requirements, plan, and patch response carries the exact pending
 artifact and digest; the corresponding tool advances only a matching gate.
+The runtime also resolves every session's `WorkflowKind` through the capability
+registry before a mutating operation: only a run kind whose policy allows the
+specific approval, executor-selection, or patch-application operation may use
+that tool. The registry, rather than a skill's prose or an MCP tool name, is the
+authority boundary. Wrong-kind operations return a versioned typed error with a
+stable code and retry class, so callers can distinguish safe reads,
+reconciliation-required decisions, and non-retryable policy failures.
 When the client disconnects, the MCP lifespan finalizer cooperatively cancels
 active work, closes pending approvals, waits within the bounded shutdown
 deadline, and preserves the resulting manifest and report. A later client must
@@ -45,6 +52,13 @@ exists — and no target code runs — until the operator has chosen an isolatio
 level. Local execution yields `REDUCED ISOLATION`; Docker yields `ISOLATED
 VERIFIED` only when required checks pass. Docker never silently falls back to
 local.
+
+The executor decision is bound to a typed `ValidationTarget` (`kind` plus the
+current digest), not merely to the human-visible preview. The preview remains a
+bounded display artifact; the target is the authoritative consent object
+recorded in the manifest and checked before validation. This keeps future
+capabilities free to validate a patch, diff, or commit without treating an
+untrusted display payload as execution authority.
 
 ## Runtime flow
 
@@ -82,7 +96,7 @@ so a scope failure is diagnosable.
 - `execution.py` and `validation.py`: fixed commands through Docker by default or an explicit local fallback; Docker readiness probes the actual tool inside the configured image and caches the result.
 - `candidates.py` and `workflow.py`: isolated candidate transactions, legal transitions, bounded expansion, evidence selection, budgets, recovery, and terminal outcomes.
 - `events.py`, `artifacts.py`, and `reporting.py`: monotonic event JSONL, structurally sanitized versioned evidence, and final reports.
-- `doctor.py`, `run_sessions.py`, `mcp_models.py`, and `mcp_server.py`: typed readiness and session services, canonical-root locking, digest-bound decisions, bounded report access, and the local stdio MCP adapter.
+- `capabilities.py`, `errors.py`, `doctor.py`, `run_sessions.py`, `mcp_models.py`, and `mcp_server.py`: capability operation policy, versioned typed errors and retry classes, typed readiness and session services, canonical-root locking, validation-target-bound consent, bounded report access, and the local stdio MCP adapter.
 
 ## Terminal statuses
 
@@ -91,6 +105,15 @@ so a scope failure is diagnosable.
 - `changes_requested`: validation passed but QA found blocking issues.
 - `cancelled`: a human rejected an approval gate or interrupted normal execution.
 - `human_intervention_required`: policy, provider, timeout, budget, or repair limits stopped the run.
+
+## Verification gate
+
+`make verify` is the single local and CI quality gate. It uses `python3` by
+default and accepts an explicit interpreter through `PYTHON`, for example
+`make verify PYTHON=.venv/bin/python`. The gate owns tests, lint, format, type,
+security, package build and wheel inspection, plugin-package validation, and
+the real stdio integration suite. CI installs the development environment and
+invokes the same target rather than carrying a second package policy.
 
 ## Evidence
 

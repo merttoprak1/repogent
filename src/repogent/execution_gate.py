@@ -7,8 +7,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from repogent.candidates import PatchPreview, patch_preview_digest
-from repogent.domain import Decision, ExecutionMode
+from repogent.domain import Decision, ExecutionMode, ValidationTarget
+from repogent.errors import ErrorCode
 from repogent.execution import ValidationPolicy
 from repogent.executor_selection import (
     ExecutorRegistry,
@@ -17,25 +17,30 @@ from repogent.executor_selection import (
     validate_executor_isolation,
 )
 from repogent.mcp_models import (
-    ExecutionDecision,
     ExecutorAvailability,
     PendingExecutionChoice,
+    ValidationDecision,
 )
 from repogent.sanitization import sanitize_data
 from repogent.workflow import ExecutorSelectionRejected, WorkflowCancelled
 
 
 class ExecutionGateError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: ErrorCode = ErrorCode.EXECUTOR_UNAVAILABLE,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 DEFAULT_EXECUTOR_INSPECTION_CAPACITY = 4
 
 
 class ExecutorInspectionCoordinator:
-    def __init__(
-        self, capacity: int = DEFAULT_EXECUTOR_INSPECTION_CAPACITY
-    ) -> None:
+    def __init__(self, capacity: int = DEFAULT_EXECUTOR_INSPECTION_CAPACITY) -> None:
         if capacity <= 0:
             raise ValueError("executor inspection capacity must be positive")
         self.capacity = capacity
@@ -111,7 +116,8 @@ class GateExecutorSelector:
 
     def select(
         self,
-        preview: PatchPreview,
+        target: ValidationTarget,
+        preview: dict[str, object],
         *,
         timeout_seconds: float,
     ) -> PreparedExecutor:
@@ -121,7 +127,7 @@ class GateExecutorSelector:
                 raise WorkflowCancelled("executor selection gate is closed")
             self._active_selections += 1
         try:
-            return self._select(preview, deadline)
+            return self._select(target, preview, deadline)
         finally:
             with self._condition:
                 self._active_selections -= 1
@@ -129,23 +135,19 @@ class GateExecutorSelector:
 
     def _select(
         self,
-        preview: PatchPreview,
+        target: ValidationTarget,
+        preview: dict[str, object],
         deadline: float,
     ) -> PreparedExecutor:
-        preview_payload = preview.model_dump(mode="json")
-        sanitized = sanitize_data(preview_payload)
-        if not isinstance(sanitized, dict) or sanitized != preview_payload:
-            raise ExecutionGateError("patch preview is unsafe to display")
-        digest = patch_preview_digest(preview)
+        sanitized = sanitize_data(preview)
+        if not isinstance(sanitized, dict) or sanitized != preview:
+            raise ExecutionGateError("validation preview is unsafe to display")
         availability = self._inspect_availability(deadline)
-        base_options = self._registry.build_options(
-            self.run_id, digest, availability
-        )
-        if (
-            len(base_options) != 2
-            or {item.mode for item in base_options}
-            != {ExecutionMode.DOCKER, ExecutionMode.LOCAL}
-        ):
+        base_options = self._registry.build_options(self.run_id, target, availability)
+        if len(base_options) != 2 or {item.mode for item in base_options} != {
+            ExecutionMode.DOCKER,
+            ExecutionMode.LOCAL,
+        }:
             raise ExecutionGateError("executor registry must provide exactly two options")
         with self._condition:
             if self._closed:
@@ -157,7 +159,7 @@ class GateExecutorSelector:
             generation = self._generation + 1
             pending = PendingExecutionChoice(
                 run_id=self.run_id,
-                preview_digest=digest,
+                target=target,
                 preview=sanitized,
                 options=[
                     option.model_copy(
@@ -176,11 +178,7 @@ class GateExecutorSelector:
             self._prepared = None
             self._rejection = None
             self._condition.notify_all()
-            while (
-                self._prepared is None
-                and self._rejection is None
-                and not self._closed
-            ):
+            while self._prepared is None and self._rejection is None and not self._closed:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._clear_generation(generation)
@@ -202,7 +200,7 @@ class GateExecutorSelector:
             self._condition.notify_all()
             return prepared
 
-    def submit(self, decision: ExecutionDecision) -> int:
+    def submit(self, decision: ValidationDecision) -> int:
         with self._condition:
             if self._closed:
                 raise ExecutionGateError("executor selection gate is closed")
@@ -215,23 +213,25 @@ class GateExecutorSelector:
                 or self._rejection is not None
                 or self._preparing_generation is not None
             ):
-                raise ExecutionGateError(
-                    "executor selection decision has already been submitted"
-                )
+                raise ExecutionGateError("executor selection decision has already been submitted")
             if decision.run_id != pending.run_id:
                 raise ExecutionGateError("executor selection run ID mismatch")
-            if decision.preview_digest != pending.preview_digest:
-                raise ExecutionGateError("executor selection preview digest mismatch")
+            if decision.target.kind is not pending.target.kind:
+                raise ExecutionGateError("executor selection target kind mismatch")
+            if decision.target.digest != pending.target.digest:
+                raise ExecutionGateError(
+                    "executor selection target digest mismatch",
+                    code=ErrorCode.STALE_DIGEST,
+                )
             selected = next(
-                (
-                    item
-                    for item in pending.options
-                    if item.option_digest == decision.option_digest
-                ),
+                (item for item in pending.options if item.option_digest == decision.option_digest),
                 None,
             )
             if selected is None:
-                raise ExecutionGateError("executor selection option digest mismatch")
+                raise ExecutionGateError(
+                    "executor selection option digest mismatch",
+                    code=ErrorCode.STALE_DIGEST,
+                )
             if selected.mode is not decision.mode:
                 raise ExecutionGateError("executor selection mode mismatch")
             if not selected.available:
@@ -242,9 +242,7 @@ class GateExecutorSelector:
                 return generation
             self._preparing_generation = generation
         try:
-            prepared = self._registry.prepare(
-                self._root, decision.mode, self._policy
-            )
+            prepared = self._registry.prepare(self._root, decision.mode, self._policy)
         except ExecutorSelectionError as error:
             self._release_preparing_generation(generation)
             raise ExecutionGateError(str(error)) from error
@@ -288,26 +286,16 @@ class GateExecutorSelector:
             if self._closed:
                 return self._generation, None
             while (
-                (
-                    self._generation <= after_generation
-                    or (
-                        self._pending is None
-                        and self._active_selections > 0
-                    )
-                )
-                and not self._closed
-            ):
+                self._generation <= after_generation
+                or (self._pending is None and self._active_selections > 0)
+            ) and not self._closed:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return self._generation, None
                 self._condition.wait(remaining)
             if self._closed:
                 return self._generation, None
-            pending = (
-                self._pending.model_copy(deep=True)
-                if self._pending is not None
-                else None
-            )
+            pending = self._pending.model_copy(deep=True) if self._pending is not None else None
             return self._generation, pending
 
     def close(self) -> None:
@@ -335,9 +323,7 @@ class GateExecutorSelector:
                 self._preparing_generation = None
                 self._condition.notify_all()
 
-    def _inspect_availability(
-        self, deadline: float
-    ) -> list[ExecutorAvailability]:
+    def _inspect_availability(self, deadline: float) -> list[ExecutorAvailability]:
         result: list[ExecutorAvailability] | None = None
         error: BaseException | None = None
         finished = False
@@ -349,9 +335,7 @@ class GateExecutorSelector:
                 if abandoned or self._closed:
                     return
             try:
-                inspected = self._registry.inspect_availability(
-                    self._root, self._policy
-                )
+                inspected = self._registry.inspect_availability(self._root, self._policy)
             except BaseException as inspection_error:
                 inspected = None
                 captured_error: BaseException | None = inspection_error
@@ -397,13 +381,9 @@ class GateExecutorSelector:
                 abandoned = True
                 raise ExecutorSelectionRejected("executor selection timed out")
             if error is not None:
-                raise ExecutionGateError(
-                    "executor availability inspection failed"
-                ) from error
+                raise ExecutionGateError("executor availability inspection failed") from error
             if result is None:
-                raise ExecutionGateError(
-                    "executor availability inspection did not complete"
-                )
+                raise ExecutionGateError("executor availability inspection did not complete")
             return result
 
 

@@ -81,10 +81,13 @@ paths and changed lines, the preview digest, and both executor options with thei
 availability, isolation level, and remediation. Nothing has run against the
 target repository yet, and nothing will until an executor is selected.
 
-`select_executor` takes an `ExecutionDecision` (run ID, the current preview
-digest, mode, the current option digest, and decision `APPROVED`). It is never an
-approval kind and is never triggered by "okay", "continue", an earlier
-requirements or plan approval, or a stale digest.
+`select_executor` takes a `ValidationDecision` with exactly the current `run_id`,
+`target`: `{kind, digest}`, `mode`, `option_digest`, and decision `APPROVED`
+(plus only the optional schema version a schema-aware client supplies). The
+target is the authority-bearing validation object; the preview is display-only.
+Do not send `preview`, `preview_digest`, or any other extra field. It is never
+an approval kind and is never triggered by
+"okay", "continue", an earlier requirements or plan approval, or a stale digest.
 
 - **Docker option — `ISOLATED VERIFIED` only after checks pass:** require an
   explicit current selection of the Docker option. No local-risk statement is

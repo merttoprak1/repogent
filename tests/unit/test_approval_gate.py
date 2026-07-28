@@ -30,9 +30,7 @@ def test_gate_waits_for_matching_digest() -> None:
         assert generation == 1
         assert pending.kind is ApprovalKind.REQUIREMENTS
         with pytest.raises(ApprovalGateError, match="digest"):
-            approver.submit(
-                ApprovalKind.REQUIREMENTS, "0" * 64, Decision.APPROVED, None
-            )
+            approver.submit(ApprovalKind.REQUIREMENTS, "0" * 64, Decision.APPROVED, None)
         approver.submit(pending.kind, pending.digest, Decision.APPROVED, None)
         assert future.result(timeout=1).decision is Decision.APPROVED
 
@@ -64,9 +62,7 @@ def test_gate_rejects_wrong_kind_and_duplicate_decision() -> None:
         _, pending = approver.wait(after_generation=0, timeout_seconds=1)
         assert pending is not None
         with pytest.raises(ApprovalGateError, match="kind"):
-            approver.submit(
-                ApprovalKind.REQUIREMENTS, pending.digest, Decision.APPROVED, None
-            )
+            approver.submit(ApprovalKind.REQUIREMENTS, pending.digest, Decision.APPROVED, None)
         approver.submit(ApprovalKind.PLAN, pending.digest, Decision.APPROVED, None)
         with pytest.raises(ApprovalGateError, match="decision"):
             approver.submit(ApprovalKind.PLAN, pending.digest, Decision.REJECTED, None)
@@ -269,10 +265,7 @@ def test_patch_payload_redacts_bounded_check_metadata_without_raw_process_data()
 
 
 def test_patch_payload_fails_closed_when_redaction_would_change_exact_diff() -> None:
-    unsafe_diff = (
-        "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n"
-        "+token=sk-proj-1234567890abcdef\n"
-    )
+    unsafe_diff = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+token=sk-proj-1234567890abcdef\n"
     artifact = json.dumps(
         {
             "selected_candidate": {"proposal": {"diff": unsafe_diff}},
@@ -365,6 +358,4 @@ def test_gate_binds_digest_and_display_to_one_detached_snapshot() -> None:
         approver.close()
         assert future.result(timeout=1).decision is Decision.REJECTED
         assert pending.artifact == {"value": "before"}
-        assert pending.digest == approval_digest(
-            ApprovalKind.REQUIREMENTS, '{"value":"before"}'
-        )
+        assert pending.digest == approval_digest(ApprovalKind.REQUIREMENTS, '{"value":"before"}')

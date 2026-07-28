@@ -25,11 +25,13 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    ValidationTargetKind,
     VerificationStatus,
     WorkflowKind,
     WorkflowOutcome,
 )
 from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, VerifiedChangeStart
+from repogent.run_reports import build_persistent_report
 
 
 def test_pending_approval_requires_sha256_digest() -> None:
@@ -137,6 +139,42 @@ def test_manifest_starts_in_created_state() -> None:
     assert manifest.outcome is None
 
 
+@pytest.mark.parametrize(
+    ("kind", "outcome"),
+    [
+        (WorkflowKind.VERIFIED_CHANGE, WorkflowOutcome.PATCH_READY),
+        (WorkflowKind.PATCH_REVIEW, WorkflowOutcome.REQUEST_CHANGES),
+        (WorkflowKind.CI_TRIAGE, WorkflowOutcome.INCONCLUSIVE),
+        (WorkflowKind.DEPENDENCY_UPDATE, WorkflowOutcome.CANDIDATES_FOUND),
+        (WorkflowKind.SECURITY_FIX, WorkflowOutcome.APPLIED),
+        (WorkflowKind.RELEASE_GATE, WorkflowOutcome.RELEASE_BLOCKED),
+    ],
+)
+def test_manifest_accepts_outcome_supported_by_its_workflow_kind(
+    kind: WorkflowKind, outcome: WorkflowOutcome
+) -> None:
+    """Catch manifest validation that rejects a legal terminal workflow result."""
+    manifest = RunManifest(run_id="run-123", request="Change", kind=kind, outcome=outcome)
+
+    assert manifest.outcome is outcome
+
+
+@pytest.mark.parametrize(
+    ("kind", "outcome"),
+    [
+        (WorkflowKind.PATCH_REVIEW, WorkflowOutcome.APPLIED),
+        (WorkflowKind.CI_TRIAGE, WorkflowOutcome.RELEASE_VERIFIED),
+        (WorkflowKind.RELEASE_GATE, WorkflowOutcome.PATCH_READY),
+    ],
+)
+def test_manifest_rejects_outcome_from_another_workflow_kind(
+    kind: WorkflowKind, outcome: WorkflowOutcome
+) -> None:
+    """Catch cross-workflow terminal results that would misrepresent authority."""
+    with pytest.raises(ValidationError, match="is not valid for"):
+        RunManifest(run_id="run-123", request="Change", kind=kind, outcome=outcome)
+
+
 def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
     manifest = RunManifest.model_validate(
         {"run_id": "legacy-run", "request": "Apply a safe change"}
@@ -145,7 +183,7 @@ def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
     assert manifest.execution_mode is None
     assert manifest.isolation_level is None
     assert manifest.verification_status is VerificationStatus.UNVALIDATED
-    assert manifest.preview_digest is None
+    assert manifest.evaluated_target is None
 
     selected = RunManifest(
         run_id="run-123",
@@ -153,6 +191,21 @@ def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
         execution_mode=ExecutionMode.LOCAL,
     )
     assert selected.execution_mode is ExecutionMode.LOCAL
+
+
+def test_legacy_preview_digest_is_read_as_patch_target_but_not_reemitted() -> None:
+    manifest = RunManifest.model_validate(
+        {
+            "run_id": "legacy-run",
+            "request": "Apply a safe change",
+            "preview_digest": "a" * 64,
+        }
+    )
+
+    assert manifest.evaluated_target is not None
+    assert manifest.evaluated_target.kind is ValidationTargetKind.PATCH
+    assert manifest.evaluated_target.digest == "a" * 64
+    assert "preview_digest" not in manifest.model_dump(mode="json")
 
 
 def test_manifest_phase_two_fields_round_trip_through_json() -> None:
@@ -286,6 +339,24 @@ def _snapshot_payload() -> dict[str, object]:
     }
 
 
+def _run_report(
+    *,
+    run_id: str = "run-1",
+    evidence_path: str = "/evidence/run-1",
+) -> RunReport:
+    data = build_persistent_report(
+        RunManifest(
+            run_id=run_id,
+            request="change",
+            status=RunStatus.COMPLETED,
+            outcome=WorkflowOutcome.PATCH_READY,
+        ),
+        None,
+        evidence_path=evidence_path,
+    )
+    return RunReport(data=data, markdown="done")
+
+
 def test_mcp_models_preserve_workflow_kind_and_outcome() -> None:
     snapshot = RunSnapshot(
         **{
@@ -294,18 +365,10 @@ def test_mcp_models_preserve_workflow_kind_and_outcome() -> None:
             "outcome": WorkflowOutcome.PATCH_READY,
         }
     )
-    report = RunReport(
-        run_id="run-1",
-        kind=WorkflowKind.VERIFIED_CHANGE,
-        outcome=WorkflowOutcome.PATCH_READY,
-        status=RunStatus.COMPLETED,
-        checkout_state=CheckoutState.NOT_APPLIED,
-        evidence_path="/evidence/run-1",
-        report="done",
-    )
+    report = _run_report()
 
     assert snapshot.outcome is WorkflowOutcome.PATCH_READY
-    assert report.kind is WorkflowKind.VERIFIED_CHANGE
+    assert report.data.kind is WorkflowKind.VERIFIED_CHANGE
 
 
 @pytest.mark.parametrize("model", ["decision", "snapshot", "report"])
@@ -322,13 +385,7 @@ def test_mcp_response_run_ids_are_limited_to_256_characters(model: str) -> None:
         elif model == "snapshot":
             RunSnapshot(**{**_snapshot_payload(), "run_id": run_id})
         else:
-            RunReport(
-                run_id=run_id,
-                status=RunStatus.COMPLETED,
-                checkout_state=CheckoutState.NOT_APPLIED,
-                evidence_path="/evidence/run-1",
-                report="done",
-            )
+            _run_report(run_id=run_id)
 
 
 @pytest.mark.parametrize("field", ["reason", "evidence_path"])
@@ -339,13 +396,7 @@ def test_run_snapshot_text_fields_are_limited_to_4096_characters(field: str) -> 
 
 def test_run_report_evidence_path_is_limited_to_4096_characters() -> None:
     with pytest.raises(ValidationError, match="at most 4096"):
-        RunReport(
-            run_id="run-1",
-            status=RunStatus.COMPLETED,
-            checkout_state=CheckoutState.NOT_APPLIED,
-            evidence_path="x" * 4_097,
-            report="done",
-        )
+        _run_report(evidence_path="x" * 4_097)
 
 
 def test_run_snapshot_applied_paths_are_bounded_by_count_and_length() -> None:

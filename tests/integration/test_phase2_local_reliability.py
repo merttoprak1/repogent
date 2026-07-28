@@ -75,7 +75,7 @@ def _fixture_case(name: str) -> FixtureCase:
                 "def test_limits_values() -> None:\n"
                 "    assert limit(9, 0, 5) == 5\n\n\n"
                 "def test_rejects_inverted_bounds() -> None:\n"
-                "    with pytest.raises(ValueError, match=\"lower\"):\n"
+                '    with pytest.raises(ValueError, match="lower"):\n'
                 "        limit(1, 5, 0)\n"
             ),
         )
@@ -89,17 +89,17 @@ def _fixture_case(name: str) -> FixtureCase:
             before_source=(root / "src/example_cli/__main__.py").read_text(),
             after_source=(
                 "def greeting(name: str) -> str:\n"
-                "    return f\"Hello, {name.strip()}!\"\n\n\n"
-                "if __name__ == \"__main__\":\n"
-                "    print(greeting(\"world\"))\n"
+                '    return f"Hello, {name.strip()}!"\n\n\n'
+                'if __name__ == "__main__":\n'
+                '    print(greeting("world"))\n'
             ),
             before_test=(root / "tests/test_cli.py").read_text(),
             after_test=(
                 "from example_cli.__main__ import greeting\n\n\n"
                 "def test_greeting() -> None:\n"
-                "    assert greeting(\"Ada\") == \"Hello, Ada!\"\n\n\n"
+                '    assert greeting("Ada") == "Hello, Ada!"\n\n\n'
                 "def test_greeting_trims_name() -> None:\n"
-                "    assert greeting(\" Ada \") == \"Hello, Ada!\"\n"
+                '    assert greeting(" Ada ") == "Hello, Ada!"\n'
             ),
         )
     if name == "python_data":
@@ -121,24 +121,27 @@ def _fixture_case(name: str) -> FixtureCase:
             after_test=(
                 "from example_data.transform import normalize_rows as clean\n\n\n"
                 "def test_trims_cells() -> None:\n"
-                "    assert clean([{\" name \": \" Ada \"}]) == [{\"name\": \"Ada\"}]\n\n\n"
+                '    assert clean([{" name ": " Ada "}]) == [{"name": "Ada"}]\n\n\n'
                 "def test_lowercases_keys() -> None:\n"
-                "    assert clean([{\" Name \": \"Ada\"}]) == [{\"name\": \"Ada\"}]\n"
+                '    assert clean([{" Name ": "Ada"}]) == [{"name": "Ada"}]\n'
             ),
         )
     raise ValueError(f"unknown fixture: {name}")
 
 
 def _unified_diff(path: str, before: str, after: str) -> str:
-    return "\n".join(
-        difflib.unified_diff(
-            before.splitlines(),
-            after.splitlines(),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-            lineterm="",
+    return (
+        "\n".join(
+            difflib.unified_diff(
+                before.splitlines(),
+                after.splitlines(),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+                lineterm="",
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
 
 
 def _patch_output(case: FixtureCase, *, summary: str | None = None) -> dict[str, object]:
@@ -353,9 +356,7 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     assert (evidence / "candidate-evidence-001.json").exists()
     assert (evidence / "run.json").exists()
     assert (evidence / "report.md").exists()
-    selection = json.loads(
-        next(evidence.glob("candidate-selection-*.json")).read_text()
-    )
+    selection = json.loads(next(evidence.glob("candidate-selection-*.json")).read_text())
     assert selection["selected_candidate_id"] == "candidate-1"
     persisted = json.loads((evidence / "run.json").read_text())
     assert persisted["repository_fingerprint"]
@@ -364,7 +365,8 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     assert persisted["events_file"] == "events.jsonl"
     assert persisted["execution_mode"] == "local"
     assert persisted["verification_status"] == "passed"
-    assert persisted["preview_digest"]
+    assert persisted["evaluated_target"]["kind"] == "patch"
+    assert persisted["evaluated_target"]["digest"]
     events = [
         RunEvent.model_validate(json.loads(line))
         for line in (evidence / "events.jsonl").read_text().splitlines()
@@ -380,7 +382,7 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     assert "| selected |" in report
     assert "Verification: REDUCED ISOLATION" in report
     assert "Execution mode: local" in report
-    assert f"Preview digest: {persisted['preview_digest']}" in report
+    assert f"Evaluated target: patch:{persisted['evaluated_target']['digest']}" in report
 
 
 @pytest.mark.parametrize("name", ["python_library", "python_cli", "python_data"])
@@ -475,9 +477,7 @@ def test_nested_suffix_test_failure_makes_candidates_ineligible_and_unselected(
     (target / case.test_path).replace(nested_test)
     pyproject = target / "pyproject.toml"
     pyproject.write_text(
-        pyproject.read_text().replace(
-            'testpaths = ["tests"]', 'testpaths = ["quality/regression"]'
-        )
+        pyproject.read_text().replace('testpaths = ["tests"]', 'testpaths = ["quality/regression"]')
     )
     baseline = _tree_bytes(target)
     policy = ValidationPolicy()

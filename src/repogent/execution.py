@@ -36,7 +36,8 @@ _DISCOVERY_MAX_ENTRIES = 20_000
 _DISCOVERY_MAX_DEPTH = 16
 _PYTEST_CONFIG_MAX_BYTES = 256_000
 _SUPPORTS_FD_RELATIVE_CONFIG = (
-    os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
+    os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
     and os.stat in os.supports_follow_symlinks
 )
 _DOCKER_MODULE_PROBE = (
@@ -284,11 +285,7 @@ def _read_recognized_configuration(
 ) -> str | None:
     """Read one root config without following links or blocking on special files."""
 
-    if (
-        scope is not None
-        and scope.source is ScopeSource.GIT
-        and Path(name) not in scope.paths
-    ):
+    if scope is not None and scope.source is ScopeSource.GIT and Path(name) not in scope.paths:
         return None
     try:
         repository = root.resolve(strict=True)
@@ -314,9 +311,7 @@ def _read_recognized_configuration(
                 raise _PytestConfigurationUncertain from error
             _validate_configuration_metadata(metadata)
             try:
-                descriptor = os.open(
-                    name, _configuration_open_flags(), dir_fd=directory_fd
-                )
+                descriptor = os.open(name, _configuration_open_flags(), dir_fd=directory_fd)
             except OSError as error:
                 raise _PytestConfigurationUncertain from error
             return _read_configuration_descriptor(descriptor, metadata)
@@ -354,9 +349,7 @@ def _validate_configuration_metadata(metadata: os.stat_result) -> None:
         raise _PytestConfigurationUncertain
 
 
-def _read_configuration_descriptor(
-    descriptor: int, expected: os.stat_result
-) -> str:
+def _read_configuration_descriptor(descriptor: int, expected: os.stat_result) -> str:
     try:
         opened = os.fstat(descriptor)
         _validate_configuration_metadata(opened)
@@ -421,9 +414,8 @@ class _RestrictedExecutor:
         )
 
     def _is_allowed(self, command: CommandSpec) -> bool:
-        return (
-            self.allowed.get(command.name) == command.argv
-            and self._has_approved_timeout(command)
+        return self.allowed.get(command.name) == command.argv and self._has_approved_timeout(
+            command
         )
 
 
@@ -551,9 +543,7 @@ class DockerExecutor(_RestrictedExecutor):
         try:
             result = _run_with_bounded_output(
                 argv,
-                timeout_seconds=min(
-                    _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
-                ),
+                timeout_seconds=min(_DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds),
                 max_output_chars=self.max_output_chars,
             )
         except OSError:
@@ -582,9 +572,7 @@ class DockerExecutor(_RestrictedExecutor):
         self._validate_command(command)
         docker = self.docker
         inspection = self._inspect_image(
-            timeout_seconds=min(
-                _DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds
-            )
+            timeout_seconds=min(_DOCKER_CONTROL_TIMEOUT_SECONDS, command.timeout_seconds)
         )
         if inspection is not None and inspection.timed_out:
             return CheckResult(

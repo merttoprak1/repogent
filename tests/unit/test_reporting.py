@@ -19,7 +19,10 @@ from repogent.domain import (
     RunManifest,
     RunStatus,
     ValidationReport,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
+    WorkflowKind,
     WorkflowOutcome,
 )
 from repogent.localization import LocalizationReport, LocalizedSymbol
@@ -54,11 +57,7 @@ def test_report_separates_tool_evidence_from_qa_interpretation() -> None:
         tests=["pytest"],
     )
     validation = ValidationReport(
-        checks=[
-            CheckResult(
-                name="pytest", argv=["pytest"], status=CheckStatus.PASSED, exit_code=0
-            )
-        ]
+        checks=[CheckResult(name="pytest", argv=["pytest"], status=CheckStatus.PASSED, exit_code=0)]
     )
     review = QAReview(
         acceptance_criteria_coverage=1,
@@ -71,6 +70,46 @@ def test_report_separates_tool_evidence_from_qa_interpretation() -> None:
     assert "## Deterministic validation" in report
     assert "pytest: passed (exit 0)" in report
     assert "## Model-generated QA review" in report
+
+
+def test_report_renders_common_envelope_before_verified_change_details() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="add route",
+        kind=WorkflowKind.VERIFIED_CHANGE,
+        outcome=WorkflowOutcome.APPLIED,
+        status=RunStatus.COMPLETED,
+        selected_candidate_id="candidate-1",
+        checkout_state=CheckoutState.APPLIED,
+        applied_paths=["src/app.py"],
+        final_validation_status=FinalValidationStatus.PASSED,
+    )
+    validation = ValidationReport(
+        checks=[
+            CheckResult(
+                name="pytest",
+                argv=["pytest"],
+                status=CheckStatus.PASSED,
+                required=True,
+            )
+        ]
+    )
+
+    report = render_report(
+        manifest,
+        None,
+        None,
+        validation,
+        None,
+        evidence_path="/bounded/evidence/run-1",
+    )
+
+    assert "Kind: `verified_change`" in report
+    assert "Checkout changed: yes" in report
+    assert "Required checks: pytest" in report
+    assert "## Verified change result" in report
+    assert report.index("Checkout changed: yes") < report.index("## Verified change result")
+    assert "Selected candidate: candidate-1" in report
 
 
 def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
@@ -88,7 +127,11 @@ def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
     localization = LocalizationReport(
         locations=[
             LocalizedSymbol(
-                symbol_id="route", path="app.py", start_line=1, end_line=4, score=1,
+                symbol_id="route",
+                path="app.py",
+                start_line=1,
+                end_line=4,
+                score=1,
                 signals=[],
             )
         ],
@@ -264,14 +307,17 @@ def test_report_shows_isolated_verified_only_for_docker_and_passed() -> None:
         execution_mode=ExecutionMode.DOCKER,
         isolation_level=IsolationLevel.ISOLATED,
         verification_status=VerificationStatus.PASSED,
-        preview_digest="a" * 64,
+        evaluated_target=ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest="a" * 64,
+        ),
     )
 
     report = render_report(manifest, None, None, None, None)
 
     assert "Verification: ISOLATED VERIFIED" in report
     assert "Execution mode: docker" in report
-    assert f"Preview digest: {'a' * 64}" in report
+    assert f"Evaluated target: patch:{'a' * 64}" in report
 
 
 def test_report_shows_none_for_unset_execution_evidence() -> None:
@@ -281,7 +327,7 @@ def test_report_shows_none_for_unset_execution_evidence() -> None:
 
     assert "Verification: UNVALIDATED" in report
     assert "Execution mode: none" in report
-    assert "Preview digest: none" in report
+    assert "Evaluated target: none" in report
 
 
 def test_report_downgrades_docker_failure_to_unvalidated() -> None:

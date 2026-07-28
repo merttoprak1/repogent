@@ -127,9 +127,7 @@ class DoctorService:
             return self._report(request, checks, repository, scope=scope_summary)
 
         if request.provider == "codex-cli":
-            readiness = CodexCliProvider(
-                model=request.model, target_root=repository
-            ).check_ready()
+            readiness = CodexCliProvider(model=request.model, target_root=repository).check_ready()
             checks.append(self._provider_check(readiness.ready, readiness.reason))
         return self._report(request, checks, repository, scope=scope_summary)
 

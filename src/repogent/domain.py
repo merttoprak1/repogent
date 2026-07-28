@@ -45,6 +45,13 @@ class WorkflowOutcome(StrEnum):
     PATCH_READY = "patch_ready"
     APPLIED = "applied"
     HUMAN_INTERVENTION_REQUIRED = "human_intervention_required"
+    APPROVE = "approve"
+    REQUEST_CHANGES = "request_changes"
+    INCONCLUSIVE = "inconclusive"
+    ROOT_CAUSE_IDENTIFIED = "root_cause_identified"
+    CANDIDATES_FOUND = "candidates_found"
+    RELEASE_VERIFIED = "release_verified"
+    RELEASE_BLOCKED = "release_blocked"
 
 
 class RunStage(StrEnum):
@@ -98,6 +105,17 @@ class Decision(StrEnum):
 class ExecutionMode(StrEnum):
     DOCKER = "docker"
     LOCAL = "local"
+
+
+class ValidationTargetKind(StrEnum):
+    PATCH = "patch"
+    DIFF = "diff"
+    COMMIT = "commit"
+
+
+class ValidationTarget(VersionedModel):
+    kind: ValidationTargetKind
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class IsolationLevel(StrEnum):
@@ -368,6 +386,17 @@ class Budget(VersionedModel):
     timeout_seconds: int = Field(default=1800, gt=0)
 
 
+def validate_terminal_outcome(manifest: RunManifest) -> None:
+    if manifest.outcome is not None:
+        from repogent.capabilities import CapabilityRegistry
+
+        CapabilityRegistry.defaults().validate_outcome(manifest.kind, manifest.outcome)
+
+
+def validated_manifest_update(manifest: RunManifest, update: dict[str, object]) -> RunManifest:
+    return RunManifest.model_validate({**manifest.model_dump(), **update})
+
+
 class RunManifest(VersionedModel):
     run_id: str
     request: str
@@ -384,7 +413,7 @@ class RunManifest(VersionedModel):
     execution_mode: ExecutionMode | None = None
     isolation_level: IsolationLevel | None = None
     verification_status: VerificationStatus = VerificationStatus.UNVALIDATED
-    preview_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    evaluated_target: ValidationTarget | None = None
     repository_fingerprint: str | None = None
     configuration_fingerprint: str | None = None
     candidate_ids: list[str] = Field(default_factory=list)
@@ -399,11 +428,21 @@ class RunManifest(VersionedModel):
 
     @model_validator(mode="before")
     @classmethod
-    def infer_legacy_checkout_state(cls, value: object) -> object:
-        if (
-            isinstance(value, dict)
-            and "checkout_state" not in value
-            and value.get("selected_patch_applied") is True
-        ):
-            return {**value, "checkout_state": CheckoutState.APPLIED}
-        return value
+    def infer_legacy_fields(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        legacy_preview_digest = migrated.pop("preview_digest", None)
+        if "evaluated_target" not in migrated and legacy_preview_digest is not None:
+            migrated["evaluated_target"] = {
+                "kind": ValidationTargetKind.PATCH,
+                "digest": legacy_preview_digest,
+            }
+        if "checkout_state" not in migrated and migrated.get("selected_patch_applied") is True:
+            migrated["checkout_state"] = CheckoutState.APPLIED
+        return migrated
+
+    @model_validator(mode="after")
+    def validate_terminal_outcome(self) -> RunManifest:
+        validate_terminal_outcome(self)
+        return self

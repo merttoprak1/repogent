@@ -24,7 +24,8 @@ def test_scripted_fastapi_change_reaches_verified_report(tmp_path: Path) -> None
     )
     store = ArtifactStore.create(tmp_path / "runs", target, "add health", run_id="demo-run")
     workflow = Workflow(
-        root=target, request='Add a health endpoint that returns {"status": "ok"}',
+        root=target,
+        request='Add a health endpoint that returns {"status": "ok"}',
         manifest=RunManifest(run_id="demo-run", request="add health"),
         roles=RoleSet.from_provider(ScriptedProvider(outputs)),
         approver=FakeApprover([Decision.APPROVED] * 3),
@@ -44,8 +45,9 @@ def test_scripted_fastapi_change_reaches_verified_report(tmp_path: Path) -> None
     assert manifest["status"] == "completed"
     assert manifest["execution_mode"] == "local"
     assert manifest["verification_status"] == "passed"
-    assert manifest["preview_digest"]
+    assert manifest["evaluated_target"]["kind"] == "patch"
+    assert manifest["evaluated_target"]["digest"]
     report = (store.root / "report.md").read_text()
     assert "Verification: REDUCED ISOLATION" in report
     assert "Execution mode: local" in report
-    assert f"Preview digest: {manifest['preview_digest']}" in report
+    assert f"Evaluated target: patch:{manifest['evaluated_target']['digest']}" in report

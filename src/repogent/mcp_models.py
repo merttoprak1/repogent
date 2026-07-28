@@ -15,6 +15,7 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     TrustLabel,
+    ValidationTarget,
     VerificationStatus,
     VersionedModel,
     WorkflowKind,
@@ -22,6 +23,7 @@ from repogent.domain import (
     compute_trust_label,
 )
 from repogent.repository_scope import ScopeSource
+from repogent.run_reports import PersistentRunReport
 
 BoundedPath = Annotated[str, Field(max_length=4_096)]
 
@@ -65,14 +67,14 @@ class ExecutorOption(VersionedModel):
 
 class PendingExecutionChoice(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
-    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target: ValidationTarget
     preview: dict[str, object]
     options: list[ExecutorOption] = Field(min_length=2, max_length=2)
 
 
-class ExecutionDecision(VersionedModel):
+class ValidationDecision(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
-    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target: ValidationTarget
     mode: ExecutionMode
     option_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: Decision
@@ -153,13 +155,8 @@ class RunSnapshot(VersionedModel):
 
 
 class RunReport(VersionedModel):
-    run_id: str = Field(min_length=1, max_length=256)
-    kind: WorkflowKind = WorkflowKind.VERIFIED_CHANGE
-    outcome: WorkflowOutcome | None = None
-    status: RunStatus
-    checkout_state: CheckoutState
-    evidence_path: str = Field(max_length=4_096)
-    report: str = Field(max_length=64_000)
+    data: PersistentRunReport
+    markdown: str = Field(max_length=64_000)
 
 
 class DoctorRequest(VersionedModel):

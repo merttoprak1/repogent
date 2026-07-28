@@ -41,7 +41,13 @@ source .venv/bin/activate
 python -m pip install -e '.[dev]'
 ```
 
-Run the deterministic project gate with `make verify`. Docker is optional for development, but it is the default executor for Repogent runs. This `.venv` is for terminal development and does not replace the persistent CLI installation required by Codex Desktop.
+Run the canonical local and CI gate with `make verify` when `python3` resolves to
+the development interpreter. For an existing repository environment, use
+`make verify PYTHON=.venv/bin/python`. The gate runs tests, lint, format, type,
+security, wheel, plugin-package, and real stdio integration checks. Docker is
+optional for development, but it is the default executor for Repogent runs.
+This `.venv` is for terminal development and does not replace the persistent
+CLI installation required by Codex Desktop.
 
 ## Use Repogent from Codex
 
