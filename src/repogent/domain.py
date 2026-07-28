@@ -393,6 +393,12 @@ def validate_terminal_outcome(manifest: RunManifest) -> None:
         CapabilityRegistry.defaults().validate_outcome(manifest.kind, manifest.outcome)
 
 
+def validated_manifest_update(
+    manifest: RunManifest, update: dict[str, object]
+) -> RunManifest:
+    return RunManifest.model_validate({**manifest.model_dump(), **update})
+
+
 class RunManifest(VersionedModel):
     run_id: str
     request: str

@@ -4,12 +4,15 @@ from pathlib import Path
 import pytest
 
 from repogent.approvals import FakeApprover
+from repogent.artifacts import ArtifactStore
 from repogent.domain import (
     Decision,
     ExecutionMode,
     IsolationLevel,
     ProviderReadiness,
+    RunManifest,
     RunStatus,
+    WorkflowKind,
     WorkflowOutcome,
 )
 from repogent.executor_selection import (
@@ -23,6 +26,7 @@ from repogent.run_builder import (
     RunBuildError,
     RunOptions,
     build_run,
+    terminalize_failure,
     validate_run_options,
 )
 
@@ -31,6 +35,26 @@ def _passing_preflight() -> PreflightReport:
     return PreflightReport(
         checks=[], git_commit=None, dirty=False, repository_fingerprint="repository"
     )
+
+
+def test_failure_terminalization_revalidates_a_read_only_workflow_outcome(
+    tmp_path: Path,
+) -> None:
+    """Catch failure handling persisting a terminal result outside its capability policy."""
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    store = ArtifactStore.create(tmp_path / "runs", repository, "review", run_id="run-1")
+    manifest = RunManifest(
+        run_id="run-1",
+        request="review",
+        kind=WorkflowKind.PATCH_REVIEW,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="human_intervention_required is not valid for patch_review",
+    ):
+        terminalize_failure(store, manifest, "interrupted")
 
 
 @pytest.mark.parametrize("provider", ["other", "", "OPENAI"])
