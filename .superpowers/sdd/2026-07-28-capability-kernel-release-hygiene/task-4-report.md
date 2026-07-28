@@ -219,3 +219,58 @@ both Task 4 commits.
 - Task 4 implementation: `da3c266` (`feat: type persistent capability reports`).
 - This evidence report is committed separately so it can record the exact
   implementation hash.
+
+## Review fix 3/3: typed terminal errors
+
+Final review identified that the original envelope declared `errors` but never
+populated it. As a result, provider, validation, policy, timeout, and checkout
+recovery failures persisted as an empty list despite otherwise having safe
+terminal evidence.
+
+Implemented in `b2c729e` (`fix: persist typed terminal report errors`):
+
+- `PersistentRunReport.errors` is bounded to ten `ErrorDetail` values.
+- `build_persistent_report` accepts trusted typed error input and otherwise
+  derives one safe error from durable failure state. It classifies provider,
+  required validation, policy, execution-limit, and recovery-unknown failures.
+- Mapping uses fixed public messages and remediations only; it never puts a
+  terminal exception or `manifest.reason` into `ErrorDetail`. Input messages
+  are redacted again and run ID/kind are rebound to the report manifest.
+- `Workflow` carries a provider failure as a direct typed input, retaining its
+  retry class without relying on exception text. This covers provider messages
+  such as authentication failures that do not contain the word “provider”.
+- Successful and cancelled reports retain `errors: []`.
+
+TDD RED evidence:
+
+```text
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m pytest \
+  tests/unit/test_run_reports.py \
+  tests/unit/test_workflow.py::test_non_retryable_provider_failure_writes_evidence_and_requires_human \
+  -q --no-cov
+```
+
+Result: six expected failures. The five derived terminal categories all had an
+empty errors list, and the durable provider-failure report contained `[]`.
+
+GREEN verification:
+
+```text
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m pytest \
+  tests/unit/test_run_reports.py tests/unit/test_reporting.py \
+  tests/unit/test_workflow.py tests/unit/test_run_sessions.py -q --no-cov
+# 147 passed
+
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m ruff check \
+  src/repogent/run_reports.py src/repogent/workflow.py \
+  tests/unit/test_run_reports.py tests/unit/test_workflow.py
+# All checks passed!
+
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m ruff format \
+  --check src/repogent/run_reports.py src/repogent/workflow.py \
+  tests/unit/test_run_reports.py tests/unit/test_workflow.py
+# 4 files already formatted
+
+PYTHONPATH=src /Users/mert/Documents/Repogent/.venv/bin/python -m mypy --strict src/repogent
+# Success: no issues found in 33 source files
+```
