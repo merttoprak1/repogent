@@ -137,6 +137,42 @@ def test_manifest_starts_in_created_state() -> None:
     assert manifest.outcome is None
 
 
+@pytest.mark.parametrize(
+    ("kind", "outcome"),
+    [
+        (WorkflowKind.VERIFIED_CHANGE, WorkflowOutcome.PATCH_READY),
+        (WorkflowKind.PATCH_REVIEW, WorkflowOutcome.REQUEST_CHANGES),
+        (WorkflowKind.CI_TRIAGE, WorkflowOutcome.INCONCLUSIVE),
+        (WorkflowKind.DEPENDENCY_UPDATE, WorkflowOutcome.CANDIDATES_FOUND),
+        (WorkflowKind.SECURITY_FIX, WorkflowOutcome.APPLIED),
+        (WorkflowKind.RELEASE_GATE, WorkflowOutcome.RELEASE_BLOCKED),
+    ],
+)
+def test_manifest_accepts_outcome_supported_by_its_workflow_kind(
+    kind: WorkflowKind, outcome: WorkflowOutcome
+) -> None:
+    """Catch manifest validation that rejects a legal terminal workflow result."""
+    manifest = RunManifest(run_id="run-123", request="Change", kind=kind, outcome=outcome)
+
+    assert manifest.outcome is outcome
+
+
+@pytest.mark.parametrize(
+    ("kind", "outcome"),
+    [
+        (WorkflowKind.PATCH_REVIEW, WorkflowOutcome.APPLIED),
+        (WorkflowKind.CI_TRIAGE, WorkflowOutcome.RELEASE_VERIFIED),
+        (WorkflowKind.RELEASE_GATE, WorkflowOutcome.PATCH_READY),
+    ],
+)
+def test_manifest_rejects_outcome_from_another_workflow_kind(
+    kind: WorkflowKind, outcome: WorkflowOutcome
+) -> None:
+    """Catch cross-workflow terminal results that would misrepresent authority."""
+    with pytest.raises(ValidationError, match="is not valid for"):
+        RunManifest(run_id="run-123", request="Change", kind=kind, outcome=outcome)
+
+
 def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
     manifest = RunManifest.model_validate(
         {"run_id": "legacy-run", "request": "Apply a safe change"}
