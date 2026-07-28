@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 import time
@@ -1311,16 +1312,52 @@ def test_report_is_terminal_run_report_only_and_bounded(tmp_path: Path) -> None:
         assert terminal.checkout_state is CheckoutState.NOT_APPLIED
         assert terminal.selected_patch_applied is False
         report = manager.get_report(snapshot.run_id)
-        assert report.status is terminal.status
-        assert report.checkout_state is terminal.checkout_state
-        assert report.report == (Path(report.evidence_path) / "report.md").read_text(
+        assert report.data.status is terminal.status
+        assert report.data.checkout_state is terminal.checkout_state
+        assert report.data.outcome is None
+        assert report.markdown == (Path(report.data.evidence_path) / "report.md").read_text(
             encoding="utf-8"
         )
 
-        evidence = Path(report.evidence_path)
+        persisted = Path(report.data.evidence_path) / "report.json"
+        assert persisted.is_file()
+        assert report.data.model_dump_json(indent=2) == persisted.read_text(encoding="utf-8")
+
+        evidence = Path(report.data.evidence_path)
         (evidence / "other.md").write_text("not the report")
         (evidence / "report.md").write_text("x" * 64_001)
         with pytest.raises(SessionError, match="64,000"):
+            manager.get_report(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_report_rejects_invalid_persistent_json(tmp_path: Path) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start_verified_change(start_request(target, tmp_path / "runs"))
+        terminal = manager.cancel(snapshot.run_id)
+        Path(terminal.evidence_path, "report.json").write_text("not-json")
+
+        with pytest.raises(SessionError, match="report data is invalid"):
+            manager.get_report(snapshot.run_id)
+    finally:
+        manager.shutdown()
+
+
+def test_report_rejects_persistent_data_for_different_run(tmp_path: Path) -> None:
+    target = make_target(tmp_path)
+    manager = SessionManager(builder=make_builder())
+    try:
+        snapshot = manager.start_verified_change(start_request(target, tmp_path / "runs"))
+        terminal = manager.cancel(snapshot.run_id)
+        report_path = Path(terminal.evidence_path, "report.json")
+        payload = json.loads(report_path.read_text())
+        payload["run_id"] = "different-run"
+        report_path.write_text(json.dumps(payload))
+
+        with pytest.raises(SessionError, match="does not match terminal run state"):
             manager.get_report(snapshot.run_id)
     finally:
         manager.shutdown()
@@ -1534,7 +1571,7 @@ def test_report_reader_requests_only_the_bounded_prefix(
         report_path = Path(terminal.evidence_path) / "report.md"
         report_path.write_text("x" * 100_000)
         real_fdopen = os.fdopen
-        guarded = False
+        requested_sizes: list[int] = []
 
         class GuardedReader:
             def __init__(self, handle) -> None:
@@ -1548,18 +1585,16 @@ def test_report_reader_requests_only_the_bounded_prefix(
                 return self.handle.__exit__(*args)
 
             def read(self, size: int = -1) -> str:
-                assert size == 64_001
+                requested_sizes.append(size)
                 return self.handle.read(size)
 
         def guarded_fdopen(*args, **kwargs):
-            nonlocal guarded
-            guarded = True
             return GuardedReader(real_fdopen(*args, **kwargs))
 
         monkeypatch.setattr(os, "fdopen", guarded_fdopen)
         with pytest.raises(SessionError, match="64,000"):
             manager.get_report(snapshot.run_id)
-        assert guarded is True
+        assert requested_sizes == [1_000_001, 64_001]
     finally:
         manager.shutdown()
 

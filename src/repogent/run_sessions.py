@@ -44,6 +44,7 @@ from repogent.run_builder import (
     RunOptions,
     build_run,
 )
+from repogent.run_reports import PersistentRunReport
 from repogent.sanitization import redact_text, sanitize_data
 
 _ORIGINAL_OS_OPEN = os.open
@@ -333,6 +334,12 @@ class RunSession:
         return self._done.is_set()
 
     def read_report(self) -> str:
+        return self._read_report_file("report.md", max_characters=64_000)
+
+    def read_report_data(self) -> str:
+        return self._read_report_file("report.json", max_characters=1_000_000)
+
+    def _read_report_file(self, filename: str, *, max_characters: int) -> str:
         if not _supports_secure_report_access():
             raise SessionError("secure report access is unavailable on this platform")
         root_descriptor = -1
@@ -358,14 +365,14 @@ class RunSession:
                 raise SessionError("run evidence directory changed while it was opened")
 
             inspected_report = os.stat(
-                "report.md",
+                filename,
                 dir_fd=root_descriptor,
                 follow_symlinks=False,
             )
             if not stat.S_ISREG(inspected_report.st_mode):
                 raise SessionError("run report must be a regular file")
             report_descriptor = os.open(
-                "report.md",
+                filename,
                 _read_flags(),
                 dir_fd=root_descriptor,
             )
@@ -381,7 +388,7 @@ class RunSession:
                 encoding="utf-8",
             ) as handle:
                 report_descriptor = -1
-                return handle.read(64_001)
+                return handle.read(max_characters + 1)
         except SessionError:
             raise
         except (OSError, UnicodeError) as error:
@@ -662,17 +669,28 @@ class SessionManager:
         if not session.is_done():
             raise SessionError("run is not terminal")
         snapshot = session.snapshot()
-        report = session.read_report()
-        if len(report) > 64_000:
+        report_data = session.read_report_data()
+        if len(report_data) > 1_000_000:
+            raise SessionError("run report data exceeds 1,000,000 characters")
+        try:
+            data = PersistentRunReport.model_validate_json(report_data)
+        except ValueError as error:
+            raise SessionError("run report data is invalid") from error
+        if (
+            data.run_id != run_id
+            or data.kind is not snapshot.kind
+            or data.status is not snapshot.status
+            or data.outcome is not snapshot.outcome
+            or data.checkout_state is not snapshot.checkout_state
+            or data.evidence_path != snapshot.evidence_path
+        ):
+            raise SessionError("run report data does not match terminal run state")
+        markdown = session.read_report()
+        if len(markdown) > 64_000:
             raise SessionError("run report exceeds 64,000 characters")
         return RunReport(
-            run_id=run_id,
-            kind=snapshot.kind,
-            outcome=snapshot.outcome,
-            status=snapshot.status,
-            checkout_state=snapshot.checkout_state,
-            evidence_path=snapshot.evidence_path,
-            report=redact_text(report),
+            data=data,
+            markdown=redact_text(markdown),
         )
 
     def shutdown(self) -> None:

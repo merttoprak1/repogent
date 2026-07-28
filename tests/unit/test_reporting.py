@@ -22,6 +22,7 @@ from repogent.domain import (
     ValidationTarget,
     ValidationTargetKind,
     VerificationStatus,
+    WorkflowKind,
     WorkflowOutcome,
 )
 from repogent.localization import LocalizationReport, LocalizedSymbol
@@ -73,6 +74,46 @@ def test_report_separates_tool_evidence_from_qa_interpretation() -> None:
     assert "## Deterministic validation" in report
     assert "pytest: passed (exit 0)" in report
     assert "## Model-generated QA review" in report
+
+
+def test_report_renders_common_envelope_before_verified_change_details() -> None:
+    manifest = RunManifest(
+        run_id="run-1",
+        request="add route",
+        kind=WorkflowKind.VERIFIED_CHANGE,
+        outcome=WorkflowOutcome.APPLIED,
+        status=RunStatus.COMPLETED,
+        selected_candidate_id="candidate-1",
+        checkout_state=CheckoutState.APPLIED,
+        applied_paths=["src/app.py"],
+        final_validation_status=FinalValidationStatus.PASSED,
+    )
+    validation = ValidationReport(
+        checks=[
+            CheckResult(
+                name="pytest",
+                argv=["pytest"],
+                status=CheckStatus.PASSED,
+                required=True,
+            )
+        ]
+    )
+
+    report = render_report(
+        manifest,
+        None,
+        None,
+        validation,
+        None,
+        evidence_path="/bounded/evidence/run-1",
+    )
+
+    assert "Kind: `verified_change`" in report
+    assert "Checkout changed: yes" in report
+    assert "Required checks: pytest" in report
+    assert "## Verified change result" in report
+    assert report.index("Checkout changed: yes") < report.index("## Verified change result")
+    assert "Selected candidate: candidate-1" in report
 
 
 def test_report_shows_localization_candidate_evidence_and_recovery() -> None:

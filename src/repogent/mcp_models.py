@@ -23,6 +23,7 @@ from repogent.domain import (
     compute_trust_label,
 )
 from repogent.repository_scope import ScopeSource
+from repogent.run_reports import PersistentRunReport
 
 BoundedPath = Annotated[str, Field(max_length=4_096)]
 
@@ -154,13 +155,8 @@ class RunSnapshot(VersionedModel):
 
 
 class RunReport(VersionedModel):
-    run_id: str = Field(min_length=1, max_length=256)
-    kind: WorkflowKind = WorkflowKind.VERIFIED_CHANGE
-    outcome: WorkflowOutcome | None = None
-    status: RunStatus
-    checkout_state: CheckoutState
-    evidence_path: str = Field(max_length=4_096)
-    report: str = Field(max_length=64_000)
+    data: PersistentRunReport
+    markdown: str = Field(max_length=64_000)
 
 
 class DoctorRequest(VersionedModel):

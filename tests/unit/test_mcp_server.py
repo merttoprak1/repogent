@@ -15,6 +15,7 @@ from repogent.domain import (
     ExecutionMode,
     FinalValidationStatus,
     IsolationLevel,
+    RunManifest,
     RunStage,
     RunStatus,
     ValidationTarget,
@@ -35,6 +36,7 @@ from repogent.mcp_models import (
     VerifiedChangeStart,
 )
 from repogent.mcp_server import create_server
+from repogent.run_reports import build_persistent_report
 
 
 @pytest.fixture
@@ -53,6 +55,19 @@ def _snapshot(run_id: str = "run-1") -> RunSnapshot:
         final_validation_status=FinalValidationStatus.NOT_STARTED,
         evidence_path="/bounded/evidence",
     )
+
+
+def _run_report() -> RunReport:
+    data = build_persistent_report(
+        RunManifest(
+            run_id="run-1",
+            request="change",
+            status=RunStatus.COMPLETED,
+        ),
+        None,
+        evidence_path="/bounded/evidence",
+    )
+    return RunReport(data=data, markdown="bounded report")
 
 
 def _executor_option(mode: ExecutionMode, *, digest: str) -> ExecutorOption:
@@ -112,13 +127,7 @@ def _execution_decision(
 class FakeManager:
     def __init__(self) -> None:
         self.snapshot = _snapshot()
-        self.report = RunReport(
-            run_id="run-1",
-            status=RunStatus.COMPLETED,
-            checkout_state=CheckoutState.NOT_APPLIED,
-            evidence_path="/bounded/evidence",
-            report="bounded report",
-        )
+        self.report = _run_report()
         self.calls: list[tuple[str, object]] = []
         self.shutdown_called = False
 
@@ -431,7 +440,7 @@ async def test_successful_structured_results_are_recursively_redacted() -> None:
         update={"reason": "token=sk-proj-1234567890abcdef password=do-not-show"}
     )
     manager.report = manager.report.model_copy(
-        update={"report": "credential token=sk-proj-1234567890abcdef"}
+        update={"markdown": "credential token=sk-proj-1234567890abcdef"}
     )
     doctor = FakeDoctor()
     doctor.report = doctor.report.model_copy(

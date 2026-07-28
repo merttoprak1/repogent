@@ -41,9 +41,10 @@ from repogent.preflight import (
     repository_preflight,
 )
 from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
-from repogent.reporting import render_report
+from repogent.reporting import render_persistent_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
 from repogent.repository_scope import RepositoryScope, RepositoryScopeResolver
+from repogent.run_reports import build_persistent_report
 from repogent.workflow import ExecutorSelector, Workflow
 
 ProviderName = Literal["openai", "codex-cli", "scripted"]
@@ -322,7 +323,23 @@ def terminalize_failure(
         }
     )
     store.update_manifest(terminal)
-    store.write_final("report.md", render_report(terminal, None, None, None, None))
+    persistent_report = build_persistent_report(
+        terminal,
+        None,
+        evidence_path=str(store.root),
+    )
+    store.write_final("report.json", persistent_report.model_dump_json(indent=2))
+    store.write_final(
+        "report.md",
+        render_persistent_report(
+            persistent_report,
+            terminal,
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
     try:
         sequence = 1
         events_path = store.root / "events.jsonl"
