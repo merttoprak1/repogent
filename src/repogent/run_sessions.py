@@ -88,7 +88,7 @@ def _decision_error(
     run_id: str,
     run_kind: WorkflowKind,
 ) -> RepogentError:
-    if "digest" in str(error):
+    if error.code is ErrorCode.STALE_DIGEST:
         return _typed_error(
             code=ErrorCode.STALE_DIGEST,
             message="The decision does not match the current pending artifact.",
@@ -113,7 +113,7 @@ def _executor_error(
     run_id: str,
     run_kind: WorkflowKind,
 ) -> RepogentError:
-    if error is not None and "digest" in str(error):
+    if error is not None and error.code is ErrorCode.STALE_DIGEST:
         return _typed_error(
             code=ErrorCode.STALE_DIGEST,
             message="The executor decision does not match the current validation target.",

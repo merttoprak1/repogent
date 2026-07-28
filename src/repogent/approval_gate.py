@@ -16,6 +16,7 @@ from repogent.domain import (
     PendingApproval,
     VerificationStatus,
 )
+from repogent.errors import ErrorCode
 from repogent.executor_selection import validate_executor_isolation
 from repogent.sanitization import redact_text, sanitize_data
 
@@ -24,12 +25,17 @@ _CHECK_REASON_MAX_CHARS = 4_096
 
 
 class ApprovalGateError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: ErrorCode = ErrorCode.POLICY,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
-def approval_payload(
-    kind: ApprovalKind, artifact: BaseModel | str
-) -> dict[str, object] | str:
+def approval_payload(kind: ApprovalKind, artifact: BaseModel | str) -> dict[str, object] | str:
     return _approval_payload_from_snapshot(kind, _artifact_snapshot(artifact))
 
 
@@ -81,9 +87,7 @@ def _approval_payload_from_snapshot(
         if not isinstance(candidate, dict) or not isinstance(evidence, dict):
             continue
         validation = evidence.get("validation")
-        validation_checks = (
-            validation.get("checks", []) if isinstance(validation, dict) else []
-        )
+        validation_checks = validation.get("checks", []) if isinstance(validation, dict) else []
         checks: list[dict[str, object]] = []
         skipped_checks: list[dict[str, str]] = []
         for check in validation_checks:
@@ -101,9 +105,7 @@ def _approval_payload_from_snapshot(
                 skipped_checks.append(
                     {
                         "name": name,
-                        "reason": _bounded_redacted(
-                            check.get("reason"), _CHECK_REASON_MAX_CHARS
-                        ),
+                        "reason": _bounded_redacted(check.get("reason"), _CHECK_REASON_MAX_CHARS),
                     }
                 )
         summaries.append(
@@ -119,9 +121,7 @@ def _approval_payload_from_snapshot(
                 "skipped_checks": skipped_checks,
                 "changed_files": evidence.get("changed_files"),
                 "changed_lines": evidence.get("changed_lines"),
-                "acceptance_criteria_coverage": evidence.get(
-                    "acceptance_criteria_coverage"
-                ),
+                "acceptance_criteria_coverage": evidence.get("acceptance_criteria_coverage"),
                 "selected": item.get("selected", False),
             }
         )
@@ -136,14 +136,10 @@ def _approval_payload_from_snapshot(
         raise ApprovalGateError("approval artifact sanitization failed")
     sanitized_selected = sanitized_result.get("selected_candidate")
     sanitized_proposal = (
-        sanitized_selected.get("proposal")
-        if isinstance(sanitized_selected, dict)
-        else None
+        sanitized_selected.get("proposal") if isinstance(sanitized_selected, dict) else None
     )
     sanitized_diff = (
-        sanitized_proposal.get("diff")
-        if isinstance(sanitized_proposal, dict)
-        else None
+        sanitized_proposal.get("diff") if isinstance(sanitized_proposal, dict) else None
     )
     if isinstance(exact_diff, str) and sanitized_diff != exact_diff:
         raise ApprovalGateError("approval artifact contains secret-like patch content")
@@ -191,9 +187,7 @@ def approval_digest(kind: ApprovalKind, artifact: BaseModel | str) -> str:
     return _approval_digest_from_payload(kind, approval_payload(kind, artifact))
 
 
-def _approval_digest_from_payload(
-    kind: ApprovalKind, payload: dict[str, object] | str
-) -> str:
+def _approval_digest_from_payload(kind: ApprovalKind, payload: dict[str, object] | str) -> str:
     if kind is ApprovalKind.PATCH and isinstance(payload, dict):
         selected = payload.get("selected_candidate")
         if isinstance(selected, dict):
@@ -283,10 +277,11 @@ class GateApprover:
             if pending.kind is not kind:
                 raise ApprovalGateError("approval kind does not match the pending gate")
             if pending.digest != digest:
-                raise ApprovalGateError("approval digest does not match the displayed artifact")
-            self._decision = ApprovalRecord(
-                kind=kind, decision=decision, feedback=feedback
-            )
+                raise ApprovalGateError(
+                    "approval digest does not match the displayed artifact",
+                    code=ErrorCode.STALE_DIGEST,
+                )
+            self._decision = ApprovalRecord(kind=kind, decision=decision, feedback=feedback)
             self._condition.notify_all()
 
     def close(self) -> None:

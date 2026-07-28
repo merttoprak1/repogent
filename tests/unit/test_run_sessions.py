@@ -42,7 +42,11 @@ from repogent.domain import (
 from repogent.errors import ErrorCode, RepogentError, RetryClass
 from repogent.execution import ValidationPolicy
 from repogent.execution_gate import ExecutorInspectionCoordinator
-from repogent.executor_selection import LOCAL_RISK_STATEMENT, PreparedExecutor
+from repogent.executor_selection import (
+    LOCAL_RISK_STATEMENT,
+    ExecutorSelectionError,
+    PreparedExecutor,
+)
 from repogent.mcp_models import (
     ExecutorAvailability,
     ExecutorOption,
@@ -196,6 +200,14 @@ class RepairingSessionRegistry(SessionRegistry):
             preflight=prepared.preflight,
             validator=FailingValidator(),  # type: ignore[arg-type]
         )
+
+
+class DigestMentioningUnavailableSessionRegistry(SessionRegistry):
+    def prepare(
+        self, root: Path, mode: ExecutionMode, policy: ValidationPolicy
+    ) -> PreparedExecutor:
+        del root, mode, policy
+        raise ExecutorSelectionError("executor digest metadata is unavailable")
 
 
 class BlockingInspectionSessionRegistry(SessionRegistry):
@@ -944,7 +956,7 @@ def test_executor_selection_is_rejected_while_content_approval_is_pending(
         manager.shutdown()
 
 
-def test_stale_execution_decision_does_not_consume_pending_choice(
+def test_true_stale_execution_digest_conflicts_remain_stale(
     tmp_path: Path,
 ) -> None:
     manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
@@ -968,6 +980,28 @@ def test_stale_execution_decision_does_not_consume_pending_choice(
         assert recovered.pending_execution == snapshot.pending_execution
         manager.cancel(snapshot.run_id)
     finally:
+        manager.shutdown()
+
+
+def test_non_stale_executor_failure_that_mentions_digest_remains_unavailable(
+    tmp_path: Path,
+) -> None:
+    registry = DigestMentioningUnavailableSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path,
+        registry=registry,
+    )
+    try:
+        with pytest.raises(RepogentError) as caught:
+            manager.select_executor(execution_decision_for(snapshot))
+
+        assert caught.value.detail.code is ErrorCode.EXECUTOR_UNAVAILABLE
+        assert caught.value.detail.retry is RetryClass.RECONCILE_FIRST
+        assert caught.value.detail.message == (
+            "Executor selection is unavailable for the current run state."
+        )
+    finally:
+        manager.cancel(snapshot.run_id)
         manager.shutdown()
 
 
