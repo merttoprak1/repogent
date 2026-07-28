@@ -19,11 +19,11 @@ from repogent.execution_gate import (
 )
 from repogent.executor_selection import ExecutorRegistry
 from repogent.mcp_models import (
-    ExecutionDecision,
     PendingExecutionChoice,
     RunDecision,
     RunReport,
     RunSnapshot,
+    ValidationDecision,
     VerifiedChangeStart,
 )
 from repogent.run_builder import (
@@ -144,7 +144,7 @@ class RunSession:
             self._pending = None
         return self.wait_for_change()
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
         with self._operation_lock:
             if self.executor_gate is None:
                 raise SessionError("no executor selection is pending")
@@ -564,7 +564,7 @@ class SessionManager:
     def decide(self, decision: RunDecision) -> RunSnapshot:
         return self._get_session(decision.run_id).decide(decision)
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
         return self._get_session(decision.run_id).select_executor(decision)
 
     def cancel(self, run_id: str) -> RunSnapshot:

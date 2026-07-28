@@ -49,7 +49,12 @@ def render_report(
         f"Reason: {_markdown_text(manifest.reason or 'none')}",
         f"Verification: {derive_trust_label(manifest)}",
         f"Execution mode: {manifest.execution_mode.value if manifest.execution_mode else 'none'}",
-        f"Preview digest: {manifest.preview_digest or 'none'}",
+        "Evaluated target: "
+        + (
+            f"{manifest.evaluated_target.kind.value}:{manifest.evaluated_target.digest}"
+            if manifest.evaluated_target is not None
+            else "none"
+        ),
         "",
     ]
     if manifest.generated_but_not_consumed:

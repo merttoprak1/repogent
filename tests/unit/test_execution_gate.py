@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from repogent.candidates import PatchPreview
+from repogent.candidates import PatchPreview, patch_preview_digest
 from repogent.domain import (
     CandidateRecord,
     Decision,
@@ -17,6 +17,8 @@ from repogent.domain import (
     IsolationLevel,
     PatchProposal,
     ProviderUsage,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
 )
 from repogent.execution import ValidationPolicy
@@ -31,10 +33,10 @@ from repogent.executor_selection import (
     PreparedExecutor,
 )
 from repogent.mcp_models import (
-    ExecutionDecision,
     ExecutorAvailability,
     ExecutorOption,
     PendingExecutionChoice,
+    ValidationDecision,
 )
 from repogent.preflight import PreflightReport
 from repogent.workflow import ExecutorSelectionRejected, WorkflowCancelled
@@ -69,7 +71,7 @@ class RecordingRegistry:
     def build_options(
         self,
         run_id: str,
-        preview_digest: str,
+        target: ValidationTarget,
         availability: list[ExecutorAvailability],
     ) -> list[ExecutorOption]:
         return [
@@ -79,7 +81,7 @@ class RecordingRegistry:
                 isolation_level=item.isolation_level,
                 option_digest=hashlib.sha256(
                     (
-                        f"{run_id}:{preview_digest}:{item.mode.value}:"
+                        f"{run_id}:{target.kind.value}:{target.digest}:{item.mode.value}:"
                         f"{item.risk_statement or ''}"
                     ).encode()
                 ).hexdigest(),
@@ -260,7 +262,11 @@ def start_selection(
     def select() -> None:
         try:
             outcome.set_result(
-                gate.select(patch_preview, timeout_seconds=timeout_seconds)
+                select_preview(
+                    gate,
+                    patch_preview,
+                    timeout_seconds=timeout_seconds,
+                )
             )
         except BaseException as error:
             outcome.set_exception(error)
@@ -268,6 +274,23 @@ def start_selection(
     worker = threading.Thread(target=select)
     worker.start()
     return worker, outcome
+
+
+def select_preview(
+    gate: GateExecutorSelector,
+    patch_preview: PatchPreview,
+    *,
+    timeout_seconds: float,
+) -> PreparedExecutor:
+    target = ValidationTarget(
+        kind=ValidationTargetKind.PATCH,
+        digest=patch_preview_digest(patch_preview),
+    )
+    return gate.select(
+        target,
+        patch_preview.model_dump(mode="json"),
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def pending_choice(gate: GateExecutorSelector) -> PendingExecutionChoice:
@@ -291,10 +314,17 @@ def local_decision(
     preview_digest: str | None = None,
     option_digest: str | None = None,
     decision: Decision = Decision.APPROVED,
-) -> ExecutionDecision:
-    return ExecutionDecision(
+) -> ValidationDecision:
+    return ValidationDecision(
         run_id=run_id or pending.run_id,
-        preview_digest=preview_digest or pending.preview_digest,
+        target=(
+            ValidationTarget(
+                kind=pending.target.kind,
+                digest=preview_digest,
+            )
+            if preview_digest is not None
+            else pending.target
+        ),
         mode=selected.mode,
         option_digest=option_digest or selected.option_digest,
         decision=decision,
@@ -307,7 +337,7 @@ def close_and_join(gate: GateExecutorSelector, worker: threading.Thread) -> None
     assert not worker.is_alive()
 
 
-def test_local_selection_requires_matching_preview_and_option_digest(
+def test_local_selection_requires_matching_target_and_option_digest(
     tmp_path: Path,
 ) -> None:
     registry = RecordingRegistry()
@@ -316,7 +346,7 @@ def test_local_selection_requires_matching_preview_and_option_digest(
     pending = pending_choice(gate)
     local = option(pending, ExecutionMode.LOCAL)
     try:
-        with pytest.raises(ExecutionGateError, match="preview digest mismatch"):
+        with pytest.raises(ExecutionGateError, match="target digest mismatch"):
             gate.submit(
                 local_decision(pending, local, preview_digest="f" * 64)
             )
@@ -333,9 +363,12 @@ def test_local_selection_requires_matching_preview_and_option_digest(
 
 def test_plain_approval_without_local_option_digest_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        ExecutionDecision(
+        ValidationDecision(
             run_id="run-1",
-            preview_digest="a" * 64,
+            target=ValidationTarget(
+                kind=ValidationTargetKind.PATCH,
+                digest="a" * 64,
+            ),
             mode=ExecutionMode.LOCAL,
             option_digest="",
             decision=Decision.APPROVED,
@@ -503,7 +536,8 @@ def test_gate_rejects_preview_changed_by_recursive_sanitization(
     gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), registry)
 
     with pytest.raises(ExecutionGateError, match="unsafe to display"):
-        gate.select(
+        select_preview(
+            gate,
             preview(replacement="api_key = 'super-secret-value'"),
             timeout_seconds=1,
         )
@@ -754,7 +788,7 @@ def test_inspection_capacity_rejects_repeated_work_and_recovers_after_release(
         for gate in saturated_gates:
             started = time.monotonic()
             with pytest.raises(ExecutionGateError, match="inspection capacity"):
-                gate.select(preview(), timeout_seconds=1)
+                select_preview(gate, preview(), timeout_seconds=1)
             assert time.monotonic() - started < 0.2
             assert gate.wait(after_generation=0, timeout_seconds=0) == (0, None)
         assert registry.inspect_calls == capacity

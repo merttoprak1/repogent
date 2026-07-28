@@ -26,11 +26,11 @@ from repogent.domain import (
     VerificationStatus,
 )
 from repogent.mcp_models import (
-    ExecutionDecision,
     ExecutorOption,
     PendingExecutionChoice,
     RunDecision,
     RunSnapshot,
+    ValidationDecision,
     VerifiedChangeStart,
 )
 
@@ -119,14 +119,17 @@ def _execution_decision(
     snapshot: RunSnapshot,
     option: ExecutorOption,
     *,
-    preview_digest: str | None = None,
+    target_digest: str | None = None,
     decision: Decision = Decision.APPROVED,
 ) -> dict[str, object]:
     pending = snapshot.pending_execution
     assert pending is not None
-    execution_decision = ExecutionDecision(
+    target = pending.target
+    if target_digest is not None:
+        target = target.model_copy(update={"digest": target_digest})
+    execution_decision = ValidationDecision(
         run_id=snapshot.run_id,
-        preview_digest=preview_digest or pending.preview_digest,
+        target=target,
         mode=option.mode,
         option_digest=option.option_digest,
         decision=decision,
@@ -184,7 +187,7 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
         assert snapshot.trust_label is TrustLabel.UNVALIDATED
         # The unvalidated preview digest must differ from the final patch digest
         # the operator later approves; capture it to prove they are distinct.
-        preview_digest = snapshot.pending_execution.preview_digest
+        preview_digest = snapshot.pending_execution.target.digest
 
         snapshot = await _select_local_until_patch_pending(session, snapshot)
         assert snapshot.pending_execution is None
@@ -225,7 +228,7 @@ async def test_stdio_plugin_run_crosses_three_digest_gates_and_applies_exact_pat
     assert manifest["checkout_state"] == CheckoutState.APPLIED.value
     assert manifest["final_validation_status"] == FinalValidationStatus.PASSED.value
     # Evidence must retain the preview, executor, and trust records for the run.
-    assert manifest["preview_digest"] == preview_digest
+    assert manifest["evaluated_target"]["digest"] == preview_digest
     assert manifest["execution_mode"] == ExecutionMode.LOCAL.value
     assert manifest["isolation_level"] == IsolationLevel.REDUCED_ISOLATION.value
     assert manifest["verification_status"] == VerificationStatus.PASSED.value
@@ -396,7 +399,7 @@ async def test_deferred_run_reaches_preview_when_docker_is_absent(
 
 
 @pytest.mark.anyio
-async def test_stale_execution_preview_digest_cannot_select_executor(
+async def test_stale_execution_target_digest_cannot_select_executor(
     tmp_path: Path,
 ) -> None:
     target = _copy_demo(tmp_path)
@@ -418,13 +421,13 @@ async def test_stale_execution_preview_digest_cannot_select_executor(
         local = _execution_option(pending, ExecutionMode.LOCAL)
         stale = await session.call_tool(
             "select_executor",
-            _execution_decision(snapshot, local, preview_digest="0" * 64),
+            _execution_decision(snapshot, local, target_digest="0" * 64),
         )
         assert stale.isError is True
 
         observed = await _snapshot_call(session, "get_run", {"run_id": snapshot.run_id})
         assert observed.pending_execution is not None
-        assert observed.pending_execution.preview_digest == pending.preview_digest
+        assert observed.pending_execution.target == pending.target
         assert observed.checkout_state is CheckoutState.NOT_APPLIED
         assert '@app.get("/health")' not in (target / "app.py").read_text()
         await _snapshot_call(session, "cancel_run", {"run_id": snapshot.run_id})

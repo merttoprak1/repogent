@@ -364,7 +364,8 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     assert persisted["events_file"] == "events.jsonl"
     assert persisted["execution_mode"] == "local"
     assert persisted["verification_status"] == "passed"
-    assert persisted["preview_digest"]
+    assert persisted["evaluated_target"]["kind"] == "patch"
+    assert persisted["evaluated_target"]["digest"]
     events = [
         RunEvent.model_validate(json.loads(line))
         for line in (evidence / "events.jsonl").read_text().splitlines()
@@ -380,7 +381,9 @@ def test_phase2_workflow_verifies_a_low_risk_patch_across_python_shapes(
     assert "| selected |" in report
     assert "Verification: REDUCED ISOLATION" in report
     assert "Execution mode: local" in report
-    assert f"Preview digest: {persisted['preview_digest']}" in report
+    assert (
+        f"Evaluated target: patch:{persisted['evaluated_target']['digest']}" in report
+    )
 
 
 @pytest.mark.parametrize("name", ["python_library", "python_cli", "python_data"])

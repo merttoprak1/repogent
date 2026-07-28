@@ -7,8 +7,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from repogent.candidates import PatchPreview, patch_preview_digest
-from repogent.domain import Decision, ExecutionMode
+from repogent.domain import Decision, ExecutionMode, ValidationTarget
 from repogent.execution import ValidationPolicy
 from repogent.executor_selection import (
     ExecutorRegistry,
@@ -17,9 +16,9 @@ from repogent.executor_selection import (
     validate_executor_isolation,
 )
 from repogent.mcp_models import (
-    ExecutionDecision,
     ExecutorAvailability,
     PendingExecutionChoice,
+    ValidationDecision,
 )
 from repogent.sanitization import sanitize_data
 from repogent.workflow import ExecutorSelectionRejected, WorkflowCancelled
@@ -111,7 +110,8 @@ class GateExecutorSelector:
 
     def select(
         self,
-        preview: PatchPreview,
+        target: ValidationTarget,
+        preview: dict[str, object],
         *,
         timeout_seconds: float,
     ) -> PreparedExecutor:
@@ -121,7 +121,7 @@ class GateExecutorSelector:
                 raise WorkflowCancelled("executor selection gate is closed")
             self._active_selections += 1
         try:
-            return self._select(preview, deadline)
+            return self._select(target, preview, deadline)
         finally:
             with self._condition:
                 self._active_selections -= 1
@@ -129,17 +129,16 @@ class GateExecutorSelector:
 
     def _select(
         self,
-        preview: PatchPreview,
+        target: ValidationTarget,
+        preview: dict[str, object],
         deadline: float,
     ) -> PreparedExecutor:
-        preview_payload = preview.model_dump(mode="json")
-        sanitized = sanitize_data(preview_payload)
-        if not isinstance(sanitized, dict) or sanitized != preview_payload:
-            raise ExecutionGateError("patch preview is unsafe to display")
-        digest = patch_preview_digest(preview)
+        sanitized = sanitize_data(preview)
+        if not isinstance(sanitized, dict) or sanitized != preview:
+            raise ExecutionGateError("validation preview is unsafe to display")
         availability = self._inspect_availability(deadline)
         base_options = self._registry.build_options(
-            self.run_id, digest, availability
+            self.run_id, target, availability
         )
         if (
             len(base_options) != 2
@@ -157,7 +156,7 @@ class GateExecutorSelector:
             generation = self._generation + 1
             pending = PendingExecutionChoice(
                 run_id=self.run_id,
-                preview_digest=digest,
+                target=target,
                 preview=sanitized,
                 options=[
                     option.model_copy(
@@ -202,7 +201,7 @@ class GateExecutorSelector:
             self._condition.notify_all()
             return prepared
 
-    def submit(self, decision: ExecutionDecision) -> int:
+    def submit(self, decision: ValidationDecision) -> int:
         with self._condition:
             if self._closed:
                 raise ExecutionGateError("executor selection gate is closed")
@@ -220,8 +219,10 @@ class GateExecutorSelector:
                 )
             if decision.run_id != pending.run_id:
                 raise ExecutionGateError("executor selection run ID mismatch")
-            if decision.preview_digest != pending.preview_digest:
-                raise ExecutionGateError("executor selection preview digest mismatch")
+            if decision.target.kind is not pending.target.kind:
+                raise ExecutionGateError("executor selection target kind mismatch")
+            if decision.target.digest != pending.target.digest:
+                raise ExecutionGateError("executor selection target digest mismatch")
             selected = next(
                 (
                     item

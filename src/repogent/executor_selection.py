@@ -6,8 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from repogent.candidates import PatchPreview
-from repogent.domain import ExecutionMode, IsolationLevel
+from repogent.domain import ExecutionMode, IsolationLevel, ValidationTarget
 from repogent.execution import DockerExecutor, Executor, LocalExecutor, ValidationPolicy
 from repogent.mcp_models import ExecutorAvailability, ExecutorOption
 from repogent.preflight import Preflight, PreflightReport, ReadinessStatus
@@ -45,15 +44,16 @@ class FixedExecutorSelector:
 
     def select(
         self,
-        preview: PatchPreview,
+        target: ValidationTarget,
+        preview: dict[str, object],
         *,
         timeout_seconds: float,
     ) -> PreparedExecutor:
-        del timeout_seconds
-        if preview is None:
+        del preview, timeout_seconds
+        if target is None:
             from repogent.workflow import ExecutorSelectionRejected
 
-            raise ExecutorSelectionRejected("patch preview is required before selection")
+            raise ExecutorSelectionRejected("validation target is required before selection")
         return self._prepared
 
 
@@ -72,13 +72,13 @@ def validate_executor_isolation(
 
 def option_digest(
     run_id: str,
-    preview_digest: str,
+    target: ValidationTarget,
     mode: ExecutionMode,
     risk_statement: str | None,
 ) -> str:
     payload = {
         "run_id": run_id,
-        "preview_digest": preview_digest,
+        "target": target.model_dump(mode="json"),
         "mode": mode.value,
         "risk_statement": risk_statement,
     }
@@ -112,7 +112,7 @@ class ExecutorRegistry:
     def build_options(
         self,
         run_id: str,
-        preview_digest: str,
+        target: ValidationTarget,
         availability: Sequence[ExecutorAvailability],
     ) -> list[ExecutorOption]:
         return [
@@ -121,7 +121,7 @@ class ExecutorRegistry:
                 available=item.available,
                 isolation_level=item.isolation_level,
                 option_digest=option_digest(
-                    run_id, preview_digest, item.mode, item.risk_statement
+                    run_id, target, item.mode, item.risk_statement
                 ),
                 message=item.message,
                 remediation=item.remediation,

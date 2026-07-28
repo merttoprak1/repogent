@@ -25,6 +25,7 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    ValidationTargetKind,
     VerificationStatus,
     WorkflowKind,
     WorkflowOutcome,
@@ -181,7 +182,7 @@ def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
     assert manifest.execution_mode is None
     assert manifest.isolation_level is None
     assert manifest.verification_status is VerificationStatus.UNVALIDATED
-    assert manifest.preview_digest is None
+    assert manifest.evaluated_target is None
 
     selected = RunManifest(
         run_id="run-123",
@@ -189,6 +190,21 @@ def test_old_manifest_payload_receives_safe_execution_defaults() -> None:
         execution_mode=ExecutionMode.LOCAL,
     )
     assert selected.execution_mode is ExecutionMode.LOCAL
+
+
+def test_legacy_preview_digest_is_read_as_patch_target_but_not_reemitted() -> None:
+    manifest = RunManifest.model_validate(
+        {
+            "run_id": "legacy-run",
+            "request": "Apply a safe change",
+            "preview_digest": "a" * 64,
+        }
+    )
+
+    assert manifest.evaluated_target is not None
+    assert manifest.evaluated_target.kind is ValidationTargetKind.PATCH
+    assert manifest.evaluated_target.digest == "a" * 64
+    assert "preview_digest" not in manifest.model_dump(mode="json")
 
 
 def test_manifest_phase_two_fields_round_trip_through_json() -> None:

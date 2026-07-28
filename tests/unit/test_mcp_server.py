@@ -16,17 +16,19 @@ from repogent.domain import (
     IsolationLevel,
     RunStage,
     RunStatus,
+    ValidationTarget,
+    ValidationTargetKind,
 )
 from repogent.mcp_models import (
     DoctorCheck,
     DoctorReport,
     DoctorRequest,
-    ExecutionDecision,
     ExecutorOption,
     PendingExecutionChoice,
     RunDecision,
     RunReport,
     RunSnapshot,
+    ValidationDecision,
     VerifiedChangeStart,
 )
 from repogent.mcp_server import create_server
@@ -67,12 +69,15 @@ def _executor_option(mode: ExecutionMode, *, digest: str) -> ExecutorOption:
 def _pending_execution(
     run_id: str = "run-1",
     *,
-    preview_digest: str = "a" * 64,
+    target_digest: str = "a" * 64,
     preview: dict[str, object] | None = None,
 ) -> PendingExecutionChoice:
     return PendingExecutionChoice(
         run_id=run_id,
-        preview_digest=preview_digest,
+        target=ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest=target_digest,
+        ),
         preview=preview if preview is not None else {"diff": "bounded preview"},
         options=[
             _executor_option(ExecutionMode.DOCKER, digest="b" * 64),
@@ -84,14 +89,17 @@ def _pending_execution(
 def _execution_decision(
     run_id: str = "run-1",
     *,
-    preview_digest: str = "a" * 64,
+    target_digest: str = "a" * 64,
     mode: ExecutionMode = ExecutionMode.LOCAL,
     option_digest: str = "c" * 64,
     decision: Decision = Decision.APPROVED,
-) -> ExecutionDecision:
-    return ExecutionDecision(
+) -> ValidationDecision:
+    return ValidationDecision(
         run_id=run_id,
-        preview_digest=preview_digest,
+        target=ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest=target_digest,
+        ),
         mode=mode,
         option_digest=option_digest,
         decision=decision,
@@ -123,7 +131,7 @@ class FakeManager:
         self.calls.append(("decide", decision))
         return self.snapshot
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
         self.calls.append(("select_executor", decision))
         return self.snapshot
 
@@ -194,7 +202,7 @@ class FailingManager(FakeManager):
         self._fail()
         raise AssertionError("unreachable")
 
-    def select_executor(self, decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
         self._fail()
         raise AssertionError("unreachable")
 
@@ -295,10 +303,10 @@ async def test_tool_catalog_has_exact_typed_contracts_and_annotations(
     }
     execution_decision_schema = tools["select_executor"].inputSchema
     assert execution_decision_schema["properties"]["decision"]["$ref"] == (
-        "#/$defs/ExecutionDecision"
+        "#/$defs/ValidationDecision"
     )
-    assert execution_decision_schema["$defs"]["ExecutionDecision"]["properties"] == {
-        key: value for key, value in ExecutionDecision.model_json_schema()["properties"].items()
+    assert execution_decision_schema["$defs"]["ValidationDecision"]["properties"] == {
+        key: value for key, value in ValidationDecision.model_json_schema()["properties"].items()
     }
     assert tools["inspect_repository_readiness"].outputSchema == DoctorReport.model_json_schema()
     assert tools["start_verified_change"].outputSchema == RunSnapshot.model_json_schema()
@@ -601,8 +609,8 @@ async def test_select_executor_run_id_boundaries_route_to_manager(
     [
         ("run_id", ""),
         ("run_id", "x" * 257),
-        ("preview_digest", "a" * 63),
-        ("preview_digest", "a" * 65),
+        ("target_digest", "a" * 63),
+        ("target_digest", "a" * 65),
         ("option_digest", "A" * 64),
     ],
     ids=[
@@ -620,7 +628,10 @@ async def test_select_executor_rejects_out_of_bounds_fields_without_routing(
 ) -> None:
     session, manager, _doctor = client_session
     payload = _execution_decision().model_dump(mode="json")
-    payload[field] = value
+    if field == "target_digest":
+        payload["target"]["digest"] = value
+    else:
+        payload[field] = value
 
     result = await session.call_tool("select_executor", {"decision": payload})
 

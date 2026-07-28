@@ -12,10 +12,10 @@ from repogent.domain import ApprovalKind, Decision
 from repogent.mcp_models import (
     DoctorReport,
     DoctorRequest,
-    ExecutionDecision,
     RunDecision,
     RunReport,
     RunSnapshot,
+    ValidationDecision,
     VerifiedChangeStart,
 )
 from repogent.run_sessions import SessionManager
@@ -181,7 +181,7 @@ def create_server(
             openWorldHint=False,
         ),
     )
-    def select_executor(decision: ExecutionDecision) -> RunSnapshot:
+    def select_executor(decision: ValidationDecision) -> RunSnapshot:
         if decision.decision is not Decision.APPROVED:
             raise ValueError("select_executor requires an approved decision")
         return _call_service(

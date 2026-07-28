@@ -52,6 +52,8 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
     WorkflowOutcome,
     utc_now,
@@ -92,10 +94,13 @@ class ExecutorSelectionRejected(RuntimeError):
 class ExecutorSelector(Protocol):
     def select(
         self,
-        preview: PatchPreview,
+        target: ValidationTarget,
+        preview: dict[str, object],
         *,
         timeout_seconds: float,
-    ) -> PreparedExecutor: ...
+    ) -> PreparedExecutor:
+        """Return the explicitly selected executor for this exact target."""
+        ...
 
 
 class Validator(Protocol):
@@ -365,7 +370,10 @@ class Workflow:
             update={
                 "selected_candidate_id": selected.candidate_id,
                 "repair_attempts": len(self.candidates) - 1,
-                "preview_digest": selected_preview_digest,
+                "evaluated_target": ValidationTarget(
+                    kind=ValidationTargetKind.PATCH,
+                    digest=selected_preview_digest,
+                ),
                 "execution_mode": selected_executor.mode,
                 "isolation_level": selected_executor.isolation_level,
                 "verification_status": VerificationStatus.PASSED,
@@ -608,9 +616,13 @@ class Workflow:
             self._account_candidate_generation(candidate)
             raise
         preview_digest = patch_preview_digest(preview)
+        target = ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest=preview_digest,
+        )
         self.manifest = self.manifest.model_copy(
             update={
-                "preview_digest": preview_digest,
+                "evaluated_target": target,
                 "verification_status": VerificationStatus.UNVALIDATED,
                 "execution_mode": None,
                 "isolation_level": None,
@@ -641,11 +653,16 @@ class Workflow:
                 )
             )
         selector = cast(ExecutorSelector, self.executor_selector)
-        selector_preview = preview.model_copy(deep=True)
+        selector_target = target.model_copy(deep=True)
+        selector_preview = preview.model_dump(mode="json")
         prepared = selector.select(
-            selector_preview, timeout_seconds=self.remaining_time()
+            selector_target,
+            selector_preview,
+            timeout_seconds=self.remaining_time(),
         )
-        if patch_preview_digest(selector_preview) != preview_digest:
+        if selector_target != target:
+            raise CandidateEvaluationError("validation target changed after persistence")
+        if patch_preview_digest(preview) != target.digest:
             raise CandidateEvaluationError("patch preview changed after persistence")
         self._assert_preview_binding(preview, candidate, preview_digest)
         validate_executor_isolation(prepared.mode, prepared.isolation_level)
@@ -697,9 +714,12 @@ class Workflow:
             self._candidate_evaluators[candidate.candidate_id] = candidate_evaluator
             self._candidate_executors[candidate.candidate_id] = prepared
             self._candidate_previews[candidate.candidate_id] = preview
-            preview_digest = self.manifest.preview_digest
-            if preview_digest is None:
+            evaluated_target = self.manifest.evaluated_target
+            if evaluated_target is None:
                 raise CandidateEvaluationError("patch preview digest is unavailable")
+            if evaluated_target.kind is not ValidationTargetKind.PATCH:
+                raise CandidateEvaluationError("patch preview target kind is invalid")
+            preview_digest = evaluated_target.digest
             self._candidate_preview_digests[candidate.candidate_id] = preview_digest
             self._assert_preview_binding(preview, candidate, preview_digest)
             candidate_evidence = candidate_evaluator.evaluate(
