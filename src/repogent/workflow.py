@@ -70,9 +70,10 @@ from repogent.patching import PatchApplier, PatchPolicy
 from repogent.preflight import PreflightReport
 from repogent.provider_context import ProviderContextBuilder
 from repogent.providers import ProviderError
-from repogent.reporting import render_report
+from repogent.reporting import render_persistent_report
 from repogent.repository import LexicalRetriever, RepositoryInspector, RepositoryInventory
 from repogent.repository_scope import RepositoryScope
+from repogent.run_reports import build_persistent_report
 from repogent.symbols import PythonSymbolGraph, PythonSymbolGraphBuilder
 
 
@@ -1066,9 +1067,19 @@ class Workflow:
 
     def _write_final_report(self) -> Exception | None:
         try:
+            persistent_report = build_persistent_report(
+                self.manifest,
+                self.validation,
+                evidence_path=str(self.artifacts.root),
+            )
+            self.artifacts.write_final(
+                "report.json",
+                persistent_report.model_dump_json(indent=2),
+            )
             self.artifacts.write_final(
                 "report.md",
-                render_report(
+                render_persistent_report(
+                    persistent_report,
                     self.manifest,
                     self.requirements,
                     self.plan,

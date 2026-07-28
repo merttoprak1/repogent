@@ -31,6 +31,7 @@ from repogent.domain import (
     WorkflowOutcome,
 )
 from repogent.mcp_models import RunDecision, RunReport, RunSnapshot, VerifiedChangeStart
+from repogent.run_reports import build_persistent_report
 
 
 def test_pending_approval_requires_sha256_digest() -> None:
@@ -338,6 +339,24 @@ def _snapshot_payload() -> dict[str, object]:
     }
 
 
+def _run_report(
+    *,
+    run_id: str = "run-1",
+    evidence_path: str = "/evidence/run-1",
+) -> RunReport:
+    data = build_persistent_report(
+        RunManifest(
+            run_id=run_id,
+            request="change",
+            status=RunStatus.COMPLETED,
+            outcome=WorkflowOutcome.PATCH_READY,
+        ),
+        None,
+        evidence_path=evidence_path,
+    )
+    return RunReport(data=data, markdown="done")
+
+
 def test_mcp_models_preserve_workflow_kind_and_outcome() -> None:
     snapshot = RunSnapshot(
         **{
@@ -346,18 +365,10 @@ def test_mcp_models_preserve_workflow_kind_and_outcome() -> None:
             "outcome": WorkflowOutcome.PATCH_READY,
         }
     )
-    report = RunReport(
-        run_id="run-1",
-        kind=WorkflowKind.VERIFIED_CHANGE,
-        outcome=WorkflowOutcome.PATCH_READY,
-        status=RunStatus.COMPLETED,
-        checkout_state=CheckoutState.NOT_APPLIED,
-        evidence_path="/evidence/run-1",
-        report="done",
-    )
+    report = _run_report()
 
     assert snapshot.outcome is WorkflowOutcome.PATCH_READY
-    assert report.kind is WorkflowKind.VERIFIED_CHANGE
+    assert report.data.kind is WorkflowKind.VERIFIED_CHANGE
 
 
 @pytest.mark.parametrize("model", ["decision", "snapshot", "report"])
@@ -374,13 +385,7 @@ def test_mcp_response_run_ids_are_limited_to_256_characters(model: str) -> None:
         elif model == "snapshot":
             RunSnapshot(**{**_snapshot_payload(), "run_id": run_id})
         else:
-            RunReport(
-                run_id=run_id,
-                status=RunStatus.COMPLETED,
-                checkout_state=CheckoutState.NOT_APPLIED,
-                evidence_path="/evidence/run-1",
-                report="done",
-            )
+            _run_report(run_id=run_id)
 
 
 @pytest.mark.parametrize("field", ["reason", "evidence_path"])
@@ -391,13 +396,7 @@ def test_run_snapshot_text_fields_are_limited_to_4096_characters(field: str) -> 
 
 def test_run_report_evidence_path_is_limited_to_4096_characters() -> None:
     with pytest.raises(ValidationError, match="at most 4096"):
-        RunReport(
-            run_id="run-1",
-            status=RunStatus.COMPLETED,
-            checkout_state=CheckoutState.NOT_APPLIED,
-            evidence_path="x" * 4_097,
-            report="done",
-        )
+        _run_report(evidence_path="x" * 4_097)
 
 
 def test_run_snapshot_applied_paths_are_bounded_by_count_and_length() -> None:
