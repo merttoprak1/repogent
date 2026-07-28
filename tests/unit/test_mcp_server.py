@@ -1,3 +1,4 @@
+import json
 import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -18,7 +19,9 @@ from repogent.domain import (
     RunStatus,
     ValidationTarget,
     ValidationTargetKind,
+    WorkflowKind,
 )
+from repogent.errors import ErrorCode, ErrorDetail, RepogentError, RetryClass
 from repogent.mcp_models import (
     DoctorCheck,
     DoctorReport,
@@ -224,6 +227,23 @@ class FailingShutdownManager(FakeManager):
     def shutdown(self) -> None:
         self.shutdown_called = True
         raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
+
+
+class TypedFailingManager(FakeManager):
+    def get(self, run_id: str) -> RunSnapshot:
+        try:
+            raise RuntimeError(_INTERNAL_FAILURE_DETAIL)
+        except RuntimeError as error:
+            raise RepogentError(
+                ErrorDetail(
+                    code=ErrorCode.OPERATION_NOT_ALLOWED,
+                    message="This operation is not allowed for the run kind.",
+                    remediation="Use an operation supported by the run capability.",
+                    retry=RetryClass.NON_RETRYABLE,
+                    run_id=run_id,
+                    run_kind=WorkflowKind.PATCH_REVIEW,
+                )
+            ) from error
 
 
 @pytest.fixture
@@ -876,6 +896,29 @@ async def test_internal_service_errors_use_bounded_allowlisted_messages() -> Non
             assert "secret-value" not in message
             assert "/private/secret/path" not in message
             assert "subprocess stdout" not in message
+
+
+@pytest.mark.anyio
+async def test_typed_service_error_returns_sanitized_error_detail_json() -> None:
+    manager = TypedFailingManager()
+    server = create_server(manager=manager, doctor=FakeDoctor())
+
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
+        result = await session.call_tool("get_run", {"run_id": "run-1"})
+
+    prefix = "Error executing tool get_run: "
+    assert result.isError is True
+    assert result.structuredContent is None
+    assert result.content[0].text.startswith(prefix)
+    payload = json.loads(result.content[0].text.removeprefix(prefix))
+    assert payload["code"] == "operation_not_allowed"
+    assert payload["retry"] == "non_retryable"
+    assert payload["run_kind"] == "patch_review"
+    assert payload["schema_version"] == "1"
+    serialized = result.content[0].text
+    assert _INTERNAL_FAILURE_DETAIL not in serialized
+    assert "secret-value" not in serialized
+    assert "/private/secret/path" not in serialized
 
 
 def _walk_exception_graph(error: BaseException) -> list[BaseException]:

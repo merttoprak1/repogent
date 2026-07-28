@@ -1,14 +1,17 @@
+import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from typing import Annotated, TypeVar, cast
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, WithJsonSchema
 
 from repogent.doctor import DoctorService
 from repogent.domain import ApprovalKind, Decision
+from repogent.errors import ErrorDetail, RepogentError
 from repogent.mcp_models import (
     DoctorReport,
     DoctorRequest,
@@ -40,9 +43,7 @@ class _ServiceError(StrEnum):
     REPORT = "run report is unavailable; inspect local Repogent logs"
 
 
-def _call_service(
-    action: Callable[[], _ResultT], message: _ServiceError
-) -> _ResultT:
+def _call_service(action: Callable[[], _ResultT], message: _ServiceError) -> _ResultT:
     try:
         result = action()
         if not isinstance(result, BaseModel):
@@ -66,6 +67,21 @@ def _call_service(
                 raise ValueError("execution preview is unsafe to return")
         model_type = cast(type[BaseModel], type(result))
         return cast(_ResultT, model_type.model_validate(payload))
+    except RepogentError as error:
+        try:
+            payload = sanitize_data(error.detail.model_dump(mode="json"))
+            if not isinstance(payload, dict):
+                raise ValueError("error detail sanitization failed")
+            detail = ErrorDetail.model_validate(payload)
+        except Exception:
+            raise RuntimeError(message.value) from None
+        raise ToolError(
+            json.dumps(
+                detail.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ) from None
     except Exception:
         raise RuntimeError(message.value) from None
 

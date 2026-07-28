@@ -13,6 +13,11 @@ from repogent.agents import RoleSet
 from repogent.approval_gate import ApprovalGateError
 from repogent.approvals import Approver
 from repogent.artifacts import ArtifactStore
+from repogent.capabilities import (
+    CapabilityDefinition,
+    CapabilityRegistry,
+    RunOperation,
+)
 from repogent.domain import (
     ApprovalKind,
     Budget,
@@ -21,15 +26,20 @@ from repogent.domain import (
     CheckStatus,
     Decision,
     ExecutionMode,
+    FinalValidationStatus,
     IsolationLevel,
     RunManifest,
+    RunStage,
     RunStatus,
     TrustLabel,
     ValidationReport,
     ValidationTarget,
     ValidationTargetKind,
     VerificationStatus,
+    WorkflowKind,
+    WorkflowOutcome,
 )
+from repogent.errors import ErrorCode, RepogentError, RetryClass
 from repogent.execution import ValidationPolicy
 from repogent.execution_gate import ExecutorInspectionCoordinator
 from repogent.executor_selection import LOCAL_RISK_STATEMENT, PreparedExecutor
@@ -37,6 +47,7 @@ from repogent.mcp_models import (
     ExecutorAvailability,
     ExecutorOption,
     RunDecision,
+    RunSnapshot,
     ValidationDecision,
     VerifiedChangeStart,
 )
@@ -366,6 +377,170 @@ def deferred_manager_waiting_for_executor(
     return manager, request, snapshot
 
 
+class CapabilitySession:
+    def __init__(self, kind: WorkflowKind) -> None:
+        self.run_id = f"run-{kind.value}"
+        self.calls: list[str] = []
+        self._snapshot = RunSnapshot(
+            run_id=self.run_id,
+            kind=kind,
+            status=RunStatus.RUNNING,
+            stage=RunStage.REQUIREMENTS,
+            checkout_state=CheckoutState.NOT_APPLIED,
+            selected_patch_applied=False,
+            applied_paths=[],
+            final_validation_status=FinalValidationStatus.NOT_STARTED,
+            evidence_path="/bounded/evidence",
+        )
+
+    def snapshot(self) -> RunSnapshot:
+        return self._snapshot
+
+    def decide(self, decision: RunDecision) -> RunSnapshot:
+        del decision
+        self.calls.append("decide")
+        return self._snapshot
+
+    def select_executor(self, decision: ValidationDecision) -> RunSnapshot:
+        del decision
+        self.calls.append("select_executor")
+        return self._snapshot
+
+
+def manager_with(session: CapabilitySession) -> SessionManager:
+    manager = SessionManager()
+    manager._sessions[session.run_id] = session  # type: ignore[assignment]
+    return manager
+
+
+def patch_decision(run_id: str) -> RunDecision:
+    return RunDecision(
+        run_id=run_id,
+        kind=ApprovalKind.PATCH,
+        digest="a" * 64,
+        decision=Decision.APPROVED,
+    )
+
+
+def executor_decision(run_id: str) -> ValidationDecision:
+    return ValidationDecision(
+        run_id=run_id,
+        target=ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest="b" * 64,
+        ),
+        mode=ExecutionMode.LOCAL,
+        option_digest="c" * 64,
+        decision=Decision.APPROVED,
+    )
+
+
+@pytest.fixture
+def review_session() -> CapabilitySession:
+    return CapabilitySession(WorkflowKind.PATCH_REVIEW)
+
+
+def test_manager_rejects_patch_approval_for_review_run(
+    review_session: CapabilitySession,
+) -> None:
+    manager = manager_with(review_session)
+
+    with pytest.raises(RepogentError) as caught:
+        manager.decide(patch_decision(review_session.run_id))
+
+    assert caught.value.detail.code is ErrorCode.OPERATION_NOT_ALLOWED
+    assert caught.value.detail.retry is RetryClass.NON_RETRYABLE
+    assert caught.value.detail.run_kind is WorkflowKind.PATCH_REVIEW
+    assert review_session.calls == []
+
+
+@pytest.mark.parametrize("kind", list(WorkflowKind))
+@pytest.mark.parametrize("method", ["decide", "select_executor"])
+def test_manager_enforces_mutation_policy_for_every_workflow_kind(
+    kind: WorkflowKind,
+    method: str,
+) -> None:
+    session = CapabilitySession(kind)
+    manager = manager_with(session)
+    mutating_kinds = {
+        WorkflowKind.VERIFIED_CHANGE,
+        WorkflowKind.DEPENDENCY_UPDATE,
+        WorkflowKind.SECURITY_FIX,
+    }
+    decision = (
+        patch_decision(session.run_id) if method == "decide" else executor_decision(session.run_id)
+    )
+
+    if kind in mutating_kinds:
+        result = getattr(manager, method)(decision)
+
+        assert result.kind is kind
+        assert session.calls == [method]
+    else:
+        with pytest.raises(RepogentError) as caught:
+            getattr(manager, method)(decision)
+
+        assert caught.value.detail.code is ErrorCode.OPERATION_NOT_ALLOWED
+        assert caught.value.detail.retry is RetryClass.NON_RETRYABLE
+        assert caught.value.detail.run_id == session.run_id
+        assert caught.value.detail.run_kind is kind
+        assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    ("approval_kind", "allowed_operation"),
+    [
+        (ApprovalKind.REQUIREMENTS, RunOperation.APPROVE_REQUIREMENTS),
+        (ApprovalKind.PLAN, RunOperation.APPROVE_PLAN),
+        (ApprovalKind.PATCH, RunOperation.APPLY_PATCH),
+    ],
+)
+def test_manager_maps_each_decision_gate_to_its_capability_operation(
+    approval_kind: ApprovalKind,
+    allowed_operation: RunOperation,
+) -> None:
+    session = CapabilitySession(WorkflowKind.VERIFIED_CHANGE)
+    registry = CapabilityRegistry(
+        {
+            WorkflowKind.VERIFIED_CHANGE: CapabilityDefinition(
+                kind=WorkflowKind.VERIFIED_CHANGE,
+                mutates_checkout=True,
+                allowed_operations=frozenset({allowed_operation}),
+                allowed_outcomes=frozenset({WorkflowOutcome.PATCH_READY}),
+            )
+        }
+    )
+    manager = SessionManager(registry=registry)
+    manager._sessions[session.run_id] = session  # type: ignore[assignment]
+    decision = patch_decision(session.run_id).model_copy(update={"kind": approval_kind})
+
+    result = manager.decide(decision)
+
+    assert result.kind is WorkflowKind.VERIFIED_CHANGE
+    assert session.calls == ["decide"]
+
+
+def test_manager_checks_select_executor_operation_independently() -> None:
+    session = CapabilitySession(WorkflowKind.VERIFIED_CHANGE)
+    registry = CapabilityRegistry(
+        {
+            WorkflowKind.VERIFIED_CHANGE: CapabilityDefinition(
+                kind=WorkflowKind.VERIFIED_CHANGE,
+                mutates_checkout=True,
+                allowed_operations=frozenset({RunOperation.SELECT_EXECUTOR}),
+                allowed_outcomes=frozenset({WorkflowOutcome.PATCH_READY}),
+            )
+        }
+    )
+    manager = SessionManager(registry=registry)
+    manager._sessions[session.run_id] = session  # type: ignore[assignment]
+
+    result = manager.select_executor(executor_decision(session.run_id))
+
+    assert result.kind is WorkflowKind.VERIFIED_CHANGE
+    assert session.calls == ["select_executor"]
+
+
 def test_manager_preserves_injected_falsey_executor_registry() -> None:
     registry = FalseySessionRegistry()
 
@@ -564,8 +739,9 @@ def test_cancel_wins_while_executor_prepare_is_blocked(tmp_path: Path) -> None:
         manager.shutdown()
     assert not selector.is_alive()
     assert len(selection_errors) == 1
-    assert isinstance(selection_errors[0], SessionError)
-    assert "closed" in str(selection_errors[0])
+    assert isinstance(selection_errors[0], RepogentError)
+    assert selection_errors[0].detail.code is ErrorCode.EXECUTOR_UNAVAILABLE
+    assert selection_errors[0].detail.retry is RetryClass.RECONCILE_FIRST
 
 
 def test_executor_timeout_terminal_snapshot_clears_pending_choice(
@@ -748,7 +924,7 @@ def test_executor_selection_is_rejected_while_content_approval_is_pending(
     snapshot = manager.start_verified_change(deferred_request(target, tmp_path / "runs"))
     try:
         assert snapshot.pending_approval is not None
-        with pytest.raises(SessionError, match="no executor selection is pending"):
+        with pytest.raises(RepogentError) as caught:
             manager.select_executor(
                 ValidationDecision(
                     run_id=snapshot.run_id,
@@ -761,6 +937,8 @@ def test_executor_selection_is_rejected_while_content_approval_is_pending(
                     decision=Decision.APPROVED,
                 )
             )
+        assert caught.value.detail.code is ErrorCode.EXECUTOR_UNAVAILABLE
+        assert caught.value.detail.retry is RetryClass.RECONCILE_FIRST
     finally:
         manager.cancel(snapshot.run_id)
         manager.shutdown()
@@ -772,18 +950,19 @@ def test_stale_execution_decision_does_not_consume_pending_choice(
     manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
     try:
         decision = execution_decision_for(snapshot)
-        with pytest.raises(SessionError, match="target digest mismatch"):
+        with pytest.raises(RepogentError) as target_error:
             manager.select_executor(
                 decision.model_copy(
-                    update={
-                        "target": decision.target.model_copy(
-                            update={"digest": "f" * 64}
-                        )
-                    }
+                    update={"target": decision.target.model_copy(update={"digest": "f" * 64})}
                 )
             )
-        with pytest.raises(SessionError, match="option digest mismatch"):
+        with pytest.raises(RepogentError) as option_error:
             manager.select_executor(decision.model_copy(update={"option_digest": "e" * 64}))
+
+        assert target_error.value.detail.code is ErrorCode.STALE_DIGEST
+        assert target_error.value.detail.retry is RetryClass.RECONCILE_FIRST
+        assert option_error.value.detail.code is ErrorCode.STALE_DIGEST
+        assert option_error.value.detail.retry is RetryClass.RECONCILE_FIRST
 
         recovered = manager.get(snapshot.run_id)
         assert recovered.pending_execution == snapshot.pending_execution
@@ -849,7 +1028,7 @@ def test_session_advances_matching_gate_and_releases_root_at_terminal(
 
         with pytest.raises(SessionError, match="active run"):
             manager.start_verified_change(request)
-        with pytest.raises(SessionError, match="digest"):
+        with pytest.raises(RepogentError) as stale_decision:
             manager.decide(
                 RunDecision(
                     run_id=snapshot.run_id,
@@ -858,6 +1037,8 @@ def test_session_advances_matching_gate_and_releases_root_at_terminal(
                     decision=Decision.APPROVED,
                 )
             )
+        assert stale_decision.value.detail.code is ErrorCode.STALE_DIGEST
+        assert stale_decision.value.detail.retry is RetryClass.RECONCILE_FIRST
 
         snapshot = manager.decide(decision_for(snapshot))
         assert snapshot.pending_approval is not None
@@ -948,8 +1129,7 @@ def test_terminal_session_snapshot_recursively_redacts_manifest_reason(
         session._result = session._result.model_copy(
             update={
                 "reason": (
-                    "provider token=sk-proj-1234567890abcdef "
-                    f"{password_marker}=redaction-fixture"
+                    f"provider token=sk-proj-1234567890abcdef {password_marker}=redaction-fixture"
                 )
             }
         )
@@ -966,11 +1146,11 @@ def test_terminal_session_snapshot_recursively_redacts_manifest_reason(
 def test_unknown_runs_are_rejected(tmp_path: Path) -> None:
     manager = SessionManager(builder=make_builder())
     try:
-        with pytest.raises(SessionError, match="unknown run"):
+        with pytest.raises(RepogentError) as get_error:
             manager.get("missing")
-        with pytest.raises(SessionError, match="unknown run"):
+        with pytest.raises(RepogentError) as cancel_error:
             manager.cancel("missing")
-        with pytest.raises(SessionError, match="unknown run"):
+        with pytest.raises(RepogentError) as decision_error:
             manager.decide(
                 RunDecision(
                     run_id="missing",
@@ -979,6 +1159,14 @@ def test_unknown_runs_are_rejected(tmp_path: Path) -> None:
                     decision=Decision.APPROVED,
                 )
             )
+        with pytest.raises(RepogentError) as executor_error:
+            manager.select_executor(executor_decision("missing"))
+
+        for caught in (get_error, cancel_error, decision_error, executor_error):
+            assert caught.value.detail.code is ErrorCode.UNKNOWN_RUN
+            assert caught.value.detail.retry is RetryClass.NON_RETRYABLE
+            assert caught.value.detail.run_id == "missing"
+            assert caught.value.detail.run_kind is None
     finally:
         manager.shutdown()
 
