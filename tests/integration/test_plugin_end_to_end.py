@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from repogent.approval_gate import approval_digest
 from repogent.domain import (
@@ -21,9 +22,11 @@ from repogent.domain import (
     ExecutionMode,
     FinalValidationStatus,
     IsolationLevel,
+    RunStage,
     RunStatus,
     TrustLabel,
     VerificationStatus,
+    WorkflowKind,
 )
 from repogent.mcp_models import (
     ExecutorOption,
@@ -33,6 +36,8 @@ from repogent.mcp_models import (
     ValidationDecision,
     VerifiedChangeStart,
 )
+from repogent.mcp_server import create_server
+from repogent.run_sessions import SessionManager
 
 
 @pytest.fixture
@@ -139,6 +144,66 @@ def _execution_decision(
 
 def _manifest(snapshot: RunSnapshot) -> dict[str, object]:
     return json.loads(Path(snapshot.evidence_path, "run.json").read_text())
+
+
+class _PatchReviewSession:
+    """Test-only synthetic run that exposes the future non-mutating capability."""
+
+    def __init__(self) -> None:
+        self.run_id = "run-patch-review"
+        self.decision_calls = 0
+        self._snapshot = RunSnapshot(
+            run_id=self.run_id,
+            kind=WorkflowKind.PATCH_REVIEW,
+            status=RunStatus.RUNNING,
+            stage=RunStage.REQUIREMENTS,
+            checkout_state=CheckoutState.NOT_APPLIED,
+            selected_patch_applied=False,
+            applied_paths=[],
+            final_validation_status=FinalValidationStatus.NOT_STARTED,
+            evidence_path="/bounded/evidence",
+        )
+
+    def snapshot(self) -> RunSnapshot:
+        return self._snapshot
+
+    def decide(self, decision: RunDecision) -> RunSnapshot:
+        del decision
+        self.decision_calls += 1
+        return self._snapshot
+
+    def request_shutdown(self, deadline: float) -> bool:
+        del deadline
+        return True
+
+    def join(self, timeout_seconds: float) -> None:
+        del timeout_seconds
+
+    def is_alive(self) -> bool:
+        return False
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_patch_approval_for_synthetic_patch_review_run() -> None:
+    review = _PatchReviewSession()
+    manager = SessionManager()
+    manager._sessions[review.run_id] = review  # type: ignore[assignment]
+    server = create_server(manager=manager)
+    decision = RunDecision(
+        run_id=review.run_id,
+        kind=ApprovalKind.PATCH,
+        digest="a" * 64,
+        decision=Decision.APPROVED,
+    )
+
+    async with create_connected_server_and_client_session(server, raise_exceptions=True) as session:
+        result = await session.call_tool(
+            "approve_patch", {"decision": decision.model_dump(mode="json")}
+        )
+
+    assert result.isError is True
+    assert '"code":"operation_not_allowed"' in result.content[0].text
+    assert review.decision_calls == 0
 
 
 async def _select_local_until_patch_pending(

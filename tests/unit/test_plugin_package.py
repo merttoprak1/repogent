@@ -2,12 +2,51 @@
 
 import json
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
+
+from repogent.mcp_server import create_server
 
 PLUGIN_ROOT = Path("plugins/repogent")
 READINESS_SKILL_PATH = PLUGIN_ROOT / "skills/repository-readiness/SKILL.md"
 VERIFIED_CHANGE_SKILL_PATH = PLUGIN_ROOT / "skills/verified-change/SKILL.md"
 EVALS_PATH = Path("tests/plugin/evals.json")
+
+
+@dataclass(frozen=True)
+class ReleaseIdentity:
+    runtime_version: str
+    plugin_version: str
+    skills: frozenset[str]
+    start_tools: frozenset[str]
+
+
+def released_identity() -> ReleaseIdentity:
+    project = tomllib.loads(Path("pyproject.toml").read_text())
+    manifest = json.loads((PLUGIN_ROOT / ".codex-plugin/plugin.json").read_text())
+    skills = frozenset(path.name for path in (PLUGIN_ROOT / "skills").iterdir() if path.is_dir())
+    tools = create_server()._tool_manager.list_tools()
+
+    return ReleaseIdentity(
+        runtime_version=project["project"]["version"],
+        plugin_version=manifest["version"],
+        skills=skills,
+        start_tools=frozenset(
+            tool.name
+            for tool in tools
+            if tool.name in {"inspect_repository_readiness", "start_verified_change"}
+        ),
+    )
+
+
+def test_release_identity_agrees_across_surfaces() -> None:
+    identity = released_identity()
+
+    assert identity.runtime_version == identity.plugin_version
+    assert identity.skills == frozenset({"repository-readiness", "verified-change"})
+    assert identity.start_tools == frozenset(
+        {"inspect_repository_readiness", "start_verified_change"}
+    )
 
 
 def test_plugin_manifest_and_mcp_command() -> None:
