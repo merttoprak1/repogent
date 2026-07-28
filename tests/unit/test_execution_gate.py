@@ -361,6 +361,34 @@ def test_local_selection_requires_matching_target_and_option_digest(
         close_and_join(gate, worker)
 
 
+def test_selection_rejects_same_digest_for_different_target_kind(
+    tmp_path: Path,
+) -> None:
+    registry = RecordingRegistry()
+    gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), registry)
+    worker, outcome = start_selection(gate, preview())
+    pending = pending_choice(gate)
+    local = option(pending, ExecutionMode.LOCAL)
+    wrong_kind = local_decision(pending, local).model_copy(
+        update={
+            "target": ValidationTarget(
+                kind=ValidationTargetKind.COMMIT,
+                digest=pending.target.digest,
+            )
+        }
+    )
+    try:
+        with pytest.raises(ExecutionGateError, match="target kind mismatch"):
+            gate.submit(wrong_kind)
+
+        gate.submit(local_decision(pending, local))
+
+        assert outcome.result(timeout=1).mode is ExecutionMode.LOCAL
+        assert registry.prepare_calls == [ExecutionMode.LOCAL]
+    finally:
+        close_and_join(gate, worker)
+
+
 def test_plain_approval_without_local_option_digest_is_rejected() -> None:
     with pytest.raises(ValidationError):
         ValidationDecision(

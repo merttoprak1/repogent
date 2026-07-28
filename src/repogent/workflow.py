@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import json
@@ -655,6 +656,7 @@ class Workflow:
         selector = cast(ExecutorSelector, self.executor_selector)
         selector_target = target.model_copy(deep=True)
         selector_preview = preview.model_dump(mode="json")
+        selector_preview_baseline = copy.deepcopy(selector_preview)
         prepared = selector.select(
             selector_target,
             selector_preview,
@@ -662,6 +664,8 @@ class Workflow:
         )
         if selector_target != target:
             raise CandidateEvaluationError("validation target changed after persistence")
+        if selector_preview != selector_preview_baseline:
+            raise CandidateEvaluationError("patch preview changed after persistence")
         if patch_preview_digest(preview) != target.digest:
             raise CandidateEvaluationError("patch preview changed after persistence")
         self._assert_preview_binding(preview, candidate, preview_digest)
