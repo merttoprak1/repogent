@@ -13,6 +13,7 @@ from repogent.candidates import (
     CandidateEvaluator,
     CandidatePolicy,
     CandidateSelector,
+    PatchPreview,
     PatchPreviewer,
     patch_preview_digest,
 )
@@ -37,6 +38,8 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     ValidationReport,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
     WorkflowOutcome,
 )
@@ -134,18 +137,29 @@ class SequenceValidator:
 class RecordingExecutorSelector:
     def __init__(self, validator: SequenceValidator) -> None:
         self.validator = validator
+        self.targets: list[ValidationTarget] = []
         self.previews: list[object] = []
         self.preview_stages: list[RunStage] = []
         self.workflow: Workflow | None = None
 
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
         assert timeout_seconds > 0
-        self.previews.append(preview)
+        self.targets.append(target)
+        self.previews.append(PatchPreview.model_validate(preview))
         assert self.workflow is not None
         self.preview_stages.append(self.workflow.manifest.stage)
         persisted = json.loads((self.workflow.artifacts.root / "run.json").read_text())
-        assert persisted["preview_digest"] == self.workflow.manifest.preview_digest
+        assert persisted["evaluated_target"] == target.model_dump(mode="json")
+        assert "preview_digest" not in persisted
         assert persisted["verification_status"] == "unvalidated"
+        assert persisted["execution_mode"] is None
+        assert persisted["isolation_level"] is None
         return PreparedExecutor(
             mode=ExecutionMode.LOCAL,
             isolation_level=IsolationLevel.REDUCED_ISOLATION,
@@ -157,18 +171,27 @@ class RecordingExecutorSelector:
 
 
 class MutatingExecutorSelector(RecordingExecutorSelector):
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
-        prepared = super().select(preview, timeout_seconds=timeout_seconds)
-        preview.candidate.proposal.diff = (  # type: ignore[attr-defined]
-            "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
-            " def value():\n-    return 1\n+    return 99\n"
-        )
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
+        target.digest = "f" * 64
         return prepared
 
 
 class InvalidIsolationExecutorSelector(RecordingExecutorSelector):
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
-        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
         return PreparedExecutor(
             mode=ExecutionMode.LOCAL,
             isolation_level=IsolationLevel.ISOLATED,
@@ -178,8 +201,14 @@ class InvalidIsolationExecutorSelector(RecordingExecutorSelector):
 
 
 class DockerIsolatedExecutorSelector(RecordingExecutorSelector):
-    def select(self, preview: object, *, timeout_seconds: float) -> PreparedExecutor:
-        prepared = super().select(preview, timeout_seconds=timeout_seconds)
+    def select(
+        self,
+        target: ValidationTarget,
+        preview: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> PreparedExecutor:
+        prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
         return PreparedExecutor(
             mode=ExecutionMode.DOCKER,
             isolation_level=IsolationLevel.ISOLATED,
@@ -331,7 +360,8 @@ def test_workflow_persists_unvalidated_preview_before_executor_selection(
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
     assert len(selector.previews) == 1
     assert selector.preview_stages == [RunStage.PATCH_PREVIEWED]
-    assert manifest.preview_digest is not None
+    assert manifest.evaluated_target is not None
+    assert manifest.evaluated_target.kind is ValidationTargetKind.PATCH
     preview = json.loads(
         next(workflow.artifacts.root.glob("patch-preview-*.json")).read_text()
     )
@@ -438,7 +468,7 @@ def test_rejected_static_preview_accounts_completed_provider_once(tmp_path: Path
     assert not list(workflow.artifacts.root.glob("patch-preview-*.json"))
 
 
-def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
+def test_candidate_artifact_is_exposed_only_after_validation_target_is_durable(
     tmp_path: Path,
 ) -> None:
     workflow = make_phase2_workflow(
@@ -446,13 +476,13 @@ def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
         outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
         validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
     )
-    persisted_digests: list[str | None] = []
+    persisted_targets: list[dict[str, object] | None] = []
     original_write = workflow.artifacts.write_model
 
     def record_manifest_binding(name: str, model: object) -> Path:
         if name == "candidate":
             manifest = json.loads((workflow.artifacts.root / "run.json").read_text())
-            persisted_digests.append(manifest["preview_digest"])
+            persisted_targets.append(manifest["evaluated_target"])
         return original_write(name, model)  # type: ignore[arg-type]
 
     workflow.artifacts.write_model = record_manifest_binding  # type: ignore[method-assign]
@@ -460,7 +490,7 @@ def test_candidate_artifact_is_exposed_only_after_preview_digest_is_durable(
     manifest = workflow.run()
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
-    assert persisted_digests == [manifest.preview_digest]
+    assert persisted_targets == [manifest.evaluated_target.model_dump(mode="json")]
 
 
 def test_selector_mutation_fails_before_candidate_evaluation(tmp_path: Path) -> None:
@@ -478,7 +508,7 @@ def test_selector_mutation_fails_before_candidate_evaluation(tmp_path: Path) -> 
     manifest = workflow.run()
 
     assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
-    assert manifest.reason == "patch preview changed after persistence"
+    assert manifest.reason == "validation target changed after persistence"
     assert validator.statuses == [CheckStatus.PASSED]
     assert workflow.candidate_evidence == []
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
@@ -526,6 +556,13 @@ def test_each_repair_gets_a_new_preview_and_executor_selection(tmp_path: Path) -
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
     assert len(selector.previews) == 2
+    assert [target.kind for target in selector.targets] == [
+        ValidationTargetKind.PATCH,
+        ValidationTargetKind.PATCH,
+    ]
+    assert [target.digest for target in selector.targets] == [
+        patch_preview_digest(preview) for preview in selector.previews
+    ]
     assert [preview.candidate.candidate_id for preview in selector.previews] == [  # type: ignore[attr-defined]
         "candidate-1",
         "candidate-2",
@@ -533,7 +570,7 @@ def test_each_repair_gets_a_new_preview_and_executor_selection(tmp_path: Path) -
     assert len({patch_preview_digest(preview) for preview in selector.previews}) == 2  # type: ignore[arg-type]
 
 
-def test_selected_candidate_restores_its_own_preview_digest(tmp_path: Path) -> None:
+def test_selected_candidate_restores_its_own_validation_target(tmp_path: Path) -> None:
     workflow = make_phase2_workflow(
         tmp_path,
         outputs=[
@@ -556,8 +593,9 @@ def test_selected_candidate_restores_its_own_preview_digest(tmp_path: Path) -> N
 
     assert (manifest.status, manifest.reason) == (RunStatus.COMPLETED, None)
     assert manifest.selected_candidate_id == "candidate-1"
-    assert manifest.preview_digest == patch_preview_digest(selector.previews[0])  # type: ignore[arg-type]
-    assert manifest.preview_digest != patch_preview_digest(selector.previews[1])  # type: ignore[arg-type]
+    assert manifest.evaluated_target is not None
+    assert manifest.evaluated_target.digest == patch_preview_digest(selector.previews[0])  # type: ignore[arg-type]
+    assert manifest.evaluated_target.digest != patch_preview_digest(selector.previews[1])  # type: ignore[arg-type]
 
 
 def test_final_patch_approval_contains_passed_executor_evidence(tmp_path: Path) -> None:

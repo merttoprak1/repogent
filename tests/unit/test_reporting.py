@@ -19,6 +19,8 @@ from repogent.domain import (
     RunManifest,
     RunStatus,
     ValidationReport,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
     WorkflowOutcome,
 )
@@ -264,14 +266,17 @@ def test_report_shows_isolated_verified_only_for_docker_and_passed() -> None:
         execution_mode=ExecutionMode.DOCKER,
         isolation_level=IsolationLevel.ISOLATED,
         verification_status=VerificationStatus.PASSED,
-        preview_digest="a" * 64,
+        evaluated_target=ValidationTarget(
+            kind=ValidationTargetKind.PATCH,
+            digest="a" * 64,
+        ),
     )
 
     report = render_report(manifest, None, None, None, None)
 
     assert "Verification: ISOLATED VERIFIED" in report
     assert "Execution mode: docker" in report
-    assert f"Preview digest: {'a' * 64}" in report
+    assert f"Evaluated target: patch:{'a' * 64}" in report
 
 
 def test_report_shows_none_for_unset_execution_evidence() -> None:
@@ -281,7 +286,7 @@ def test_report_shows_none_for_unset_execution_evidence() -> None:
 
     assert "Verification: UNVALIDATED" in report
     assert "Execution mode: none" in report
-    assert "Preview digest: none" in report
+    assert "Evaluated target: none" in report
 
 
 def test_report_downgrades_docker_failure_to_unvalidated() -> None:

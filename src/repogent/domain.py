@@ -107,6 +107,17 @@ class ExecutionMode(StrEnum):
     LOCAL = "local"
 
 
+class ValidationTargetKind(StrEnum):
+    PATCH = "patch"
+    DIFF = "diff"
+    COMMIT = "commit"
+
+
+class ValidationTarget(VersionedModel):
+    kind: ValidationTargetKind
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class IsolationLevel(StrEnum):
     REDUCED_ISOLATION = "reduced_isolation"
     ISOLATED = "isolated"
@@ -398,7 +409,7 @@ class RunManifest(VersionedModel):
     execution_mode: ExecutionMode | None = None
     isolation_level: IsolationLevel | None = None
     verification_status: VerificationStatus = VerificationStatus.UNVALIDATED
-    preview_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    evaluated_target: ValidationTarget | None = None
     repository_fingerprint: str | None = None
     configuration_fingerprint: str | None = None
     candidate_ids: list[str] = Field(default_factory=list)
@@ -413,14 +424,22 @@ class RunManifest(VersionedModel):
 
     @model_validator(mode="before")
     @classmethod
-    def infer_legacy_checkout_state(cls, value: object) -> object:
+    def infer_legacy_fields(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        legacy_preview_digest = migrated.pop("preview_digest", None)
+        if "evaluated_target" not in migrated and legacy_preview_digest is not None:
+            migrated["evaluated_target"] = {
+                "kind": ValidationTargetKind.PATCH,
+                "digest": legacy_preview_digest,
+            }
         if (
-            isinstance(value, dict)
-            and "checkout_state" not in value
-            and value.get("selected_patch_applied") is True
+            "checkout_state" not in migrated
+            and migrated.get("selected_patch_applied") is True
         ):
-            return {**value, "checkout_state": CheckoutState.APPLIED}
-        return value
+            migrated["checkout_state"] = CheckoutState.APPLIED
+        return migrated
 
     @model_validator(mode="after")
     def validate_terminal_outcome(self) -> RunManifest:

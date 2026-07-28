@@ -14,6 +14,8 @@ from repogent.domain import (
     IsolationLevel,
     PatchProposal,
     ProviderUsage,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
 )
 from repogent.executor_selection import FixedExecutorSelector, PreparedExecutor
@@ -140,12 +142,20 @@ def test_fixed_executor_selector_returns_the_prepared_executor(tmp_path: Path) -
         make_repository(tmp_path), safe_candidate(), ["health endpoint exists"]
     )
 
-    selected = FixedExecutorSelector(prepared).select(preview, timeout_seconds=10)
+    target = ValidationTarget(
+        kind=ValidationTargetKind.PATCH,
+        digest=patch_preview_digest(preview),
+    )
+    selected = FixedExecutorSelector(prepared).select(
+        target,
+        preview.model_dump(mode="json"),
+        timeout_seconds=10,
+    )
 
     assert selected is prepared
 
 
-def test_fixed_executor_selector_rejects_a_missing_preview() -> None:
+def test_fixed_executor_selector_rejects_a_missing_target() -> None:
     prepared = PreparedExecutor(
         mode=ExecutionMode.LOCAL,
         isolation_level=IsolationLevel.REDUCED_ISOLATION,
@@ -155,5 +165,9 @@ def test_fixed_executor_selector_rejects_a_missing_preview() -> None:
         validator=ExplodingValidator(),  # type: ignore[arg-type]
     )
 
-    with pytest.raises(ExecutorSelectionRejected, match="preview"):
-        FixedExecutorSelector(prepared).select(None, timeout_seconds=10)  # type: ignore[arg-type]
+    with pytest.raises(ExecutorSelectionRejected, match="target"):
+        FixedExecutorSelector(prepared).select(  # type: ignore[arg-type]
+            None,
+            {},
+            timeout_seconds=10,
+        )

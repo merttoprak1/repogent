@@ -36,12 +36,12 @@ def executor_option(index: int) -> object:
     )
 
 
-def test_execution_decision_binds_mode_and_preview() -> None:
-    decision_model = getattr(mcp_models, "ExecutionDecision", None)
+def test_validation_decision_binds_mode_and_target() -> None:
+    decision_model = getattr(mcp_models, "ValidationDecision", None)
     assert decision_model is not None
     decision = decision_model(
         run_id="run-1",
-        preview_digest="a" * 64,
+        target={"kind": "patch", "digest": "a" * 64},
         mode=domain.ExecutionMode.LOCAL,
         option_digest="b" * 64,
         decision=domain.Decision.APPROVED,
@@ -55,7 +55,7 @@ def test_pending_choice_rejects_unbounded_options() -> None:
     with pytest.raises(ValidationError):
         pending_choice_model(
             run_id="run-1",
-            preview_digest="a" * 64,
+            target={"kind": "patch", "digest": "a" * 64},
             preview={"diff": "x"},
             options=[executor_option(index) for index in range(3)],
         )
@@ -140,7 +140,7 @@ def test_snapshot_bounds_pending_execution_preview_by_canonical_json_size() -> N
     preview_model = mcp_models.PendingExecutionChoice
     exact = preview_model(
         run_id="run-1",
-        preview_digest="a" * 64,
+        target={"kind": "patch", "digest": "a" * 64},
         preview={"diff": "x" * 255_989},
         options=[executor_option(index) for index in range(2)],
     )

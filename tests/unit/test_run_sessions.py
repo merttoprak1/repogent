@@ -26,16 +26,18 @@ from repogent.domain import (
     RunStatus,
     TrustLabel,
     ValidationReport,
+    ValidationTarget,
+    ValidationTargetKind,
     VerificationStatus,
 )
 from repogent.execution import ValidationPolicy
 from repogent.execution_gate import ExecutorInspectionCoordinator
 from repogent.executor_selection import LOCAL_RISK_STATEMENT, PreparedExecutor
 from repogent.mcp_models import (
-    ExecutionDecision,
     ExecutorAvailability,
     ExecutorOption,
     RunDecision,
+    ValidationDecision,
     VerifiedChangeStart,
 )
 from repogent.patching import PatchApplier, PatchPolicy
@@ -114,7 +116,7 @@ class SessionRegistry:
     def build_options(
         self,
         run_id: str,
-        preview_digest: str,
+        target: ValidationTarget,
         availability: list[ExecutorAvailability],
     ) -> list[ExecutorOption]:
         return [
@@ -123,7 +125,7 @@ class SessionRegistry:
                 available=item.available,
                 isolation_level=item.isolation_level,
                 option_digest=hashlib.sha256(
-                    f"{run_id}:{preview_digest}:{item.mode.value}".encode()
+                    f"{run_id}:{target.kind.value}:{target.digest}:{item.mode.value}".encode()
                 ).hexdigest(),
                 message=item.message,
                 remediation=item.remediation,
@@ -333,12 +335,12 @@ def execution_decision_for(
     *,
     mode: ExecutionMode = ExecutionMode.LOCAL,
     decision: Decision = Decision.APPROVED,
-) -> ExecutionDecision:
+) -> ValidationDecision:
     assert snapshot.pending_execution is not None
     selected = next(item for item in snapshot.pending_execution.options if item.mode is mode)
-    return ExecutionDecision(
+    return ValidationDecision(
         run_id=snapshot.run_id,
-        preview_digest=snapshot.pending_execution.preview_digest,
+        target=snapshot.pending_execution.target,
         mode=mode,
         option_digest=selected.option_digest,
         decision=decision,
@@ -456,7 +458,7 @@ def test_old_submit_cannot_erase_cached_newer_execution_choice(
     allow_submit_return = threading.Event()
     original_submit = gate.submit
 
-    def paused_submit(decision: ExecutionDecision):
+    def paused_submit(decision: ValidationDecision):
         receipt = original_submit(decision)
         submit_returned.set()
         assert allow_submit_return.wait(timeout=5)
@@ -748,9 +750,12 @@ def test_executor_selection_is_rejected_while_content_approval_is_pending(
         assert snapshot.pending_approval is not None
         with pytest.raises(SessionError, match="no executor selection is pending"):
             manager.select_executor(
-                ExecutionDecision(
+                ValidationDecision(
                     run_id=snapshot.run_id,
-                    preview_digest="a" * 64,
+                    target=ValidationTarget(
+                        kind=ValidationTargetKind.PATCH,
+                        digest="a" * 64,
+                    ),
                     mode=ExecutionMode.LOCAL,
                     option_digest="b" * 64,
                     decision=Decision.APPROVED,
@@ -767,8 +772,16 @@ def test_stale_execution_decision_does_not_consume_pending_choice(
     manager, _request, snapshot = deferred_manager_waiting_for_executor(tmp_path)
     try:
         decision = execution_decision_for(snapshot)
-        with pytest.raises(SessionError, match="preview digest mismatch"):
-            manager.select_executor(decision.model_copy(update={"preview_digest": "f" * 64}))
+        with pytest.raises(SessionError, match="target digest mismatch"):
+            manager.select_executor(
+                decision.model_copy(
+                    update={
+                        "target": decision.target.model_copy(
+                            update={"digest": "f" * 64}
+                        )
+                    }
+                )
+            )
         with pytest.raises(SessionError, match="option digest mismatch"):
             manager.select_executor(decision.model_copy(update={"option_digest": "e" * 64}))
 

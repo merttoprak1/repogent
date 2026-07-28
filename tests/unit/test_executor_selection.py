@@ -4,9 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from repogent.domain import ExecutionMode
+from repogent.domain import ExecutionMode, ValidationTarget, ValidationTargetKind
 from repogent.execution import CommandSpec, ValidationPolicy
-from repogent.executor_selection import ExecutorRegistry, ExecutorSelectionError
+from repogent.executor_selection import (
+    ExecutorRegistry,
+    ExecutorSelectionError,
+    option_digest,
+)
 from repogent.mcp_models import ExecutorAvailability
 
 
@@ -44,6 +48,15 @@ def make_repository(tmp_path: Path) -> Path:
 
 def local_availability(options: list[ExecutorAvailability]) -> ExecutorAvailability:
     return next(option for option in options if option.mode is ExecutionMode.LOCAL)
+
+
+def test_option_digest_changes_with_target_kind() -> None:
+    patch = ValidationTarget(kind=ValidationTargetKind.PATCH, digest="a" * 64)
+    commit = ValidationTarget(kind=ValidationTargetKind.COMMIT, digest="a" * 64)
+
+    assert option_digest("run-1", patch, ExecutionMode.DOCKER, None) != option_digest(
+        "run-1", commit, ExecutionMode.DOCKER, None
+    )
 
 
 def test_prepare_rechecks_availability_after_inspect(tmp_path: Path) -> None:

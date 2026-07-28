@@ -15,6 +15,7 @@ from repogent.domain import (
     RunStage,
     RunStatus,
     TrustLabel,
+    ValidationTarget,
     VerificationStatus,
     VersionedModel,
     WorkflowKind,
@@ -65,14 +66,14 @@ class ExecutorOption(VersionedModel):
 
 class PendingExecutionChoice(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
-    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target: ValidationTarget
     preview: dict[str, object]
     options: list[ExecutorOption] = Field(min_length=2, max_length=2)
 
 
-class ExecutionDecision(VersionedModel):
+class ValidationDecision(VersionedModel):
     run_id: str = Field(min_length=1, max_length=256)
-    preview_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target: ValidationTarget
     mode: ExecutionMode
     option_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: Decision
