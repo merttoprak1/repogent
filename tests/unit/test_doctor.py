@@ -86,8 +86,11 @@ def test_doctor_reports_ready_local_repository(
 ) -> None:
     monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
 
+    # The scripted provider carries no credential or binary requirement, so this
+    # exercises repository and executor readiness without depending on whether
+    # the ambient environment happens to hold provider credentials.
     report = DoctorService().run(
-        DoctorRequest(repository=tmp_path, provider="openai", executor="local")
+        DoctorRequest(repository=tmp_path, provider="scripted", executor="local")
     )
 
     assert report.ready is True
@@ -300,3 +303,35 @@ def test_doctor_has_no_evidence_or_remediation_side_effects(
 
     assert not (tmp_path.parent / ".repogent").exists()
     assert all("login" not in argv and "install" not in argv for argv in invoked)
+
+
+def test_doctor_reports_openai_missing_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    report = DoctorService().run(
+        DoctorRequest(repository=tmp_path, provider="openai", executor="local")
+    )
+
+    check = report.checks[-1]
+    assert check.name == "provider"
+    assert check.passed is False
+    assert report.ready is False
+    assert "OPENAI_API_KEY" in (check.remediation or "")
+
+
+def test_doctor_reports_openai_ready_when_credentials_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-used-for-any-request")
+
+    report = DoctorService().run(
+        DoctorRequest(repository=tmp_path, provider="openai", executor="local")
+    )
+
+    check = report.checks[-1]
+    assert check.name == "provider"
+    assert check.passed is True
