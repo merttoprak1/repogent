@@ -1087,3 +1087,85 @@ def test_generate_keyboard_interrupt_terminates_child_cleans_up_and_reraises(
     assert process.terminated is True
     assert process.wait_calls >= 2
     assert directories and all(not directory.exists() for directory in directories)
+
+
+def _write_codex_config(codex_home: Path, trusted: list[Path]) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(f'[projects."{path}"]\ntrust_level = "trusted"\n' for path in trusted)
+    (codex_home / "config.toml").write_text(body, encoding="utf-8")
+
+
+def test_check_ready_rejects_untrusted_target_root(
+    fake_codex: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable, _ = fake_codex
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    codex_home = tmp_path / "codex-home"
+    _write_codex_config(codex_home, [tmp_path / "somewhere-else"])
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    readiness = CodexCliProvider(executable=str(executable), target_root=target_root).check_ready()
+
+    assert readiness.ready is False
+    assert "trust" in (readiness.reason or "").lower()
+
+
+def test_check_ready_accepts_trusted_target_root(
+    fake_codex: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable, _ = fake_codex
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    codex_home = tmp_path / "codex-home"
+    _write_codex_config(codex_home, [target_root.resolve()])
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    readiness = CodexCliProvider(executable=str(executable), target_root=target_root).check_ready()
+
+    assert readiness.ready is True
+
+
+def test_check_ready_accepts_target_root_under_trusted_ancestor(
+    fake_codex: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable, _ = fake_codex
+    project = tmp_path / "project"
+    target_root = project / "nested" / "package"
+    target_root.mkdir(parents=True)
+    codex_home = tmp_path / "codex-home"
+    _write_codex_config(codex_home, [project.resolve()])
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    readiness = CodexCliProvider(executable=str(executable), target_root=target_root).check_ready()
+
+    assert readiness.ready is True
+
+
+def test_check_ready_allows_target_root_when_config_is_unreadable(
+    fake_codex: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable, _ = fake_codex
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text("this is not = valid = toml [[[", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    readiness = CodexCliProvider(executable=str(executable), target_root=target_root).check_ready()
+
+    assert readiness.ready is True
+
+
+def test_check_ready_allows_target_root_when_config_is_absent(
+    fake_codex: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable, _ = fake_codex
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-codex-home"))
+
+    readiness = CodexCliProvider(executable=str(executable), target_root=target_root).check_ready()
+
+    assert readiness.ready is True

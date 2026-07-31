@@ -8,6 +8,7 @@ import stat
 import subprocess  # noqa: S404  # nosec B404
 import tempfile
 import time
+import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -110,6 +111,9 @@ class CodexCliProvider:
 
         if self._ready is not None:
             return self._ready
+
+        if trust_error := self._target_root_trust_error():
+            return self._not_ready(trust_error, ProviderCallStatus.CAPABILITY_MISSING)
 
         resolved_path: Path
         if self._resolved_executable is None:
@@ -660,6 +664,70 @@ class CodexCliProvider:
                 help_text,
             )
         )
+
+    def _target_root_trust_error(self) -> str | None:
+        """Report why the Codex CLI would refuse the target root, if it would.
+
+        The Codex CLI runs only inside directories its own configuration marks
+        as trusted. Readiness resolves that from configuration rather than by
+        invoking the CLI, so an untrusted root fails at the readiness gate
+        instead of part-way through a run.
+
+        Trust cannot always be determined: the configuration may be absent,
+        unreadable, or written in a schema this version does not recognise.
+        Those cases return None and let the run proceed, so a Codex change
+        cannot block setups that would in fact work. Only a configuration that
+        parses and positively excludes the root reports an error.
+        """
+        trusted = self._trusted_project_roots()
+        if trusted is None:
+            return None
+        try:
+            target = self._target_root.resolve()
+        except (OSError, RuntimeError):
+            return None
+        candidates = (target, *target.parents)
+        if any(candidate in trusted for candidate in candidates):
+            return None
+        return "Codex CLI does not trust the target repository directory"
+
+    @staticmethod
+    def _codex_config_path() -> Path | None:
+        """Locate the Codex configuration the CLI itself would read.
+
+        CODEX_HOME overrides the default location rather than extending it, so
+        it is never combined with ~/.codex.
+        """
+        if codex_home := os.environ.get("CODEX_HOME"):
+            return Path(codex_home) / "config.toml"
+        if home := os.environ.get("HOME"):
+            return Path(home) / ".codex" / "config.toml"
+        return None
+
+    @classmethod
+    def _trusted_project_roots(cls) -> frozenset[Path] | None:
+        """Return trusted roots, or None when trust cannot be determined."""
+        path = cls._codex_config_path()
+        if path is None:
+            return None
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        try:
+            config = tomllib.loads(raw.decode("utf-8"))
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+            return None
+        projects = config.get("projects")
+        if not isinstance(projects, dict):
+            return None
+        roots: set[Path] = set()
+        for name, entry in projects.items():
+            if not isinstance(entry, dict) or entry.get("trust_level") != "trusted":
+                continue
+            with suppress(OSError, RuntimeError):
+                roots.add(Path(name).expanduser().resolve())
+        return frozenset(roots)
 
     @staticmethod
     def _credential_locations() -> tuple[str, ...]:

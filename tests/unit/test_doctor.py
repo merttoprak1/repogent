@@ -335,3 +335,31 @@ def test_doctor_reports_openai_ready_when_credentials_present(
     check = report.checks[-1]
     assert check.name == "provider"
     assert check.passed is True
+
+
+def test_doctor_reports_untrusted_repository_remediation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
+
+    class UntrustedCodex:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def check_ready(self) -> ProviderReadiness:
+            return ProviderReadiness(
+                provider="codex-cli",
+                model="default",
+                ready=False,
+                reason="Codex CLI does not trust the target repository directory",
+            )
+
+    monkeypatch.setattr(doctor, "CodexCliProvider", UntrustedCodex)
+
+    report = DoctorService().run(DoctorRequest(repository=tmp_path, executor="local"))
+
+    check = report.checks[-1]
+    assert check.name == "provider"
+    assert check.passed is False
+    assert "trust" in (check.message or "").lower()
+    assert "Trust the repository in Codex" in (check.remediation or "")
