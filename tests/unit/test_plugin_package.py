@@ -92,7 +92,7 @@ def test_plugin_manifest_and_mcp_command() -> None:
     project = tomllib.loads(Path("pyproject.toml").read_text())
 
     assert manifest["name"] == "repogent"
-    assert project["project"]["version"] == "0.3.0"
+    assert project["project"]["version"] == "0.3.1"
     assert manifest["version"] == project["project"]["version"]
     assert manifest["skills"] == "./skills/"
     assert manifest["mcpServers"] == "./.mcp.json"
