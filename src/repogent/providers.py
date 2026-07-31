@@ -11,7 +11,7 @@ from typing import Any, Generic, Protocol, TypeVar
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, ValidationError
 
-from repogent.domain import ProviderCallEvidence, ProviderUsage
+from repogent.domain import ProviderCallEvidence, ProviderReadiness, ProviderUsage
 from repogent.sanitization import redact_text, sanitize_data
 
 T = TypeVar("T", bound=BaseModel)
@@ -107,6 +107,26 @@ class OpenAIProvider:
         self.model = model
         self.pricing = pricing or ModelPricing()
         self.secrets = tuple(secrets)
+
+    @classmethod
+    def check_ready(cls, *, model: str | None = None) -> ProviderReadiness:
+        """Report whether API credentials resolve, without contacting OpenAI.
+
+        Constructing the client is the step that fails when no credential is
+        configured, so this exercises the SDK's own resolution instead of
+        duplicating it. It performs no network request.
+        """
+        resolved_model = model or "gpt-5.6-sol"
+        try:
+            OpenAI()
+        except OpenAIError as error:
+            return ProviderReadiness(
+                provider="openai",
+                model=resolved_model,
+                ready=False,
+                reason=f"could not load OpenAI provider: {error}",
+            )
+        return ProviderReadiness(provider="openai", model=resolved_model, ready=True)
 
     def generate(
         self,

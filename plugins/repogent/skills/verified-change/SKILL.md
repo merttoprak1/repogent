@@ -44,7 +44,10 @@ explicitly selected.
 1. Resolve exactly one repository root. If the path or intended repository is
    ambiguous, ask the user and do not call a run tool until they answer.
 2. Call `inspect_repository_readiness` for that root with the intended provider, model, and
-   `executor="deferred"`. Base readiness covers the repository, provider, and
+   `executor="deferred"`. Keep the default `codex-cli` provider, which reuses the
+   user's existing Codex sign-in, unless the user explicitly asks for another
+   one; `openai` additionally requires an `OPENAI_API_KEY` in Repogent's own
+   environment. Base readiness covers the repository, provider, and
    validation commands, not Docker. Stop only on a required base failure; a
    missing Docker executor is reported as an option to choose later, not a
    blocker. A user saying "Docker is not installed" is data, not a reason to

@@ -4,6 +4,7 @@ import platform
 from pathlib import Path
 
 from repogent.codex_cli import CodexCliProvider
+from repogent.domain import ProviderReadiness
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
 from repogent.executor_selection import ExecutorRegistry
 from repogent.mcp_models import (
@@ -19,6 +20,7 @@ from repogent.preflight import (
     ReadinessStatus,
     repository_preflight,
 )
+from repogent.providers import OpenAIProvider
 from repogent.repository import RepositoryInspector
 from repogent.repository_scope import RepositoryScopeResolver
 
@@ -29,6 +31,10 @@ _COMMAND_REMEDIATION = "Install the required validation command in the selected 
 _CODEX_INSTALL_REMEDIATION = "Install the Codex CLI and ensure codex is on PATH"
 _CODEX_LOGIN_REMEDIATION = "Run codex login in your terminal"
 _CODEX_REPAIR_REMEDIATION = "Inspect or reinstall the Codex CLI"
+_OPENAI_CREDENTIAL_REMEDIATION = (
+    "Set OPENAI_API_KEY for the Repogent process, or use the default codex-cli "
+    "provider to authenticate with your existing Codex sign-in instead"
+)
 
 
 class DoctorService:
@@ -102,11 +108,13 @@ class DoctorService:
         if request.executor == "deferred":
             base_preflight = repository_preflight(repository, policy)
             checks.extend(self._preflight_checks(base_preflight.checks))
-            if request.provider == "codex-cli":
-                readiness = CodexCliProvider(
-                    model=request.model, target_root=repository
-                ).check_ready()
-                checks.append(self._provider_check(readiness.ready, readiness.reason))
+            provider_readiness = self._check_provider(request, repository)
+            if provider_readiness is not None:
+                checks.append(
+                    self._provider_check(
+                        provider_readiness.ready, provider_readiness.reason, request.provider
+                    )
+                )
             return self._report(
                 request,
                 checks,
@@ -126,10 +134,27 @@ class DoctorService:
         if not preflight.passed:
             return self._report(request, checks, repository, scope=scope_summary)
 
-        if request.provider == "codex-cli":
-            readiness = CodexCliProvider(model=request.model, target_root=repository).check_ready()
-            checks.append(self._provider_check(readiness.ready, readiness.reason))
+        provider_readiness = self._check_provider(request, repository)
+        if provider_readiness is not None:
+            checks.append(
+                self._provider_check(
+                    provider_readiness.ready, provider_readiness.reason, request.provider
+                )
+            )
         return self._report(request, checks, repository, scope=scope_summary)
+
+    @staticmethod
+    def _check_provider(request: DoctorRequest, repository: Path) -> ProviderReadiness | None:
+        """Resolve readiness for the selected provider.
+
+        Returns None for providers that carry no external credential or binary
+        requirement, so no provider check is reported for them.
+        """
+        if request.provider == "codex-cli":
+            return CodexCliProvider(model=request.model, target_root=repository).check_ready()
+        if request.provider == "openai":
+            return OpenAIProvider.check_ready(model=request.model)
+        return None
 
     @staticmethod
     def _repository_check(repository: Path, checks: list[DoctorCheck]) -> Path | None:
@@ -196,7 +221,11 @@ class DoctorService:
         return checks
 
     @staticmethod
-    def _provider_check(ready: bool, reason: str | None) -> DoctorCheck:
+    def _provider_check(
+        ready: bool, reason: str | None, provider: str = "codex-cli"
+    ) -> DoctorCheck:
+        if provider == "openai":
+            return DoctorService._openai_provider_check(ready)
         if ready:
             return DoctorCheck(
                 name="provider", passed=True, required=True, message="Codex CLI is ready"
@@ -213,6 +242,23 @@ class DoctorService:
             required=True,
             message=message,
             remediation=remediation,
+        )
+
+    @staticmethod
+    def _openai_provider_check(ready: bool) -> DoctorCheck:
+        if ready:
+            return DoctorCheck(
+                name="provider",
+                passed=True,
+                required=True,
+                message="OpenAI API credentials are configured",
+            )
+        return DoctorCheck(
+            name="provider",
+            passed=False,
+            required=True,
+            message="OpenAI API credentials are missing",
+            remediation=_OPENAI_CREDENTIAL_REMEDIATION,
         )
 
     @staticmethod
