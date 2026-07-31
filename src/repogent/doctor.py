@@ -31,6 +31,11 @@ _COMMAND_REMEDIATION = "Install the required validation command in the selected 
 _CODEX_INSTALL_REMEDIATION = "Install the Codex CLI and ensure codex is on PATH"
 _CODEX_LOGIN_REMEDIATION = "Run codex login in your terminal"
 _CODEX_REPAIR_REMEDIATION = "Inspect or reinstall the Codex CLI"
+_CODEX_TRUST_REMEDIATION = (
+    "Trust the repository in Codex, by opening it once in Codex and accepting "
+    "the trust prompt, or by adding a trusted projects entry for it in the "
+    "Codex configuration"
+)
 _OPENAI_CREDENTIAL_REMEDIATION = (
     "Set OPENAI_API_KEY for the Repogent process, or use the default codex-cli "
     "provider to authenticate with your existing Codex sign-in instead"
@@ -234,6 +239,11 @@ class DoctorService:
             message, remediation = "Codex CLI executable not found", _CODEX_INSTALL_REMEDIATION
         elif reason is not None and "not authenticated" in reason.lower():
             message, remediation = "Codex CLI is not authenticated", _CODEX_LOGIN_REMEDIATION
+        elif reason is not None and "does not trust" in reason.lower():
+            message, remediation = (
+                "Codex CLI does not trust the repository directory",
+                _CODEX_TRUST_REMEDIATION,
+            )
         else:
             message, remediation = "Codex CLI is not ready", _CODEX_REPAIR_REMEDIATION
         return DoctorCheck(
