@@ -6,8 +6,8 @@ Repogent is pre-1.0. Only the latest released version receives security fixes.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.3.0   | Yes       |
-| < 0.3.0 | No        |
+| 0.3.1   | Yes       |
+| < 0.3.1 | No        |
 
 ## Reporting a vulnerability
 
