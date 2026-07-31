@@ -2,6 +2,12 @@
 
 **Approval-gated, evidence-backed Python repository changes for Codex.**
 
+[![CI](https://github.com/merttoprak1/repogent/actions/workflows/ci.yml/badge.svg)](https://github.com/merttoprak1/repogent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Checked with mypy](https://img.shields.io/badge/mypy-strict-2a6db2.svg)](https://mypy-lang.org/)
+[![Ruff](https://img.shields.io/badge/lint-ruff-d7ff64.svg)](https://docs.astral.sh/ruff/)
+
 Repogent is an open-source CLI and Codex plugin for turning scoped repository
 requests into safe, reviewable Python changes. A model can propose requirements,
 a plan, and a patch; deterministic services retain control of repository scope,
