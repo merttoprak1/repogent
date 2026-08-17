@@ -912,9 +912,10 @@ class CodexCliProvider:
         exit_code: int | None = None,
     ) -> ProviderError:
         bounded_message = self._bounded_redacted_text(message, fallback="Codex CLI provider failed")
+        retryable = status is ProviderCallStatus.INVALID_OUTPUT
         return ProviderError(
             bounded_message,
-            retryable=False,
+            retryable=retryable,
             evidence=self._evidence(
                 role=role,
                 status=status,

@@ -167,7 +167,8 @@ def _assert_provider_error(
 ) -> None:
     error = captured.value
     rendered = str(error)
-    assert error.retryable is False
+    if expected_status is not ProviderCallStatus.INVALID_OUTPUT:
+        assert error.retryable is False
     assert len(rendered) <= _MAX_ERROR_LENGTH
     assert all(value not in rendered for value in forbidden)
     assert error.evidence is not None
@@ -769,6 +770,17 @@ def test_invalid_structured_output_includes_redacted_excerpt(
     assert captured.value.evidence.status is ProviderCallStatus.INVALID_OUTPUT
     assert "{" in str(captured.value)
     assert "sk-secret" not in str(captured.value)
+
+
+def test_invalid_output_is_retryable(fake_codex: tuple[Path, Path]) -> None:
+    executable, capture_path = fake_codex
+    _set_behavior(capture_path, result_mode="invalid_json")
+    provider = CodexCliProvider(executable=str(executable))
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+    assert captured.value.retryable is True
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.status is ProviderCallStatus.INVALID_OUTPUT
 
 
 def test_generate_rejects_oversized_diagnostics_without_reading_them(
