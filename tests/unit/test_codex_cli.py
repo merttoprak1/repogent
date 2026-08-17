@@ -751,6 +751,26 @@ def test_generate_classifies_structured_output_failures(
     _assert_provider_error(captured, expected_status)
 
 
+def test_invalid_structured_output_includes_redacted_excerpt(
+    fake_codex: tuple[Path, Path],
+) -> None:
+    executable, capture_path = fake_codex
+    _set_behavior(capture_path, result_mode="invalid_json")
+    provider = CodexCliProvider(executable=str(executable), secrets=("sk-secret",))
+    with pytest.raises(ProviderError) as captured:
+        provider.generate(
+            role="implementation",
+            system_prompt="bounded role",
+            payload={"request": "change"},
+            output_type=RequirementsSpec,
+            timeout_seconds=5,
+        )
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.status is ProviderCallStatus.INVALID_OUTPUT
+    assert "{" in str(captured.value)
+    assert "sk-secret" not in str(captured.value)
+
+
 def test_generate_rejects_oversized_diagnostics_without_reading_them(
     fake_codex: tuple[Path, Path],
 ) -> None:

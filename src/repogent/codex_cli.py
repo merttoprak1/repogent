@@ -472,13 +472,17 @@ class CodexCliProvider:
                 parsed_output = json.loads(raw_output)
                 output = output_type.model_validate(parsed_output)
             except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as error:
+                excerpt = raw_output.decode("utf-8", errors="replace")
                 raise self._provider_error(
                     role=role,
                     status=ProviderCallStatus.INVALID_OUTPUT,
                     started=started,
                     readiness=readiness,
                     exit_code=exit_code,
-                    message="Codex CLI structured output was invalid",
+                    message=self._bounded_redacted_text(
+                        f"Codex CLI structured output was invalid: {excerpt}",
+                        fallback="Codex CLI structured output was invalid",
+                    ),
                 ) from error
 
         latency = time.monotonic() - started
