@@ -17,6 +17,24 @@ GOOD_DIFF = """--- a/app.py
 +value = 2
 """
 
+FENCED = """```diff
+--- a/app.py
++++ b/app.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+```
+"""
+
+GIT_HEADER = """diff --git a/app.py b/app.py
+index 111..222 100644
+--- a/app.py
++++ b/app.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+"""
+
 
 @pytest.mark.parametrize(
     ("diff", "message"),
@@ -34,6 +52,18 @@ GOOD_DIFF = """--- a/app.py
 def test_policy_rejects_unsafe_diffs(tmp_path: Path, diff: str, message: str) -> None:
     with pytest.raises(PatchPolicyError, match=message):
         PatchPolicy().validate(tmp_path, PatchProposal(summary="unsafe", diff=diff))
+
+
+def test_policy_accepts_fenced_unified_diff(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("value = 1\n")
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="change", diff=FENCED))
+    assert [path.as_posix() for path in patch.touched_paths] == ["app.py"]
+
+
+def test_policy_accepts_diff_git_header_before_unified_hunks(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("value = 1\n")
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="change", diff=GIT_HEADER))
+    assert [path.as_posix() for path in patch.touched_paths] == ["app.py"]
 
 
 def test_policy_rejects_symlink_escape(tmp_path: Path) -> None:
