@@ -5,12 +5,15 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import ValidationError
 
 from repogent.approvals import CliApprover
 from repogent.artifacts import ArtifactStoreError
+from repogent.doctor import DoctorService
 from repogent.domain import RunEvent, RunStatus
 from repogent.events import CompositeEventSink, ConsoleEventSink, EventSink
 from repogent.localization import PythonLocalizer
+from repogent.mcp_models import DoctorReport, DoctorRequest
 from repogent.preflight import PreflightReport
 from repogent.repository import RepositoryInspector
 from repogent.run_builder import (
@@ -36,6 +39,35 @@ def mcp_command(
     from repogent.mcp_server import serve_stdio
 
     serve_stdio()
+
+
+@app.command("doctor")
+def doctor_command(
+    repository: Annotated[Path, typer.Argument(exists=True, file_okay=False, resolve_path=True)],
+    provider: Annotated[str, typer.Option("--provider")] = "codex-cli",
+    model: Annotated[str | None, typer.Option("--model")] = None,
+    executor: Annotated[str, typer.Option("--executor")] = "deferred",
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Diagnose repository, provider, and executor readiness without editing files."""
+    try:
+        request = DoctorRequest(
+            repository=repository,
+            provider=provider,
+            model=model,
+            executor=executor,
+        )
+    except ValidationError as error:
+        typer.echo(error.errors()[0]["msg"] if error.errors() else str(error))
+        raise typer.Exit(2) from error
+
+    report = DoctorService().run(request)
+    if as_json:
+        typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
+    else:
+        typer.echo(_render_doctor_report(report))
+    if not report.ready:
+        raise typer.Exit(2)
 
 
 @app.command()
@@ -67,7 +99,7 @@ def run_command(
         Path, typer.Option("--repository", exists=True, file_okay=False, resolve_path=True)
     ],
     request: Annotated[str, typer.Option("--request")],
-    provider: Annotated[str, typer.Option("--provider")] = "openai",
+    provider: Annotated[str, typer.Option("--provider")] = "codex-cli",
     model: Annotated[str | None, typer.Option("--model")] = None,
     script: Annotated[Path | None, typer.Option("--script", exists=True, dir_okay=False)] = None,
     executor: Annotated[str, typer.Option("--executor")] = "docker",
@@ -157,6 +189,31 @@ class _DeferredEventSink:
         if self._delegate is None:
             raise RuntimeError("CLI event sink is not bound")
         self._delegate.emit(event)
+
+
+def _render_doctor_report(report: DoctorReport) -> str:
+    lines = [
+        "READY" if report.ready else "BLOCKED",
+        "",
+        f"repository: {report.repository}",
+        f"provider: {report.provider}",
+        f"executor: {report.executor}",
+        "",
+        "checks:",
+    ]
+    for check in report.checks:
+        mark = "ok" if check.passed else "fail"
+        lines.append(f"  [{mark}] {check.name}: {check.message}")
+        if check.remediation:
+            lines.append(f"         {check.remediation}")
+    if report.executors:
+        lines.extend(["", "executors:"])
+        for option in report.executors:
+            availability = "available" if option.available else "unavailable"
+            lines.append(f"  {option.mode.value}: {availability} ({option.isolation_level.value})")
+            if option.remediation:
+                lines.append(f"         {option.remediation}")
+    return "\n".join(lines)
 
 
 def _echo_preflight_failures(run_directory: Path) -> None:

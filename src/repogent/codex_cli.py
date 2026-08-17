@@ -38,6 +38,7 @@ _REQUIRED_EXEC_FLAGS = (
     "--sandbox",
     "--ignore-user-config",
     "--ignore-rules",
+    "--skip-git-repo-check",
     "--output-schema",
     "--output-last-message",
     "-C",
@@ -61,6 +62,38 @@ _ALLOWED_ENVIRONMENT_KEYS = (
 
 class _OutputTooLargeError(RuntimeError):
     pass
+
+
+def openai_strict_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of `schema` that satisfies Codex/OpenAI structured-output rules.
+
+    Every object must list every property in `required`. Pydantic omits fields
+    that have defaults; Codex rejects that schema before generation starts.
+    """
+    adapted = json.loads(json.dumps(schema))
+    _require_all_object_properties(adapted)
+    if not isinstance(adapted, dict):
+        raise ValueError("JSON schema must be an object")
+    return adapted
+
+
+def _require_all_object_properties(node: object) -> None:
+    if isinstance(node, dict):
+        if "$ref" in node:
+            ref = node["$ref"]
+            node.clear()
+            node["$ref"] = ref
+            return
+        node.pop("default", None)
+        properties = node.get("properties")
+        if isinstance(properties, dict) and properties:
+            node["required"] = sorted(properties)
+            node["additionalProperties"] = False
+        for value in node.values():
+            _require_all_object_properties(value)
+    elif isinstance(node, list):
+        for item in node:
+            _require_all_object_properties(item)
 
 
 class CodexCliProvider:
@@ -288,9 +321,10 @@ class CodexCliProvider:
             prompt_path = self._owner_only_file(workdir, "prompt-", ".json")
             stdout_path = self._owner_only_file(workdir, "stdout-", ".log")
             stderr_path = self._owner_only_file(workdir, "stderr-", ".log")
-            schema_bytes = json.dumps(output_type.model_json_schema(), sort_keys=True).encode(
-                "utf-8"
-            )
+            schema_bytes = json.dumps(
+                openai_strict_schema(output_type.model_json_schema()),
+                sort_keys=True,
+            ).encode("utf-8")
             if len(schema_bytes) > self.max_output_bytes:
                 raise self._provider_error(
                     role=role,
@@ -312,6 +346,7 @@ class CodexCliProvider:
                 "read-only",
                 "--ignore-user-config",
                 "--ignore-rules",
+                "--skip-git-repo-check",
                 "--output-schema",
                 str(schema_path),
                 "--output-last-message",

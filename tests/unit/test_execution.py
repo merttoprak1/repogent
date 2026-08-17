@@ -446,6 +446,25 @@ def test_docker_executor_readiness_reports_missing_executable(
     assert DockerExecutor().readiness() == (False, "docker executable is unavailable")
 
 
+def test_docker_executor_readiness_reports_stopped_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: "/usr/local/bin/docker")
+
+    def fake_bounded_run(_argv: list[str], **_: object) -> object:
+        return execution_module._ProcessResult(
+            1,
+            "",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+            "Is the docker daemon running?",
+            False,
+        )
+
+    monkeypatch.setattr("repogent.execution._run_with_bounded_output", fake_bounded_run)
+
+    assert DockerExecutor().readiness() == (False, "docker daemon is unavailable")
+
+
 def test_docker_executor_skips_missing_image_without_running_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

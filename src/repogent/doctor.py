@@ -26,6 +26,7 @@ from repogent.repository_scope import RepositoryScopeResolver
 
 _PYTHON_REMEDIATION = "Install and run Repogent with Python 3.11 or newer"
 _DOCKER_REMEDIATION = "Install Docker and ensure docker is on PATH"
+_DAEMON_REMEDIATION = "Start Docker Desktop or the Docker daemon"
 _IMAGE_REMEDIATION = "Build the validator image with make validator-image"
 _COMMAND_REMEDIATION = "Install the required validation command in the selected executor"
 _CODEX_INSTALL_REMEDIATION = "Install the Codex CLI and ensure codex is on PATH"
@@ -320,9 +321,11 @@ def _message_for(check: PreflightCheck) -> str:
 
 
 def _remediation_for(check: PreflightCheck) -> str:
-    reason = check.reason or ""
+    reason = (check.reason or "").lower()
     if check.name == "executor":
-        if "image" in reason.lower():
+        if "validator image is unavailable" in reason:
             return _IMAGE_REMEDIATION
+        if "daemon" in reason:
+            return _DAEMON_REMEDIATION
         return _DOCKER_REMEDIATION
     return _COMMAND_REMEDIATION

@@ -522,6 +522,7 @@ def test_build_run_terminalizes_interrupt_as_cancelled(
             RunOptions(
                 repository=target,
                 request="change",
+                provider="openai",
                 executor="local",
                 output_dir=tmp_path / "runs",
             ),

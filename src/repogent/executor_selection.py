@@ -18,6 +18,7 @@ LOCAL_RISK_STATEMENT = (
 )
 
 _DOCKER_REMEDIATION = "Install Docker and ensure docker is on PATH"
+_DAEMON_REMEDIATION = "Start Docker Desktop or the Docker daemon"
 _IMAGE_REMEDIATION = "Build the validator image with make validator-image"
 _COMMAND_REMEDIATION = "Install the required validation command in the selected executor"
 
@@ -191,8 +192,11 @@ def _isolation_level(mode: ExecutionMode) -> IsolationLevel:
 def _remediation(preflight: PreflightReport, mode: ExecutionMode) -> str:
     executor_check = next((check for check in preflight.checks if check.name == "executor"), None)
     if executor_check is not None and executor_check.status is not ReadinessStatus.PASSED:
-        if mode is ExecutionMode.DOCKER and "image" in (executor_check.reason or "").lower():
+        reason = (executor_check.reason or "").lower()
+        if mode is ExecutionMode.DOCKER and "validator image is unavailable" in reason:
             return _IMAGE_REMEDIATION
+        if mode is ExecutionMode.DOCKER and "daemon" in reason:
+            return _DAEMON_REMEDIATION
         if mode is ExecutionMode.DOCKER:
             return _DOCKER_REMEDIATION
     return _COMMAND_REMEDIATION

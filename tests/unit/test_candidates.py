@@ -507,15 +507,15 @@ def test_candidate_evaluator_times_out_during_copy_setup(
     ]
 
 
-def test_candidate_evaluator_rejects_unmapped_acceptance_without_mutation(tmp_path: Path) -> None:
+def test_candidate_evaluator_ignores_unmapped_acceptance_without_mutating_checkout(
+    tmp_path: Path,
+) -> None:
     root = repository_with_value(tmp_path, 1)
 
     evidence = CandidateEvaluator(PatchPolicy(), PatchApplier(), RecordingValidator()).evaluate(
         root, candidate("candidate-1", 1, 2), ["different criterion"], 30
     )
 
-    assert evidence.eligible is False
-    assert evidence.required_failures == ["acceptance-mapping"]
-    assert evidence.changed_files == 0
-    assert evidence.changed_lines == 0
+    assert evidence.acceptance_criteria_coverage == 0.0
+    assert evidence.required_failures == []
     assert (root / "app.py").read_text() == "value = 1\n"

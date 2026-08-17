@@ -117,13 +117,15 @@ def test_static_preview_fails_closed_when_exact_diff_would_be_sanitized(
         )
 
 
-def test_static_preview_rejects_acceptance_criteria_outside_requirements(
+def test_static_preview_ignores_acceptance_criteria_outside_requirements(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(CandidateEvaluationError, match="outside the supplied requirements"):
-        PatchPreviewer(PatchPolicy()).preview(
-            make_repository(tmp_path), safe_candidate(), ["different criterion"]
-        )
+    preview = PatchPreviewer(PatchPolicy()).preview(
+        make_repository(tmp_path), safe_candidate(), ["different criterion"]
+    )
+
+    assert preview.acceptance_criteria_coverage == 0
+    assert preview.touched_paths == ["app.py"]
 
 
 def test_fixed_executor_selector_returns_the_prepared_executor(tmp_path: Path) -> None:

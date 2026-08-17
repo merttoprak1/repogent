@@ -47,7 +47,7 @@ The Codex plugin exposes two focused capabilities:
   it can touch the real checkout.
 
 Repogent supports conventional Python packages, CLIs, data transforms, and the
-bundled FastAPI example. The standalone `repogent analyze` and `repogent run`
+bundled FastAPI example. The standalone `repogent doctor`, `repogent analyze`, and `repogent run`
 commands remain available for terminal workflows and automation.
 
 ## Install for Codex
@@ -135,7 +135,19 @@ checks, and real stdio integration.
 
 ## CLI quick start
 
-`analyze` is read-only and prints a bounded repository inventory, deterministic
+`doctor` is read-only. It reports whether a repository can enter a workflow, and
+separates required base checks from optional executor availability:
+
+```bash
+repogent doctor ./tests/fixtures/python_library
+```
+
+The default provider is `codex-cli`, which reuses a local Codex login. Use
+`--provider openai` only when `OPENAI_API_KEY` is set for the Repogent process.
+The default executor for diagnosis is `deferred`, so a missing Docker daemon is
+an unavailable isolation option rather than a base-readiness failure.
+
+`analyze` is also read-only and prints a bounded repository inventory, deterministic
 Python symbol graph, and request-ranked localization:
 
 ```bash
@@ -161,8 +173,8 @@ weaker boundary than container isolation.
 
 ## Executors and providers
 
-Docker is the default executor. Build the reviewed validator image before a
-Docker-backed local run:
+`repogent run` defaults to the Codex CLI provider and the Docker executor. Build
+the reviewed validator image before a Docker-backed local run:
 
 ```bash
 make validator-image
