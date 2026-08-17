@@ -167,6 +167,17 @@ repogent run --repository "$REPOGENT_DEMO_DIR" \
   --executor local --output-dir ./.repogent/runs
 ```
 
+The same scripted path works for the clamp library fixture:
+
+```bash
+REPOGENT_DEMO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repogent-demo.XXXXXX")"
+cp -R tests/fixtures/python_library/. "$REPOGENT_DEMO_DIR"/
+repogent run --repository "$REPOGENT_DEMO_DIR" \
+  --request "Reject inverted clamp bounds" \
+  --provider scripted --script ./examples/scripted_clamp.json \
+  --executor local --output-dir ./.repogent/runs
+```
+
 The demo asks for three approvals: requirements, plan, and exact patch. The
 explicit local executor keeps the demo usable without Docker, but it is a
 weaker boundary than container isolation.
