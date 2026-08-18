@@ -74,6 +74,30 @@ def test_prepare_rechecks_availability_after_inspect(tmp_path: Path) -> None:
         registry.prepare(root, ExecutionMode.DOCKER, policy)
 
 
+def test_docker_option_remediation_for_stopped_daemon(tmp_path: Path) -> None:
+    root = make_repository(tmp_path)
+
+    class StoppedDaemon:
+        def readiness(self) -> tuple[bool, str]:
+            return False, "docker daemon is unavailable"
+
+        def available(self, _command: CommandSpec) -> bool:
+            return False
+
+        def run(self, _command: CommandSpec, _root: Path) -> object:
+            raise AssertionError("availability inspection must not run target-repository commands")
+
+    registry = ExecutorRegistry(docker_factory=StoppedDaemon)
+    docker = next(
+        option
+        for option in registry.inspect_availability(root, ValidationPolicy())
+        if option.mode is ExecutionMode.DOCKER
+    )
+
+    assert docker.available is False
+    assert docker.remediation == "Start Docker Desktop or the Docker daemon"
+
+
 def test_local_option_is_unavailable_when_required_pytest_module_is_missing(
     tmp_path: Path,
 ) -> None:

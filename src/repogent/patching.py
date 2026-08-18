@@ -12,6 +12,50 @@ from unidiff.errors import UnidiffParseError  # type: ignore[import-untyped]
 
 from repogent.domain import PatchProposal
 
+_FENCE_OPENERS = frozenset({"```", "```diff", "```patch"})
+_GIT_HEADER_PREFIXES = (
+    "diff --git",
+    "index ",
+    "new file mode",
+    "deleted file mode",
+    "similarity index",
+    "rename from",
+    "rename to",
+)
+
+
+def unwrap_unified_diff(diff: str) -> str:
+    if diff.startswith("--- "):
+        return diff
+    text = _drop_git_header_lines(_unwrap_single_fence(diff.strip()))
+    if text.startswith("--- "):
+        return text if text.endswith("\n") else f"{text}\n"
+    return diff
+
+
+def _unwrap_single_fence(text: str) -> str:
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if len(lines) < 2 or lines[0].strip() not in _FENCE_OPENERS:
+        return text
+    if lines[-1].strip() != "```":
+        return text
+    return "\n".join(lines[1:-1]).strip("\n")
+
+
+def _drop_git_header_lines(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    first = next((line for line in lines if line.strip()), "")
+    if not first.startswith("diff --git"):
+        return text
+    for index, line in enumerate(lines):
+        if line.startswith("--- "):
+            return "".join(lines[index:])
+        if not any(line.startswith(prefix) for prefix in _GIT_HEADER_PREFIXES):
+            return text
+    return text
+
 
 class PatchPolicyError(ValueError):
     pass
@@ -54,6 +98,9 @@ class PatchPolicy:
         repository = root.resolve(strict=True)
         if not repository.is_dir():
             raise PatchPolicyError("repository root must be a directory")
+        diff = unwrap_unified_diff(proposal.diff)
+        if diff != proposal.diff:
+            proposal = proposal.model_copy(update={"diff": diff})
         try:
             encoded = proposal.diff.encode("utf-8")
         except UnicodeEncodeError as error:

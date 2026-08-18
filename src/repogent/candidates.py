@@ -89,11 +89,11 @@ class PatchPreviewer:
         candidate: CandidateRecord,
         acceptance_criteria: Sequence[str],
     ) -> PatchPreview:
-        unknown = set(candidate.proposal.acceptance_criteria_addressed) - set(acceptance_criteria)
-        if unknown:
-            raise CandidateEvaluationError(
-                "proposal addresses criteria outside the supplied requirements"
-            )
+        known_criteria = [
+            item
+            for item in candidate.proposal.acceptance_criteria_addressed
+            if item in set(acceptance_criteria)
+        ]
         exact_diff = candidate.proposal.diff
         ensure_exact_diff_safe(exact_diff, self.explicit_secrets)
         validated = self.patch_policy.validate(root, candidate.proposal)
@@ -102,10 +102,7 @@ class PatchPreviewer:
             touched_paths=[path.as_posix() for path in validated.touched_paths],
             changed_files=len(validated.touched_paths),
             changed_lines=validated.changed_lines,
-            acceptance_criteria_coverage=(
-                len(candidate.proposal.acceptance_criteria_addressed)
-                / max(1, len(acceptance_criteria))
-            ),
+            acceptance_criteria_coverage=len(known_criteria) / max(1, len(acceptance_criteria)),
         )
 
 
@@ -501,18 +498,6 @@ class CandidateEvaluator:
             deadline = _deadline_after(timeout_seconds)
         except EvaluationTimeout as error:
             return self._failure_evidence(candidate.candidate_id, "timeout", str(error), started)
-        unknown_criteria = set(candidate.proposal.acceptance_criteria_addressed) - set(
-            acceptance_criteria
-        )
-        if unknown_criteria:
-            return self._failure_evidence(
-                candidate.candidate_id,
-                "acceptance-mapping",
-                "proposal addresses criteria outside the supplied requirements: "
-                + ", ".join(sorted(unknown_criteria)),
-                started,
-            )
-
         validation = ValidationReport(checks=[])
         baseline: RepositoryIntegritySnapshot | None = None
         validated: ValidatedPatch | None = None

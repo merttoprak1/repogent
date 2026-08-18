@@ -22,6 +22,12 @@ def _built_wheel() -> Path:
     return wheels[0]
 
 
+def test_runtime_version_matches_project_metadata() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+
+    assert repogent.__version__ == project["project"]["version"]
+
+
 def test_package_declares_inline_type_information() -> None:
     assert files(repogent).joinpath("py.typed").is_file()  # noqa: S101
 

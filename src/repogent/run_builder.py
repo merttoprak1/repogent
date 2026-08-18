@@ -57,7 +57,7 @@ ExecutorSelectorFactory = Callable[[str, Path, ValidationPolicy], ExecutorSelect
 class RunOptions:
     repository: Path
     request: str
-    provider: str = "openai"
+    provider: str = "codex-cli"
     model: str | None = None
     script: Path | None = None
     executor: str = "docker"

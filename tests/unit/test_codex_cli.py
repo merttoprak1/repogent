@@ -10,12 +10,20 @@ from typing import Any
 import pytest
 
 import repogent.codex_cli as codex_cli_module
-from repogent.codex_cli import CodexCliProvider
+from repogent.codex_cli import CodexCliProvider, openai_strict_schema
 from repogent.domain import ProviderCallStatus, RequirementsSpec
 from repogent.providers import ProviderError
 
 _SECRET = "sk-proj-secretvalue123456"  # noqa: S105
 _MAX_ERROR_LENGTH = 4096
+
+
+def test_openai_strict_schema_strips_keywords_from_refs() -> None:
+    schema = openai_strict_schema(RequirementsSpec.model_json_schema())
+
+    assert schema["properties"]["risk_level"] == {"$ref": "#/$defs/RiskLevel"}
+    assert set(schema["required"]) == set(schema["properties"])
+    assert "default" not in schema["properties"]["schema_version"]
 
 
 class _WindowsOs:
@@ -75,7 +83,7 @@ if args == ["--version"]:
     raise SystemExit(behavior.get("version_exit", 0))
 elif args == ["exec", "--help"]:
     flags = "--ephemeral --sandbox --ignore-user-config --ignore-rules "
-    flags += "--output-schema --output-last-message -C --model"
+    flags += "--skip-git-repo-check --output-schema --output-last-message -C --model"
     print(behavior.get("help_stdout", flags))
     print(behavior.get("help_stderr", ""), file=sys.stderr)
     raise SystemExit(behavior.get("help_exit", 0))
@@ -159,7 +167,8 @@ def _assert_provider_error(
 ) -> None:
     error = captured.value
     rendered = str(error)
-    assert error.retryable is False
+    if expected_status is not ProviderCallStatus.INVALID_OUTPUT:
+        assert error.retryable is False
     assert len(rendered) <= _MAX_ERROR_LENGTH
     assert all(value not in rendered for value in forbidden)
     assert error.evidence is not None
@@ -211,13 +220,14 @@ def test_generate_uses_isolated_structured_exec(
         and record["stderr_mode"] == "0o600"
         for record in capture["records"]
     )
-    assert argv[:7] == [
+    assert argv[:8] == [
         "exec",
         "--ephemeral",
         "--sandbox",
         "read-only",
         "--ignore-user-config",
         "--ignore-rules",
+        "--skip-git-repo-check",
         "--output-schema",
     ]
     assert argv[-1] == "-"
@@ -238,6 +248,8 @@ def test_generate_uses_isolated_structured_exec(
         "system_prompt": "bounded role",
     }
     assert capture["schema"]["title"] == "RequirementsSpec"
+    assert set(capture["schema"]["required"]) == set(capture["schema"]["properties"])
+    assert "assumptions" in capture["schema"]["required"]
     assert capture["schema_permissions"] == 0o600
     assert capture["result_permissions"] == 0o600
 
@@ -573,7 +585,8 @@ def test_generate_classifies_missing_executable(tmp_path: Path) -> None:
         (
             {
                 "help_stdout": "--ephemeral --sandbox --ignore-user-config "
-                "--ignore-rules --output-schema --output-last-message -C "
+                "--ignore-rules --skip-git-repo-check --output-schema "
+                "--output-last-message -C "
                 "--model-extra"
             },
             ProviderCallStatus.CAPABILITY_MISSING,
@@ -737,6 +750,37 @@ def test_generate_classifies_structured_output_failures(
         _generate(provider)
 
     _assert_provider_error(captured, expected_status)
+
+
+def test_invalid_structured_output_includes_redacted_excerpt(
+    fake_codex: tuple[Path, Path],
+) -> None:
+    executable, capture_path = fake_codex
+    _set_behavior(capture_path, result_mode="invalid_json")
+    provider = CodexCliProvider(executable=str(executable), secrets=("sk-secret",))
+    with pytest.raises(ProviderError) as captured:
+        provider.generate(
+            role="implementation",
+            system_prompt="bounded role",
+            payload={"request": "change"},
+            output_type=RequirementsSpec,
+            timeout_seconds=5,
+        )
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.status is ProviderCallStatus.INVALID_OUTPUT
+    assert "{" in str(captured.value)
+    assert "sk-secret" not in str(captured.value)
+
+
+def test_invalid_output_is_retryable(fake_codex: tuple[Path, Path]) -> None:
+    executable, capture_path = fake_codex
+    _set_behavior(capture_path, result_mode="invalid_json")
+    provider = CodexCliProvider(executable=str(executable))
+    with pytest.raises(ProviderError) as captured:
+        _generate(provider)
+    assert captured.value.retryable is True
+    assert captured.value.evidence is not None
+    assert captured.value.evidence.status is ProviderCallStatus.INVALID_OUTPUT
 
 
 def test_generate_rejects_oversized_diagnostics_without_reading_them(

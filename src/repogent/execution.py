@@ -482,6 +482,19 @@ class LocalExecutor(_RestrictedExecutor):
         )
 
 
+_DOCKER_DAEMON_MARKERS = (
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+    "docker desktop is not running",
+    "error during connect",
+)
+
+
+def _docker_daemon_unavailable(inspection: _ProcessResult) -> bool:
+    diagnostic = f"{inspection.stdout}\n{inspection.stderr}".lower()
+    return any(marker in diagnostic for marker in _DOCKER_DAEMON_MARKERS)
+
+
 class DockerExecutor(_RestrictedExecutor):
     def __init__(
         self,
@@ -503,10 +516,12 @@ class DockerExecutor(_RestrictedExecutor):
             return (False, "docker executable is unavailable")
         inspection = self._inspect_image()
         if inspection is None:
-            return (False, "docker image inspection failed")
+            return (False, "docker daemon is unavailable")
         if inspection.timed_out:
             return (False, "docker image inspection timed out")
         if inspection.exit_code != 0:
+            if _docker_daemon_unavailable(inspection):
+                return (False, "docker daemon is unavailable")
             return (False, f"validator image is unavailable: {self.image}")
         return (True, None)
 

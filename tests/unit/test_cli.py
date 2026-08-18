@@ -108,6 +108,9 @@ def test_run_delegates_construction_to_shared_builder(
         executor="local",
         output_dir=evidence,
     )
+    options = captured["options"]
+    assert isinstance(options, RunOptions)
+    assert options.provider == "codex-cli"
     assert [event.message for event in durable_events] == ["builder event"]
     assert "[warning] builder event" in result.output
 
@@ -197,6 +200,8 @@ def test_explicit_local_cli_never_uses_deferred_gate(
             str(target),
             "--request",
             "change",
+            "--provider",
+            "openai",
             "--executor",
             "local",
             "--output-dir",
@@ -218,6 +223,53 @@ def test_analyze_prints_inventory_and_ranked_localization(tmp_path: Path) -> Non
     assert payload["inventory"]["files"][0]["path"] == "auth.py"
     assert payload["localization"]["snippets"][0]["path"] == "auth.py"
     assert any(node["qualified_name"] == "auth.login" for node in payload["symbol_graph"]["nodes"])
+
+
+def test_doctor_reports_ready_json_for_scripted_deferred_repository(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "app.py").write_text("value = 1\n")
+
+    result = runner.invoke(
+        app,
+        ["doctor", str(repository), "--provider", "scripted", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ready"] is True
+    assert payload["provider"] == "scripted"
+    assert payload["executor"] == "deferred"
+    assert any(check["name"] == "repository" and check["passed"] for check in payload["checks"])
+
+
+def test_doctor_defaults_to_codex_cli_and_deferred_executor(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    result = runner.invoke(app, ["doctor", str(repository), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert payload["provider"] == "codex-cli"
+    assert payload["executor"] == "deferred"
+    assert result.exit_code in {0, 2}
+
+
+def test_doctor_prints_blocked_status_when_docker_is_required_and_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: None)
+
+    result = runner.invoke(
+        app,
+        ["doctor", str(repository), "--provider", "scripted", "--executor", "docker"],
+    )
+
+    assert result.exit_code == 2
+    assert "BLOCKED" in result.output
+    assert "Install Docker and ensure docker is on PATH" in result.output
 
 
 def test_run_requires_script_for_scripted_provider(tmp_path: Path) -> None:
@@ -615,15 +667,19 @@ def test_run_uses_external_default_evidence_directory(
         )(),
     )
 
-    def fake_openai_provider(*, model: str) -> object:
-        captured["model"] = model
-        return object()
+    class ReadyCodex:
+        def __init__(self, *, model: str | None, target_root: Path) -> None:
+            captured["model"] = model
+            captured["target_root"] = target_root
+
+        def check_ready(self) -> ProviderReadiness:
+            return ProviderReadiness(provider="codex-cli", model="default", ready=True)
 
     def record_fingerprint(provider: str, model: str, executor: str, commands: object) -> str:
         captured["fingerprint"] = (provider, model, executor, commands)
         return "fingerprint"
 
-    monkeypatch.setattr(run_builder, "OpenAIProvider", fake_openai_provider)
+    monkeypatch.setattr(run_builder, "CodexCliProvider", ReadyCodex)
     monkeypatch.setattr(run_builder, "configuration_fingerprint", record_fingerprint)
     monkeypatch.setattr(run_builder.RoleSet, "from_provider", lambda _provider: object())
     monkeypatch.setattr(run_builder, "Workflow", FakeWorkflow)
@@ -632,8 +688,8 @@ def test_run_uses_external_default_evidence_directory(
 
     assert result.exit_code == 0
     assert captured["base_dir"] == target.parent / ".repogent" / "runs"
-    assert captured["model"] == "gpt-5.6-sol"
-    assert captured["fingerprint"][:3] == ("openai", "gpt-5.6-sol", "docker")
+    assert captured["model"] is None
+    assert captured["fingerprint"][:3] == ("codex-cli", "default", "docker")
 
 
 def test_run_fingerprints_scripted_provider_with_scripted_model(
@@ -827,6 +883,8 @@ def test_run_terminalizes_unexpected_openai_initialization_failure(
             str(target),
             "--request",
             "change",
+            "--provider",
+            "openai",
             "--executor",
             "local",
             "--output-dir",
@@ -877,6 +935,8 @@ def test_run_reports_workflow_construction_failure_like_pre_refactor_cli(
             str(target),
             "--request",
             "change",
+            "--provider",
+            "openai",
             "--executor",
             "local",
             "--output-dir",
@@ -936,6 +996,8 @@ def test_run_reports_openai_provider_load_error_without_traceback(
             str(target),
             "--request",
             "change",
+            "--provider",
+            "openai",
             "--executor",
             "local",
             "--output-dir",

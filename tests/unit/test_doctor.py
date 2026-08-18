@@ -156,6 +156,25 @@ def test_doctor_reports_missing_validator_image(
     assert executor.remediation == "Build the validator image with make validator-image"
 
 
+def test_doctor_reports_docker_daemon_remediation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StoppedDaemon:
+        def readiness(self) -> tuple[bool, str]:
+            return False, "docker daemon is unavailable"
+
+        def available(self, _command: object) -> bool:
+            return False
+
+    monkeypatch.setattr(doctor, "DockerExecutor", lambda: StoppedDaemon())
+
+    report = DoctorService().run(DoctorRequest(repository=tmp_path, provider="scripted"))
+
+    executor = next(check for check in report.checks if check.name == "executor")
+    assert executor.passed is False
+    assert executor.remediation == "Start Docker Desktop or the Docker daemon"
+
+
 def test_doctor_reports_unavailable_required_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -265,7 +284,7 @@ def test_doctor_codex_readiness_uses_only_noninteractive_login_status(
     calls = tmp_path / "codex-calls.txt"
     help_flags = (
         "--ephemeral --sandbox --ignore-user-config --ignore-rules "
-        "--output-schema --output-last-message -C --model"
+        "--skip-git-repo-check --output-schema --output-last-message -C --model"
     )
     executable.write_text(
         "#!/bin/sh\n"
