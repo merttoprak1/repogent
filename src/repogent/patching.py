@@ -25,8 +25,6 @@ _GIT_HEADER_PREFIXES = (
 
 
 def unwrap_unified_diff(diff: str) -> str:
-    if diff.startswith("--- "):
-        return diff
     text = _drop_git_header_lines(_unwrap_single_fence(diff.strip()))
     if text.startswith("--- "):
         return text if text.endswith("\n") else f"{text}\n"
@@ -46,15 +44,12 @@ def _unwrap_single_fence(text: str) -> str:
 
 def _drop_git_header_lines(text: str) -> str:
     lines = text.splitlines(keepends=True)
-    first = next((line for line in lines if line.strip()), "")
-    if not first.startswith("diff --git"):
-        return text
-    for index, line in enumerate(lines):
-        if line.startswith("--- "):
-            return "".join(lines[index:])
-        if not any(line.startswith(prefix) for prefix in _GIT_HEADER_PREFIXES):
-            return text
-    return text
+    kept = [
+        line
+        for line in lines
+        if not any(line.startswith(prefix) for prefix in _GIT_HEADER_PREFIXES)
+    ]
+    return "".join(kept)
 
 
 class PatchPolicyError(ValueError):
