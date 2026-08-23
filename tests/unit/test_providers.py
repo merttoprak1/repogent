@@ -18,16 +18,18 @@ from repogent.providers import (
 
 
 def test_known_providers_are_the_closed_allowlist() -> None:
-    assert frozenset({"openai", "codex-cli", "scripted"}) == KNOWN_PROVIDERS
+    assert frozenset({"openai", "grok", "codex-cli", "scripted"}) == KNOWN_PROVIDERS
     assert "grok-cli" not in KNOWN_PROVIDERS
     assert validate_provider_name("codex-cli") == "codex-cli"
+    assert validate_provider_name("grok") == "grok"
     assert default_model_for("codex-cli") == "default"
     assert default_model_for("openai") == DEFAULT_MODELS["openai"] == "gpt-5.6-sol"
+    assert default_model_for("grok") == DEFAULT_MODELS["grok"] == "grok-4.6"
     assert default_model_for("scripted") == "scripted"
 
 
 def test_validate_provider_name_rejects_unknown() -> None:
-    with pytest.raises(ValueError, match="provider must be openai, codex-cli, or scripted"):
+    with pytest.raises(ValueError, match="provider must be openai, grok, codex-cli, or scripted"):
         validate_provider_name("grok-cli")
 
 

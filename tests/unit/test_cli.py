@@ -346,6 +346,7 @@ def test_run_rejects_unknown_provider_without_traceback(tmp_path: Path) -> None:
     assert result.exit_code == 2
     output = rendered_output(result)
     assert "provider must be openai" in output
+    assert "grok" in output
     assert "codex-cli" in output
     assert "scripted" in output
     assert "Traceback" not in output

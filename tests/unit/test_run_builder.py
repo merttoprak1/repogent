@@ -66,6 +66,12 @@ def test_validate_run_options_rejects_invalid_provider(tmp_path: Path, provider:
         validate_run_options(RunOptions(repository=target, request="change", provider=provider))
 
 
+def test_validate_run_options_accepts_grok_provider(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    validate_run_options(RunOptions(repository=target, request="change", provider="grok"))
+
+
 def test_validate_run_options_requires_script_for_scripted_provider(
     tmp_path: Path,
 ) -> None:

@@ -55,7 +55,7 @@ from repogent.repository_scope import RepositoryScope, RepositoryScopeResolver
 from repogent.run_reports import build_persistent_report
 from repogent.workflow import ExecutorSelector, Workflow
 
-ProviderName = Literal["openai", "codex-cli", "scripted"]
+ProviderName = Literal["openai", "grok", "codex-cli", "scripted"]
 ExecutorName = Literal["docker", "local", "deferred"]
 ExecutorSelectorFactory = Callable[[str, Path, ValidationPolicy], ExecutorSelector]
 

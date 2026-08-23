@@ -30,13 +30,14 @@ class ProviderError(RuntimeError):
         self.evidence = evidence
 
 
-KNOWN_PROVIDERS = frozenset({"openai", "codex-cli", "scripted"})
+KNOWN_PROVIDERS = frozenset({"openai", "grok", "codex-cli", "scripted"})
 DEFAULT_MODELS = {
     "openai": "gpt-5.6-sol",
+    "grok": "grok-4.6",
     "codex-cli": "default",
     "scripted": "scripted",
 }
-_PROVIDER_CHOICE = "openai, codex-cli, or scripted"
+_PROVIDER_CHOICE = "openai, grok, codex-cli, or scripted"
 
 
 def validate_provider_name(provider: str) -> str:

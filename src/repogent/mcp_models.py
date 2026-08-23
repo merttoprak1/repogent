@@ -32,7 +32,7 @@ BoundedPath = Annotated[str, Field(max_length=4_096)]
 class VerifiedChangeStart(VersionedModel):
     repository: Path
     request: str = Field(min_length=1, max_length=10_000)
-    provider: Literal["openai", "codex-cli", "scripted"] = "codex-cli"
+    provider: Literal["openai", "grok", "codex-cli", "scripted"] = "codex-cli"
     model: str | None = Field(default=None, max_length=256)
     script: Path | None = None
     executor: Literal["docker", "local", "deferred"] = "deferred"
