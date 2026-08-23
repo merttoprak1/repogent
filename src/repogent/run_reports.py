@@ -199,7 +199,7 @@ def _derived_terminal_error(
             remediation="Review the run budget or timeout before retrying.",
             retry=RetryClass.NON_RETRYABLE,
         )
-    if any(provider in reason for provider in ("provider", "openai", "codex", "scripted")):
+    if any(provider in reason for provider in ("provider", "openai", "grok", "codex", "scripted")):
         return provider_failure_error(manifest, retryable=True)
     if any(
         policy in reason

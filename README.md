@@ -120,9 +120,10 @@ repogent doctor ./tests/fixtures/python_library
 ```
 
 The default provider is `codex-cli` (local Codex login). Use `--provider openai`
-only when `OPENAI_API_KEY` is set for the Repogent process. The default doctor
-executor is `deferred`: a missing Docker daemon is an unavailable isolation
-option, not a base-readiness failure.
+only when `OPENAI_API_KEY` is set for the Repogent process. Use `--provider grok`
+only when `XAI_API_KEY` is set for the Repogent process (not in the target
+repository). The default doctor executor is `deferred`: a missing Docker daemon
+is an unavailable isolation option, not a base-readiness failure.
 
 `analyze` prints a bounded inventory, Python symbol graph, and request-ranked
 localization:
@@ -170,12 +171,11 @@ The image runs without network access, mounts the checkout read-only, and
 applies CPU, memory, process, output, and time limits. If Docker or the image
 is unavailable, choose local execution explicitly.
 
-Proposal providers (`codex-cli`, `openai`, `scripted`) only produce typed
+Proposal providers (`codex-cli`, `openai`, `grok`, `scripted`) only produce typed
 artifacts. Repogent still validates schemas and patches, records evidence, and
-enforces approvals. Additional local CLI providers are planned (including Grok
-CLI) on the same contract; they are not available in this release. Keep
-credentials out of the target repository and use a disposable checkout for live
-runs.
+enforces approvals. Grok uses the xAI API (`XAI_API_KEY`, default model
+`grok-4.6`). A local Grok CLI provider is still not available. Keep credentials
+out of the target repository and use a disposable checkout for live runs.
 
 ## Evidence and terminal states
 
@@ -202,7 +202,7 @@ mutation, or non-Python repository support. These are deliberate boundaries.
 Future work will extend Repogent without weakening approval or evidence
 boundaries:
 
-- a Grok CLI proposal provider on the existing `ModelProvider` contract;
+- a Grok CLI proposal provider (distinct from the `grok` xAI API provider);
 - additional read-only and mutation capabilities on the capability kernel;
 - GitHub and headless CI integrations that preserve human authorization;
 - published benchmarks and broader fixture coverage;

@@ -237,9 +237,7 @@ def test_build_run_constructs_grok_provider_not_openai(
 
         @classmethod
         def check_ready(cls, *, model: str | None = None) -> ProviderReadiness:
-            return ProviderReadiness(
-                provider="grok", model=model or "grok-4.6", ready=True
-            )
+            return ProviderReadiness(provider="grok", model=model or "grok-4.6", ready=True)
 
     class Registry:
         def __init__(self, **_kwargs: object) -> None:

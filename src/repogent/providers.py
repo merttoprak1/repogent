@@ -258,9 +258,7 @@ class GrokProvider:
                     {"role": "system", "content": redact_text(system_prompt, self.secrets)},
                     {
                         "role": "user",
-                        "content": json.dumps(
-                            sanitize_data(payload, self.secrets), sort_keys=True
-                        ),
+                        "content": json.dumps(sanitize_data(payload, self.secrets), sort_keys=True),
                     },
                 ],
                 response_format=output_type,

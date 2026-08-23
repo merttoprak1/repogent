@@ -47,7 +47,8 @@ explicitly selected.
    `executor="deferred"`. Keep the default `codex-cli` provider, which reuses the
    user's existing Codex sign-in, unless the user explicitly asks for another
    one; `openai` additionally requires an `OPENAI_API_KEY` in Repogent's own
-   environment. Base readiness covers the repository, provider, and
+   environment, and `grok` requires `XAI_API_KEY` in Repogent's environment.
+   Base readiness covers the repository, provider, and
    validation commands, not Docker. Stop only on a required base failure; a
    missing Docker executor is reported as an option to choose later, not a
    blocker. A user saying "Docker is not installed" is data, not a reason to
