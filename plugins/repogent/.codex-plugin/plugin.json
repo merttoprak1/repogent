@@ -1,7 +1,7 @@
 {
   "name": "repogent",
-  "version": "0.3.1",
-  "description": "Turn bounded Python changes into independently validated, approval-ready patches.",
+  "version": "0.4.0",
+  "description": "Approval-gated, evidence-backed Python repository changes.",
   "author": {
     "name": "Mert",
     "url": "https://github.com/merttoprak1/repogent"

@@ -104,6 +104,12 @@ def test_report_renders_common_envelope_before_verified_change_details() -> None
         evidence_path="/bounded/evidence/run-1",
     )
 
+    lead = report.split("##", 1)[0]
+    assert lead.index("Status:") < lead.index("Verification:")
+    assert lead.index("Verification:") < lead.index("Checkout state:")
+    assert lead.index("Checkout state:") < lead.index("Applied paths:")
+    assert "src/app.py" in lead
+    assert "Final validation: passed" in lead
     assert "Kind: `verified_change`" in report
     assert "Checkout changed: yes" in report
     assert "Required checks: pytest" in report

@@ -6,7 +6,29 @@ import pytest
 from openai import OpenAI
 
 from repogent.domain import RequirementsSpec
-from repogent.providers import OpenAIProvider, ProviderError, ScriptedProvider
+from repogent.providers import (
+    DEFAULT_MODELS,
+    KNOWN_PROVIDERS,
+    OpenAIProvider,
+    ProviderError,
+    ScriptedProvider,
+    default_model_for,
+    validate_provider_name,
+)
+
+
+def test_known_providers_are_the_closed_allowlist() -> None:
+    assert frozenset({"openai", "codex-cli", "scripted"}) == KNOWN_PROVIDERS
+    assert "grok-cli" not in KNOWN_PROVIDERS
+    assert validate_provider_name("codex-cli") == "codex-cli"
+    assert default_model_for("codex-cli") == "default"
+    assert default_model_for("openai") == DEFAULT_MODELS["openai"] == "gpt-5.6-sol"
+    assert default_model_for("scripted") == "scripted"
+
+
+def test_validate_provider_name_rejects_unknown() -> None:
+    with pytest.raises(ValueError, match="provider must be openai, codex-cli, or scripted"):
+        validate_provider_name("grok-cli")
 
 
 def test_scripted_provider_validates_against_requested_schema() -> None:

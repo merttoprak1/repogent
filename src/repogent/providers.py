@@ -30,6 +30,25 @@ class ProviderError(RuntimeError):
         self.evidence = evidence
 
 
+KNOWN_PROVIDERS = frozenset({"openai", "codex-cli", "scripted"})
+DEFAULT_MODELS = {
+    "openai": "gpt-5.6-sol",
+    "codex-cli": "default",
+    "scripted": "scripted",
+}
+_PROVIDER_CHOICE = "openai, codex-cli, or scripted"
+
+
+def validate_provider_name(provider: str) -> str:
+    if provider not in KNOWN_PROVIDERS:
+        raise ValueError(f"provider must be {_PROVIDER_CHOICE}")
+    return provider
+
+
+def default_model_for(provider: str) -> str:
+    return DEFAULT_MODELS[validate_provider_name(provider)]
+
+
 @dataclass(frozen=True)
 class ModelPricing:
     input_per_million: Decimal = Decimal("5.00")

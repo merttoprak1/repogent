@@ -4,12 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "repogent"
-version = "0.3.1"
-description = "From issue to verified patch."
+version = "0.4.0"
+description = "Approval-gated, evidence-backed Python repository changes."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["codex", "mcp", "verification", "patches", "python"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
   "mcp>=1.27,<2",
   "openai>=2.37,<3",
@@ -17,6 +30,13 @@ dependencies = [
   "typer>=0.16,<1",
   "unidiff>=0.7.5,<1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/merttoprak1/repogent"
+Documentation = "https://github.com/merttoprak1/repogent#readme"
+Repository = "https://github.com/merttoprak1/repogent"
+Issues = "https://github.com/merttoprak1/repogent/issues"
+Changelog = "https://github.com/merttoprak1/repogent/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

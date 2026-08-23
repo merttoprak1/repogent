@@ -22,6 +22,7 @@ from repogent.domain import (
     WorkflowOutcome,
     compute_trust_label,
 )
+from repogent.providers import validate_provider_name
 from repogent.repository_scope import ScopeSource
 from repogent.run_reports import PersistentRunReport
 
@@ -163,14 +164,12 @@ class DoctorRequest(VersionedModel):
     repository: Path
     provider: str = "codex-cli"
     model: str | None = Field(default=None, max_length=256)
-    executor: str = "docker"
+    executor: str = "deferred"
 
     @field_validator("provider")
     @classmethod
     def validate_provider(cls, provider: str) -> str:
-        if provider not in {"openai", "codex-cli", "scripted"}:
-            raise ValueError("provider must be openai, codex-cli, or scripted")
-        return provider
+        return validate_provider_name(provider)
 
     @field_validator("executor")
     @classmethod

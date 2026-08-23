@@ -11,6 +11,7 @@ from click.testing import Result
 from openai import OpenAIError
 from typer.testing import CliRunner
 
+import repogent
 from repogent import cli, run_builder
 from repogent.cli import app
 from repogent.domain import EventKind, ProviderReadiness, RunEvent, RunStage, RunStatus
@@ -241,6 +242,17 @@ def test_doctor_reports_ready_json_for_scripted_deferred_repository(tmp_path: Pa
     assert payload["provider"] == "scripted"
     assert payload["executor"] == "deferred"
     assert any(check["name"] == "repository" and check["passed"] for check in payload["checks"])
+
+
+def test_doctor_human_output_includes_next_action(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    result = runner.invoke(app, ["doctor", str(repository), "--provider", "scripted"])
+
+    assert result.exit_code == 0
+    assert "next:" in result.output.lower()
+    assert "choose Docker or local" in result.output
 
 
 def test_doctor_defaults_to_codex_cli_and_deferred_executor(tmp_path: Path) -> None:
@@ -1133,6 +1145,41 @@ def test_mcp_without_stdio_exits_two() -> None:
 
     assert result.exit_code == 2
     assert "only --stdio is supported" in rendered_output(result)
+
+
+def test_version_option_prints_package_version() -> None:
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert f"repogent {repogent.__version__}" in rendered_output(result)
+
+
+def test_report_prints_markdown(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-abc"
+    run_dir.mkdir()
+    (run_dir / "report.md").write_text("# Repogent run run-abc\nStatus: **completed**\n")
+    result = runner.invoke(app, ["report", str(run_dir)])
+    assert result.exit_code == 0
+    assert "Status: **completed**" in result.output
+
+
+def test_report_refuses_symlink(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-abc"
+    run_dir.mkdir()
+    target = tmp_path / "outside.md"
+    target.write_text("secret\n")
+    (run_dir / "report.md").symlink_to(target)
+    result = runner.invoke(app, ["report", str(run_dir)])
+    assert result.exit_code == 2
+    assert "regular file" in rendered_output(result).lower()
+    assert "secret" not in result.output
+
+
+def test_report_missing_file_exits_two(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-abc"
+    run_dir.mkdir()
+    result = runner.invoke(app, ["report", str(run_dir)])
+    assert result.exit_code == 2
+    assert "unavailable" in rendered_output(result).lower()
 
 
 def test_cli_import_does_not_eagerly_load_mcp(

@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 from pydantic import ValidationError
 
+from repogent import __version__
 from repogent.approvals import CliApprover
 from repogent.artifacts import ArtifactStoreError
 from repogent.doctor import DoctorService
@@ -15,6 +16,7 @@ from repogent.events import CompositeEventSink, ConsoleEventSink, EventSink
 from repogent.localization import PythonLocalizer
 from repogent.mcp_models import DoctorReport, DoctorRequest
 from repogent.preflight import PreflightReport
+from repogent.providers import KNOWN_PROVIDERS
 from repogent.repository import RepositoryInspector
 from repogent.run_builder import (
     RunBuildError,
@@ -24,9 +26,45 @@ from repogent.run_builder import (
     terminalize_failure,
     validate_run_options,
 )
+from repogent.run_reports import ReportReadError, read_report_markdown
 from repogent.symbols import PythonSymbolGraphBuilder
 
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"repogent {__version__}")
+        raise typer.Exit()
+
+
 app = typer.Typer(no_args_is_help=True)
+
+
+@app.callback()
+def _cli(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show the Repogent version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Approval-gated, evidence-backed Python repository changes."""
+
+
+@app.command("report")
+def report_command(
+    run_directory: Annotated[Path, typer.Argument(exists=True, file_okay=False, resolve_path=True)],
+) -> None:
+    """Print the markdown report from a run evidence directory."""
+    try:
+        typer.echo(read_report_markdown(run_directory), nl=False)
+    except ReportReadError as error:
+        typer.echo(str(error))
+        raise typer.Exit(2) from error
 
 
 @app.command("mcp")
@@ -124,7 +162,7 @@ def run_command(
     try:
         validate_run_options(options)
     except ValueError as error:
-        if provider not in {"openai", "codex-cli", "scripted"}:
+        if provider not in KNOWN_PROVIDERS:
             raise typer.BadParameter(str(error), param_hint="--provider") from error
         if executor not in {"docker", "local"}:
             raise typer.BadParameter(str(error), param_hint="--executor") from error
@@ -213,7 +251,20 @@ def _render_doctor_report(report: DoctorReport) -> str:
             lines.append(f"  {option.mode.value}: {availability} ({option.isolation_level.value})")
             if option.remediation:
                 lines.append(f"         {option.remediation}")
+    lines.extend(["", f"next: {_doctor_next_action(report)}"])
     return "\n".join(lines)
+
+
+def _doctor_next_action(report: DoctorReport) -> str:
+    failed = [check for check in report.checks if check.required and not check.passed]
+    if failed:
+        return failed[0].remediation or "Inspect the failed checks above."
+    if report.executor == "deferred":
+        return (
+            "Install the Codex plugin and start a verified change; "
+            "choose Docker or local when selecting an executor."
+        )
+    return "Start a verified change with the selected executor."
 
 
 def _echo_preflight_failures(run_directory: Path) -> None:

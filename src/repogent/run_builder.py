@@ -41,7 +41,14 @@ from repogent.preflight import (
     configuration_fingerprint,
     repository_preflight,
 )
-from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
+from repogent.providers import (
+    ModelProvider,
+    OpenAIProvider,
+    ProviderError,
+    ScriptedProvider,
+    default_model_for,
+    validate_provider_name,
+)
 from repogent.reporting import render_persistent_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
 from repogent.repository_scope import RepositoryScope, RepositoryScopeResolver
@@ -94,8 +101,7 @@ class _RunConstructionError(RunBuildError):
 
 
 def validate_run_options(options: RunOptions) -> None:
-    if options.provider not in {"openai", "codex-cli", "scripted"}:
-        raise ValueError("provider must be openai, codex-cli, or scripted")
+    validate_provider_name(options.provider)
     if options.provider == "scripted" and options.script is None:
         raise ValueError("--script is required for scripted provider")
     if options.provider != "scripted" and options.script is not None:
@@ -132,14 +138,7 @@ def build_run(
 
     try:
         scope = RepositoryScopeResolver().resolve(repository)
-        effective_model = (
-            options.model
-            or {
-                "openai": "gpt-5.6-sol",
-                "codex-cli": "default",
-                "scripted": "scripted",
-            }[options.provider]
-        )
+        effective_model = options.model or default_model_for(options.provider)
         policy = ValidationPolicy(scope=scope)
         commands = policy.commands(repository)
         manifest = manifest.model_copy(
