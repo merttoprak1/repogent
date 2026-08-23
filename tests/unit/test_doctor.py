@@ -365,6 +365,41 @@ def test_doctor_reports_openai_ready_when_credentials_present(
     assert check.passed is True
 
 
+def test_doctor_reports_grok_missing_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-must-not-satisfy-grok")
+
+    report = DoctorService().run(
+        DoctorRequest(repository=tmp_path, provider="grok", executor="local")
+    )
+
+    check = report.checks[-1]
+    assert check.name == "provider"
+    assert check.passed is False
+    assert report.ready is False
+    assert "XAI_API_KEY" in (check.remediation or "")
+    assert "OPENAI_API_KEY" not in (check.remediation or "")
+
+
+def test_doctor_reports_grok_ready_when_credentials_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor, "LocalExecutor", lambda **_kwargs: ReadyExecutor())
+    monkeypatch.setenv("XAI_API_KEY", "test-key-not-used-for-any-request")
+
+    report = DoctorService().run(
+        DoctorRequest(repository=tmp_path, provider="grok", executor="local")
+    )
+
+    check = report.checks[-1]
+    assert check.name == "provider"
+    assert check.passed is True
+    assert "Grok" in check.message or "xAI" in check.message
+
+
 def test_doctor_reports_untrusted_repository_remediation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

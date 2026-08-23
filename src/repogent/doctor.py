@@ -20,7 +20,7 @@ from repogent.preflight import (
     ReadinessStatus,
     repository_preflight,
 )
-from repogent.providers import OpenAIProvider
+from repogent.providers import GrokProvider, OpenAIProvider
 from repogent.repository import RepositoryInspector
 from repogent.repository_scope import RepositoryScopeResolver
 
@@ -39,6 +39,10 @@ _CODEX_TRUST_REMEDIATION = (
 )
 _OPENAI_CREDENTIAL_REMEDIATION = (
     "Set OPENAI_API_KEY for the Repogent process, or use the default codex-cli "
+    "provider to authenticate with your existing Codex sign-in instead"
+)
+_GROK_CREDENTIAL_REMEDIATION = (
+    "Set XAI_API_KEY for the Repogent process, or use the default codex-cli "
     "provider to authenticate with your existing Codex sign-in instead"
 )
 
@@ -160,6 +164,8 @@ class DoctorService:
             return CodexCliProvider(model=request.model, target_root=repository).check_ready()
         if request.provider == "openai":
             return OpenAIProvider.check_ready(model=request.model)
+        if request.provider == "grok":
+            return GrokProvider.check_ready(model=request.model)
         return None
 
     @staticmethod
@@ -232,6 +238,8 @@ class DoctorService:
     ) -> DoctorCheck:
         if provider == "openai":
             return DoctorService._openai_provider_check(ready)
+        if provider == "grok":
+            return DoctorService._grok_provider_check(ready)
         if ready:
             return DoctorCheck(
                 name="provider", passed=True, required=True, message="Codex CLI is ready"
@@ -270,6 +278,23 @@ class DoctorService:
             required=True,
             message="OpenAI API credentials are missing",
             remediation=_OPENAI_CREDENTIAL_REMEDIATION,
+        )
+
+    @staticmethod
+    def _grok_provider_check(ready: bool) -> DoctorCheck:
+        if ready:
+            return DoctorCheck(
+                name="provider",
+                passed=True,
+                required=True,
+                message="Grok API credentials are configured",
+            )
+        return DoctorCheck(
+            name="provider",
+            passed=False,
+            required=True,
+            message="Grok API credentials are missing",
+            remediation=_GROK_CREDENTIAL_REMEDIATION,
         )
 
     @staticmethod
