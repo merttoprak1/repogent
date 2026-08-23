@@ -9,6 +9,8 @@ from repogent.domain import RequirementsSpec
 from repogent.providers import (
     DEFAULT_MODELS,
     KNOWN_PROVIDERS,
+    GrokProvider,
+    ModelPricing,
     OpenAIProvider,
     ProviderError,
     ScriptedProvider,
@@ -31,6 +33,159 @@ def test_known_providers_are_the_closed_allowlist() -> None:
 def test_validate_provider_name_rejects_unknown() -> None:
     with pytest.raises(ValueError, match="provider must be openai, grok, codex-cli, or scripted"):
         validate_provider_name("grok-cli")
+
+
+def test_grok_ready_requires_xai_key_not_openai_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-must-not-count")
+    readiness = GrokProvider.check_ready()
+    assert readiness.ready is False
+    assert readiness.provider == "grok"
+    assert readiness.model == "grok-4.6"
+    assert "XAI_API_KEY" in (readiness.reason or "")
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    ready = GrokProvider.check_ready(model="grok-4.6")
+    assert ready.ready is True
+    assert ready.provider == "grok"
+
+
+def test_grok_provider_builds_xai_openai_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_openai(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr("repogent.providers.OpenAI", fake_openai)
+    GrokProvider(model="grok-4.6")
+    assert captured["api_key"] == "xai-test-key"
+    assert captured["base_url"] == "https://api.x.ai/v1"
+
+
+def test_grok_provider_uses_chat_parse_and_records_usage() -> None:
+    parsed = RequirementsSpec(
+        objective="Add route", functional_requirements=[], acceptance_criteria=[]
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))],
+        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=7),
+        _request_id="req-grok",
+    )
+    calls: list[dict[str, object]] = []
+
+    def parse(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return response
+
+    chat = SimpleNamespace(completions=SimpleNamespace(parse=parse))
+    client = SimpleNamespace(chat=chat)
+    provider = GrokProvider(
+        client=cast(OpenAI, client),
+        model="grok-4.6",
+        pricing=ModelPricing(),
+    )
+    result = provider.generate(
+        system_prompt="system",
+        payload={"request": "add route"},
+        output_type=RequirementsSpec,
+    )
+    assert result.output == parsed
+    assert result.usage.input_tokens == 12
+    assert result.usage.output_tokens == 7
+    assert result.usage.request_id == "req-grok"
+    assert "model" in calls[0]
+    assert calls[0]["model"] == "grok-4.6"
+    assert "messages" in calls[0]
+
+
+def test_grok_provider_redacts_secrets_in_chat_messages() -> None:
+    parsed = RequirementsSpec(
+        objective="Add route", functional_requirements=[], acceptance_criteria=[]
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))],
+        usage=None,
+        _request_id="req-redacted",
+    )
+    calls: list[dict[str, object]] = []
+
+    def parse(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return response
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+    provider = GrokProvider(
+        client=cast(OpenAI, client),
+        secrets=["explicit-configured-secret"],
+    )
+    provider.generate(
+        system_prompt="system",
+        payload={
+            "request": "keep this source visible",
+            "credentials": {
+                "xai": "xai-explicit-secret-value",
+                "nested": ["explicit-configured-secret"],
+            },
+        },
+        output_type=RequirementsSpec,
+    )
+    serialized = str(calls[0]["messages"])
+    assert "keep this source visible" in serialized
+    assert "explicit-configured-secret" not in serialized
+
+
+def test_grok_provider_rejects_missing_parsed_output() -> None:
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(parsed=None))],
+        usage=None,
+        _request_id="req-1",
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(parse=lambda **kwargs: response))
+    )
+    provider = GrokProvider(client=cast(OpenAI, client))
+    with pytest.raises(ProviderError, match="no parsed output"):
+        provider.generate(system_prompt="system", payload={}, output_type=RequirementsSpec)
+
+
+def test_grok_provider_caps_request_with_remaining_timeout() -> None:
+    parsed = RequirementsSpec(
+        objective="Add route", functional_requirements=[], acceptance_criteria=[]
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))],
+        usage=None,
+        _request_id="req-timeout",
+    )
+    calls: list[dict[str, object]] = []
+    options: list[dict[str, object]] = []
+
+    def parse(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return response
+
+    class Client:
+        chat = SimpleNamespace(completions=SimpleNamespace(parse=parse))
+
+        def with_options(self, **kwargs: object) -> "Client":
+            options.append(kwargs)
+            return self
+
+    provider = GrokProvider(client=cast(OpenAI, Client()))
+    provider.generate(
+        system_prompt="system",
+        payload={},
+        output_type=RequirementsSpec,
+        timeout_seconds=2.5,
+    )
+    assert options == [{"timeout": 2.5, "max_retries": 0}]
+    assert "timeout" not in calls[0]
 
 
 def test_scripted_provider_validates_against_requested_schema() -> None:
