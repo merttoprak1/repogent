@@ -42,6 +42,7 @@ from repogent.preflight import (
     repository_preflight,
 )
 from repogent.providers import (
+    GrokProvider,
     ModelProvider,
     OpenAIProvider,
     ProviderError,
@@ -208,8 +209,19 @@ def build_run(
                     reason += "; run `codex login` to authenticate"
                 raise ProviderError(reason, retryable=False)
             model_provider = cast(ModelProvider, codex_provider)
-        else:
+        elif options.provider == "grok":
+            readiness = GrokProvider.check_ready(model=effective_model)
+            store.write_model("provider-readiness", readiness)
+            if not readiness.ready:
+                raise ProviderError(
+                    readiness.reason or "Grok provider is not ready",
+                    retryable=False,
+                )
+            model_provider = GrokProvider(model=effective_model)
+        elif options.provider == "openai":
             model_provider = OpenAIProvider(model=effective_model)
+        else:
+            raise ProviderError(f"unsupported provider: {options.provider}", retryable=False)
     except (KeyboardInterrupt, SystemExit) as error:
         terminal = terminalize_failure(
             store,
@@ -225,6 +237,7 @@ def build_run(
             "scripted": "scripted provider",
             "codex-cli": "Codex CLI provider",
             "openai": "OpenAI provider",
+            "grok": "Grok provider",
         }[options.provider]
         reason = f"could not load {label}: {error}"
         terminal = terminalize_failure(store, manifest, reason)

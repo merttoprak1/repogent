@@ -219,6 +219,118 @@ def test_build_run_keeps_preflight_before_provider(
     assert prepared.workflow.root == target.resolve()
 
 
+def test_build_run_constructs_grok_provider_not_openai(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+    constructed: dict[str, object] = {}
+
+    def fail_openai(**_kwargs: object) -> object:
+        raise AssertionError("OpenAIProvider must not be constructed for grok")
+
+    class ReadyGrok:
+        def __init__(self, **kwargs: object) -> None:
+            constructed.update(kwargs)
+
+        @classmethod
+        def check_ready(cls, *, model: str | None = None) -> ProviderReadiness:
+            return ProviderReadiness(
+                provider="grok", model=model or "grok-4.6", ready=True
+            )
+
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def prepare(
+            self, _repository: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
+    monkeypatch.setattr(run_builder, "OpenAIProvider", fail_openai)
+    monkeypatch.setattr(run_builder, "GrokProvider", ReadyGrok)
+
+    prepared = build_run(
+        RunOptions(
+            repository=target,
+            request="change",
+            provider="grok",
+            executor="local",
+            output_dir=tmp_path / "runs",
+        ),
+        lambda _run_id: FakeApprover([Decision.REJECTED]),
+    )
+
+    assert constructed.get("model") == "grok-4.6"
+    assert prepared.provider_readiness is not None
+    assert prepared.provider_readiness.provider == "grok"
+    assert prepared.provider_readiness.ready is True
+
+
+def test_build_run_terminalizes_when_grok_is_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repogent import run_builder
+
+    target = tmp_path / "target"
+    target.mkdir()
+
+    class NotReadyGrok:
+        def __init__(self, **_kwargs: object) -> None:
+            raise AssertionError("GrokProvider must not be constructed when not ready")
+
+        @classmethod
+        def check_ready(cls, *, model: str | None = None) -> ProviderReadiness:
+            return ProviderReadiness(
+                provider="grok",
+                model=model or "grok-4.6",
+                ready=False,
+                reason="XAI_API_KEY is not set",
+            )
+
+    class Registry:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def prepare(
+            self, _repository: Path, mode: ExecutionMode, _policy: object
+        ) -> PreparedExecutor:
+            return PreparedExecutor(
+                mode=mode,
+                isolation_level=IsolationLevel.REDUCED_ISOLATION,
+                preflight=_passing_preflight(),
+                validator=object(),  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(run_builder, "ExecutorRegistry", Registry)
+    monkeypatch.setattr(run_builder, "GrokProvider", NotReadyGrok)
+
+    with pytest.raises(RunBuildError, match="Grok") as caught:
+        build_run(
+            RunOptions(
+                repository=target,
+                request="change",
+                provider="grok",
+                executor="local",
+                output_dir=tmp_path / "runs",
+            ),
+            lambda _run_id: FakeApprover([Decision.REJECTED]),
+        )
+
+    assert "XAI_API_KEY" in str(caught.value)
+    assert caught.value.manifest is not None
+    assert caught.value.manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+
+
 def test_build_run_prepares_selected_executor_with_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
