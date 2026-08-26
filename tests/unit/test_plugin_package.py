@@ -5,6 +5,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+import repogent
 from repogent.mcp_server import create_server
 
 PLUGIN_ROOT = Path("plugins/repogent")
@@ -92,8 +93,10 @@ def test_plugin_manifest_and_mcp_command() -> None:
     project = tomllib.loads(Path("pyproject.toml").read_text())
 
     assert manifest["name"] == "repogent"
-    assert project["project"]["version"] == "0.3.1"
+    assert project["project"]["version"] == "0.4.0"
     assert manifest["version"] == project["project"]["version"]
+    assert repogent.__version__ == project["project"]["version"]
+    assert manifest["description"] == project["project"]["description"]
     assert manifest["skills"] == "./skills/"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["interface"]["category"] == "Developer Tools"
@@ -275,12 +278,14 @@ def test_readme_installs_bare_runtime_command_before_plugin_marketplace() -> Non
     readme = Path("README.md").read_text()
     project = tomllib.loads(Path("pyproject.toml").read_text())
     mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text())
-    runtime_install = "pipx install 'git+https://github.com/merttoprak1/repogent.git'"
+    runtime_install = "pipx install repogent"
+    git_install = "pipx install 'git+https://github.com/merttoprak1/repogent.git'"
     marketplace_install = "codex plugin marketplace add merttoprak1/repogent"
 
     assert project["project"]["scripts"]["repogent"] == "repogent.cli:app"
     assert mcp["mcpServers"]["repogent"]["command"] == "repogent"
     assert runtime_install in readme
+    assert git_install in readme
     assert "pipx ensurepath" in readme
     assert "command -v repogent" in readme
     assert "Codex Desktop" in readme

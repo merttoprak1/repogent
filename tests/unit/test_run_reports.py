@@ -92,6 +92,12 @@ def test_verified_change_report_states_checkout_fact_and_trust() -> None:
             ErrorCode.PROVIDER_UNAVAILABLE,
         ),
         (
+            "Grok request failed: 401",
+            CheckoutState.NOT_APPLIED,
+            FinalValidationStatus.NOT_STARTED,
+            ErrorCode.PROVIDER_UNAVAILABLE,
+        ),
+        (
             "required checks failed",
             CheckoutState.NOT_APPLIED,
             FinalValidationStatus.FAILED,

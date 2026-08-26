@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -21,6 +24,39 @@ from repogent.domain import (
 )
 from repogent.errors import ErrorCode, ErrorDetail, RetryClass
 from repogent.sanitization import redact_text
+
+REPORT_MARKDOWN_MAX_CHARS = 64_000
+
+
+class ReportReadError(RuntimeError):
+    pass
+
+
+def read_report_markdown(run_directory: Path) -> str:
+    report_path = run_directory / "report.md"
+    try:
+        metadata = os.lstat(report_path)
+    except OSError as error:
+        raise ReportReadError(f"run report is unavailable: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ReportReadError("run report must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(report_path, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ReportReadError("run report must be a regular file")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return handle.read(REPORT_MARKDOWN_MAX_CHARS)
+    except ReportReadError:
+        raise
+    except (OSError, UnicodeError) as error:
+        raise ReportReadError(f"run report is unavailable: {error}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 class CheckSummary(VersionedModel):
@@ -163,7 +199,7 @@ def _derived_terminal_error(
             remediation="Review the run budget or timeout before retrying.",
             retry=RetryClass.NON_RETRYABLE,
         )
-    if any(provider in reason for provider in ("provider", "openai", "codex", "scripted")):
+    if any(provider in reason for provider in ("provider", "openai", "grok", "codex", "scripted")):
         return provider_failure_error(manifest, retryable=True)
     if any(
         policy in reason

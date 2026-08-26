@@ -74,33 +74,59 @@ def render_persistent_report(
     passed_checks = ", ".join(report.checks.passed) or "none"
     failed_checks = ", ".join(report.checks.failed) or "none"
     skipped_checks = ", ".join(report.checks.skipped) or "none"
+    applied_paths = ", ".join(report.result.applied_paths) or "none"
     lines = [
         f"# Repogent run {report.run_id}",
         "",
-        f"Kind: `{report.kind.value}`",
         f"Status: **{report.status.value}**",
-        f"Outcome: {report.outcome.value if report.outcome else 'none'}",
-        f"Stage: `{manifest.stage.value}`",
-        f"Request: {_markdown_text(manifest.request)}",
-        f"Repair attempts: {manifest.repair_attempts}",
-        f"Reason: {_markdown_text(manifest.reason or 'none')}",
         f"Verification: {report.trust_label.value}",
-        f"Execution mode: {manifest.execution_mode.value if manifest.execution_mode else 'none'}",
-        "Evaluated target: "
-        + (
-            f"{report.evaluated_target.kind.value}:{report.evaluated_target.digest}"
-            if report.evaluated_target is not None
-            else "none"
-        ),
-        f"Checkout changed: {'yes' if report.checkout_changed else 'no'}",
         f"Checkout state: {report.checkout_state.value}",
-        f"Required checks: {_markdown_text(required_checks)}",
-        f"Passed checks: {_markdown_text(passed_checks)}",
-        f"Failed checks: {_markdown_text(failed_checks)}",
-        f"Skipped checks: {_markdown_text(skipped_checks)}",
-        f"Evidence: {_markdown_text(report.evidence_path)}",
-        "",
+        f"Applied paths: {_markdown_text(applied_paths)}",
+        f"Final validation: {report.result.final_validation_status.value}",
     ]
+    if report.checkout_state is CheckoutState.RECOVERY_UNKNOWN:
+        lines.append(
+            "Next action: "
+            + _markdown_text(
+                manifest.recovery_guidance
+                or "Inspect the affected paths and manually restore them before continuing."
+            )
+        )
+    elif report.checkout_state is CheckoutState.APPLIED or manifest.selected_patch_applied:
+        lines.append(
+            "Next action: "
+            + _markdown_text(
+                manifest.recovery_guidance
+                or "Review the applied diff, run required validation, and revert the "
+                "approved patch manually if it should not remain."
+            )
+        )
+    lines.extend(
+        [
+            f"Evidence: {_markdown_text(report.evidence_path)}",
+            "",
+            f"Kind: `{report.kind.value}`",
+            f"Outcome: {report.outcome.value if report.outcome else 'none'}",
+            f"Stage: `{manifest.stage.value}`",
+            f"Request: {_markdown_text(manifest.request)}",
+            f"Repair attempts: {manifest.repair_attempts}",
+            f"Reason: {_markdown_text(manifest.reason or 'none')}",
+            "Execution mode: "
+            + (manifest.execution_mode.value if manifest.execution_mode else "none"),
+            "Evaluated target: "
+            + (
+                f"{report.evaluated_target.kind.value}:{report.evaluated_target.digest}"
+                if report.evaluated_target is not None
+                else "none"
+            ),
+            f"Checkout changed: {'yes' if report.checkout_changed else 'no'}",
+            f"Required checks: {_markdown_text(required_checks)}",
+            f"Passed checks: {_markdown_text(passed_checks)}",
+            f"Failed checks: {_markdown_text(failed_checks)}",
+            f"Skipped checks: {_markdown_text(skipped_checks)}",
+            "",
+        ]
+    )
     if manifest.generated_but_not_consumed:
         lines.extend(
             [

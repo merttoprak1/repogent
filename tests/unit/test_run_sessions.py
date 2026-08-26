@@ -1785,6 +1785,10 @@ def test_shutdown_deadline_includes_operation_lock_cancellation_phase(
         release_lock.set()
         holder.join(timeout=5)
         stopper.join(timeout=5)
+        # The 50ms shutdown budget is only for the lock-held timeout assertion.
+        # After the lock is released, wait for the worker to observe cancellation
+        # before the cleanup shutdown; 3.13 CI otherwise flakes here.
+        session.join(5)
         manager.shutdown()
         assert not holder.is_alive()
         assert not stopper.is_alive()

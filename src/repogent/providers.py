@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -28,6 +29,28 @@ class ProviderError(RuntimeError):
         super().__init__(message)
         self.retryable = retryable
         self.evidence = evidence
+
+
+KNOWN_PROVIDERS = frozenset({"openai", "grok", "codex-cli", "scripted"})
+DEFAULT_MODELS = {
+    "openai": "gpt-5.6-sol",
+    "grok": "grok-4.6",
+    "codex-cli": "default",
+    "scripted": "scripted",
+}
+_PROVIDER_CHOICE = "openai, grok, codex-cli, or scripted"
+GROK_BASE_URL = "https://api.x.ai/v1"
+GROK_API_KEY_ENV = "XAI_API_KEY"
+
+
+def validate_provider_name(provider: str) -> str:
+    if provider not in KNOWN_PROVIDERS:
+        raise ValueError(f"provider must be {_PROVIDER_CHOICE}")
+    return provider
+
+
+def default_model_for(provider: str) -> str:
+    return DEFAULT_MODELS[validate_provider_name(provider)]
 
 
 @dataclass(frozen=True)
@@ -176,6 +199,90 @@ class OpenAIProvider:
                 output_tokens=output_tokens,
                 estimated_cost_usd=estimated_cost,
                 request_id=response._request_id,
+                latency_seconds=time.monotonic() - started,
+            ),
+        )
+
+
+class GrokProvider:
+    def __init__(
+        self,
+        *,
+        client: OpenAI | None = None,
+        model: str = "grok-4.6",
+        pricing: ModelPricing | None = None,
+        secrets: Sequence[str] = (),
+    ) -> None:
+        if client is None:
+            api_key = os.environ.get(GROK_API_KEY_ENV)
+            if not api_key:
+                raise ProviderError(f"{GROK_API_KEY_ENV} is not set", retryable=False)
+            client = OpenAI(api_key=api_key, base_url=GROK_BASE_URL)
+        self.client = client
+        self.model = model
+        self.pricing = pricing or ModelPricing()
+        self.secrets = tuple(secrets)
+
+    @classmethod
+    def check_ready(cls, *, model: str | None = None) -> ProviderReadiness:
+        resolved_model = model or DEFAULT_MODELS["grok"]
+        if not os.environ.get(GROK_API_KEY_ENV):
+            return ProviderReadiness(
+                provider="grok",
+                model=resolved_model,
+                ready=False,
+                reason=f"{GROK_API_KEY_ENV} is not set",
+            )
+        return ProviderReadiness(provider="grok", model=resolved_model, ready=True)
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        payload: Mapping[str, Any],
+        output_type: type[T],
+        role: str = "unknown",
+        timeout_seconds: float | None = None,
+    ) -> ProviderResult[T]:
+        del role
+        started = time.monotonic()
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ProviderError("provider timeout exhausted")
+        request_client = self.client
+        if timeout_seconds is not None:
+            request_client = self.client.with_options(timeout=timeout_seconds, max_retries=0)
+        try:
+            response = request_client.chat.completions.parse(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": redact_text(system_prompt, self.secrets)},
+                    {
+                        "role": "user",
+                        "content": json.dumps(sanitize_data(payload, self.secrets), sort_keys=True),
+                    },
+                ],
+                response_format=output_type,
+            )
+        except OpenAIError as error:
+            raise ProviderError(f"Grok request failed: {error}") from error
+        output = response.choices[0].message.parsed
+        if output is None:
+            raise ProviderError("Grok response contained no parsed output")
+        usage = response.usage
+        input_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
+        output_tokens = getattr(usage, "completion_tokens", 0) if usage else 0
+        estimated_cost = (
+            Decimal(input_tokens) * self.pricing.input_per_million
+            + Decimal(output_tokens) * self.pricing.output_per_million
+        ) / Decimal(1_000_000)
+        return ProviderResult(
+            output=output,
+            usage=ProviderUsage(
+                model=self.model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_usd=estimated_cost,
+                request_id=getattr(response, "_request_id", None),
                 latency_seconds=time.monotonic() - started,
             ),
         )

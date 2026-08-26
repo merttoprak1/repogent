@@ -66,6 +66,28 @@ def test_policy_accepts_diff_git_header_before_unified_hunks(tmp_path: Path) -> 
     assert [path.as_posix() for path in patch.touched_paths] == ["app.py"]
 
 
+MULTI_FILE_GIT = """--- a/app.py
++++ b/app.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+diff --git a/tests.py b/tests.py
+index 111..222 100644
+--- a/tests.py
++++ b/tests.py
+@@ -1 +1 @@
+-assert value == 1
++assert value == 2
+"""
+
+
+def test_policy_accepts_git_headers_between_unified_files(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("value = 1\n")
+    (tmp_path / "tests.py").write_text("assert value == 1\n")
+    patch = PatchPolicy().validate(tmp_path, PatchProposal(summary="change", diff=MULTI_FILE_GIT))
+    assert [path.as_posix() for path in patch.touched_paths] == ["app.py", "tests.py"]
+
+
 def test_policy_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside"
     outside.mkdir(exist_ok=True)

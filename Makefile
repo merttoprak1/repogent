@@ -22,6 +22,7 @@ security:
 	$(PYTHON) -m bandit -q -r src/repogent
 
 package-check:
+	rm -rf dist
 	$(PYTHON) -m build
 	REPOGENT_PACKAGE_CHECK=1 $(PYTHON) -m pytest $(PACKAGE_TESTS) -q --no-cov
 

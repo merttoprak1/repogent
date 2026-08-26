@@ -59,6 +59,27 @@ Some tests are marked and skipped by default:
 - **Keep commits focused**, with a conventional-commit subject
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).
 
+## Releases
+
+Versions in `pyproject.toml`, `src/repogent/__init__.py`, and
+`plugins/repogent/.codex-plugin/plugin.json` must match. Update `CHANGELOG.md`
+in the same change.
+
+Publishing to PyPI is triggered by a GitHub Release whose tag matches `v*`
+(for example `v0.4.0`). The `Release` workflow builds the wheel and uploads it
+with [trusted publishing](https://docs.pypi.org/trusted-publishers/) — there is
+no PyPI token in the repository.
+
+One-time PyPI setup (repository maintainers):
+
+1. Create the PyPI project `repogent` if it does not exist.
+2. Add a trusted publisher: GitHub org/user `merttoprak1`, repository
+   `repogent`, workflow `release.yml`, environment `pypi`.
+3. Create the GitHub Environment named `pypi`.
+
+Do not publish from pull requests. `make verify` must be green on the commit
+you tag.
+
 ## Reporting security issues
 
 Do not open a public issue. Follow [SECURITY.md](SECURITY.md).

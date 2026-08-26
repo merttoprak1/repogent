@@ -41,14 +41,22 @@ from repogent.preflight import (
     configuration_fingerprint,
     repository_preflight,
 )
-from repogent.providers import ModelProvider, OpenAIProvider, ProviderError, ScriptedProvider
+from repogent.providers import (
+    GrokProvider,
+    ModelProvider,
+    OpenAIProvider,
+    ProviderError,
+    ScriptedProvider,
+    default_model_for,
+    validate_provider_name,
+)
 from repogent.reporting import render_persistent_report
 from repogent.repository import LexicalRetriever, RepositoryInspector
 from repogent.repository_scope import RepositoryScope, RepositoryScopeResolver
 from repogent.run_reports import build_persistent_report
 from repogent.workflow import ExecutorSelector, Workflow
 
-ProviderName = Literal["openai", "codex-cli", "scripted"]
+ProviderName = Literal["openai", "grok", "codex-cli", "scripted"]
 ExecutorName = Literal["docker", "local", "deferred"]
 ExecutorSelectorFactory = Callable[[str, Path, ValidationPolicy], ExecutorSelector]
 
@@ -94,8 +102,7 @@ class _RunConstructionError(RunBuildError):
 
 
 def validate_run_options(options: RunOptions) -> None:
-    if options.provider not in {"openai", "codex-cli", "scripted"}:
-        raise ValueError("provider must be openai, codex-cli, or scripted")
+    validate_provider_name(options.provider)
     if options.provider == "scripted" and options.script is None:
         raise ValueError("--script is required for scripted provider")
     if options.provider != "scripted" and options.script is not None:
@@ -132,14 +139,7 @@ def build_run(
 
     try:
         scope = RepositoryScopeResolver().resolve(repository)
-        effective_model = (
-            options.model
-            or {
-                "openai": "gpt-5.6-sol",
-                "codex-cli": "default",
-                "scripted": "scripted",
-            }[options.provider]
-        )
+        effective_model = options.model or default_model_for(options.provider)
         policy = ValidationPolicy(scope=scope)
         commands = policy.commands(repository)
         manifest = manifest.model_copy(
@@ -209,8 +209,19 @@ def build_run(
                     reason += "; run `codex login` to authenticate"
                 raise ProviderError(reason, retryable=False)
             model_provider = cast(ModelProvider, codex_provider)
-        else:
+        elif options.provider == "grok":
+            readiness = GrokProvider.check_ready(model=effective_model)
+            store.write_model("provider-readiness", readiness)
+            if not readiness.ready:
+                raise ProviderError(
+                    readiness.reason or "Grok provider is not ready",
+                    retryable=False,
+                )
+            model_provider = GrokProvider(model=effective_model)
+        elif options.provider == "openai":
             model_provider = OpenAIProvider(model=effective_model)
+        else:
+            raise ProviderError(f"unsupported provider: {options.provider}", retryable=False)
     except (KeyboardInterrupt, SystemExit) as error:
         terminal = terminalize_failure(
             store,
@@ -226,6 +237,7 @@ def build_run(
             "scripted": "scripted provider",
             "codex-cli": "Codex CLI provider",
             "openai": "OpenAI provider",
+            "grok": "Grok provider",
         }[options.provider]
         reason = f"could not load {label}: {error}"
         terminal = terminalize_failure(store, manifest, reason)
