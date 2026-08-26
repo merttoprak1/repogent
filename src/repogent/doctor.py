@@ -4,7 +4,7 @@ import platform
 from pathlib import Path
 
 from repogent.codex_cli import CodexCliProvider
-from repogent.domain import ProviderReadiness
+from repogent.domain import ExecutionMode, ProviderReadiness
 from repogent.execution import DockerExecutor, LocalExecutor, ValidationPolicy
 from repogent.executor_selection import ExecutorRegistry
 from repogent.mcp_models import (
@@ -306,14 +306,23 @@ class DoctorService:
         scope: RepositoryScopeSummary | None = None,
         executors: list[ExecutorAvailability] | None = None,
     ) -> DoctorReport:
+        ready = all(check.passed or not check.required for check in checks)
+        availability = executors or []
+        degraded_reasons = [
+            "Docker isolation is unavailable"
+            for option in availability
+            if option.mode is ExecutionMode.DOCKER and not option.available
+        ]
         return DoctorReport(
-            ready=all(check.passed or not check.required for check in checks),
+            ready=ready,
             repository=str(repository if repository is not None else request.repository),
             provider=request.provider,
             executor=request.executor,
             scope=scope,
             checks=checks,
-            executors=executors or [],
+            executors=availability,
+            degraded=ready and bool(degraded_reasons),
+            degraded_reasons=degraded_reasons,
         )
 
 

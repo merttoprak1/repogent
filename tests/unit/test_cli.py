@@ -244,6 +244,20 @@ def test_doctor_reports_ready_json_for_scripted_deferred_repository(tmp_path: Pa
     assert any(check["name"] == "repository" and check["passed"] for check in payload["checks"])
 
 
+def test_doctor_human_output_labels_degraded_when_docker_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    monkeypatch.setattr("repogent.execution.shutil.which", lambda _: None)
+
+    result = runner.invoke(app, ["doctor", str(repository), "--provider", "scripted"])
+
+    assert result.exit_code == 0
+    assert "READY (degraded)" in result.output
+    assert "Docker isolation is unavailable" in result.output
+
+
 def test_doctor_human_output_includes_next_action(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -1086,6 +1100,23 @@ def test_run_rejects_filesystem_root_before_creating_artifacts(
     assert result.exit_code == 2
     assert "filesystem root" in result.output
     assert "Traceback" not in result.output
+
+
+def test_demo_replay_completes_without_mutating_bundled_fixture(tmp_path: Path) -> None:
+    fixture = Path("examples/fastapi_demo/app.py")
+    before = fixture.read_text()
+    evidence = tmp_path / "runs"
+
+    result = runner.invoke(app, ["demo", "--output-dir", str(evidence)])
+
+    assert result.exit_code == 0
+    assert "REPLAY" in result.output
+    assert "not a live model call" in result.output.lower()
+    assert "completed" in result.output
+    assert fixture.read_text() == before
+    run_directory = next(evidence.iterdir())
+    assert (run_directory / "report.md").is_file()
+    assert '@app.get("/health")' not in before
 
 
 def test_documented_scripted_demo_completes(tmp_path: Path) -> None:

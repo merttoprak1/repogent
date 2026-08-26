@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 from typing import Annotated
 
@@ -8,8 +9,9 @@ import typer
 from pydantic import ValidationError
 
 from repogent import __version__
-from repogent.approvals import CliApprover
+from repogent.approvals import CliApprover, ReplayApprover
 from repogent.artifacts import ArtifactStoreError
+from repogent.demo import DemoError, bundled_scripted_run, copy_demo_repository
 from repogent.doctor import DoctorService
 from repogent.domain import RunEvent, RunStatus
 from repogent.events import CompositeEventSink, ConsoleEventSink, EventSink
@@ -53,6 +55,69 @@ def _cli(
     ] = False,
 ) -> None:
     """Approval-gated, evidence-backed Python repository changes."""
+
+
+@app.command("demo")
+def demo_command(
+    output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
+) -> None:
+    """Run a labeled scripted replay against a disposable copy of the bundled fixture."""
+    typer.echo("REPLAY: this demo uses checked-in scripted artifacts. It is not a live model call.")
+    typer.echo(
+        "It copies a bundled fixture to a disposable directory and auto-approves "
+        "those recorded artifacts."
+    )
+    try:
+        work = Path(tempfile.mkdtemp(prefix="repogent-demo-"))
+        repository = copy_demo_repository(work / "repository")
+        script = bundled_scripted_run()
+    except DemoError as error:
+        typer.echo(str(error))
+        raise typer.Exit(2) from error
+    evidence = output_dir or work / "runs"
+    options = RunOptions(
+        repository=repository,
+        request="Add a health endpoint",
+        provider="scripted",
+        script=script,
+        executor="local",
+        output_dir=evidence,
+    )
+    cli_events = _DeferredEventSink()
+    try:
+        prepared = build_run(
+            options,
+            lambda _run_id: ReplayApprover(),
+            events=cli_events,
+        )
+    except (ArtifactStoreError, OSError) as error:
+        typer.echo(f"could not create evidence directory: {error}")
+        raise typer.Exit(2) from error
+    except RunBuildError as error:
+        typer.echo(str(error))
+        if error.store is not None:
+            typer.echo(f"Evidence: {error.store.root}")
+        raise typer.Exit(2) from error
+
+    store = prepared.store
+    cli_events.bind(
+        CompositeEventSink((store.event_store(), ConsoleEventSink(typer.echo, store.secrets)))
+    )
+    try:
+        result = prepared.workflow.run()
+    except (KeyboardInterrupt, SystemExit):
+        result = _terminalize_cli_failure(
+            store,
+            prepared.workflow.manifest,
+            "workflow interrupted by user",
+            RunStatus.CANCELLED,
+        )
+    except Exception as error:
+        result = _terminalize_cli_failure(store, prepared.workflow.manifest, str(error))
+    typer.echo(f"Run {result.run_id}: {result.status.value}")
+    typer.echo(f"Evidence: {store.root}")
+    if result.status not in {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FINDINGS}:
+        raise typer.Exit(2)
 
 
 @app.command("report")
@@ -230,8 +295,14 @@ class _DeferredEventSink:
 
 
 def _render_doctor_report(report: DoctorReport) -> str:
+    if report.ready and report.degraded:
+        status = "READY (degraded)"
+    elif report.ready:
+        status = "READY"
+    else:
+        status = "BLOCKED"
     lines = [
-        "READY" if report.ready else "BLOCKED",
+        status,
         "",
         f"repository: {report.repository}",
         f"provider: {report.provider}",
@@ -251,6 +322,9 @@ def _render_doctor_report(report: DoctorReport) -> str:
             lines.append(f"  {option.mode.value}: {availability} ({option.isolation_level.value})")
             if option.remediation:
                 lines.append(f"         {option.remediation}")
+    if report.degraded_reasons:
+        lines.extend(["", "degraded:"])
+        lines.extend(f"  {reason}" for reason in report.degraded_reasons)
     lines.extend(["", f"next: {_doctor_next_action(report)}"])
     return "\n".join(lines)
 

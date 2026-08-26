@@ -31,6 +31,15 @@ class CliApprover:
         )
 
 
+class ReplayApprover:
+    """Approve recorded demo artifacts. Never used for live providers."""
+
+    def decide(self, kind: ApprovalKind, artifact: BaseModel | str) -> ApprovalRecord:
+        del artifact
+        typer.echo(f"replay: auto-approving recorded {kind.value} artifact")
+        return ApprovalRecord(kind=kind, decision=Decision.APPROVED, feedback="replay")
+
+
 class FakeApprover:
     def __init__(self, decisions: list[Decision]) -> None:
         self._decisions = deque(decisions)

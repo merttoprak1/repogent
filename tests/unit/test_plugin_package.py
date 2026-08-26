@@ -86,6 +86,17 @@ def test_release_identity_agrees_across_surfaces() -> None:
     assert "preview" not in identity.select_executor_decision_fields
 
 
+def test_github_action_is_read_only_doctor_without_secrets() -> None:
+    action = Path("action.yml").read_text()
+
+    assert "repogent doctor" in action
+    assert 'default: "scripted"' in action
+    assert "security-events" not in action
+    assert "sarif" not in action.lower()
+    assert "OPENAI_API_KEY" not in action
+    assert "XAI_API_KEY" not in action
+
+
 def test_plugin_manifest_and_mcp_command() -> None:
     root = PLUGIN_ROOT
     manifest = json.loads((root / ".codex-plugin/plugin.json").read_text())
