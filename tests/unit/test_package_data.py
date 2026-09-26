@@ -48,6 +48,8 @@ def test_built_wheel_contains_runtime_and_license_contract() -> None:
 
     assert "repogent/mcp_server.py" in names
     assert "repogent/py.typed" in names
+    assert "repogent/_demo/scripted_run.json" in names
+    assert any(name.startswith("repogent/_demo/fastapi_demo/") for name in names)
     assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
     assert not any(".superpowers" in name for name in names)
 

@@ -56,6 +56,10 @@ repogent = "repogent.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/repogent"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"examples/fastapi_demo" = "repogent/_demo/fastapi_demo"
+"examples/scripted_run.json" = "repogent/_demo/scripted_run.json"
+
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --cov=repogent --cov-report=term-missing --cov-fail-under=85"
 testpaths = ["tests"]

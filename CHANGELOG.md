@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `grok` proposal provider using the xAI API (`XAI_API_KEY`, default model
   `grok-4.6`) on the existing typed-proposal contract.
+- Explicit doctor **degraded** mode when required checks pass but Docker
+  isolation is unavailable (`READY (degraded)`). This is not a silent local
+  fallback.
+- `repogent demo`: labeled scripted replay against a disposable copy of the
+  bundled FastAPI fixture. Not a live model call.
+- Composite GitHub Action for read-only `repogent doctor`. Default provider is
+  `scripted`; no secrets and no SARIF upload.
 
 ## [0.4.0] - 2026-08-23
 

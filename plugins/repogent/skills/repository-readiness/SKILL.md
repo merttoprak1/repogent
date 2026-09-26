@@ -22,13 +22,16 @@ approval, executor selection, patch application, or cancellation.
 1. Resolve exactly one repository root. Ask if the path is ambiguous.
 2. Call `inspect_repository_readiness` with the intended provider and model and
    with `executor="deferred"`.
-3. Report `READY` when all required base checks pass; otherwise report `BLOCKED`.
+3. Report `READY` when all required base checks pass; `READY (degraded)` when
+   it is ready but isolation options are incomplete (for example Docker is
+   unavailable); otherwise `BLOCKED`. Quote `degraded_reasons` when present.
 4. Summarize the Git-bounded scope: selected file count, selected bytes, scope
    source, and skipped files. Explain a scope-limit failure as a bounded-input
    safety failure, not as a claim that every file is source code.
 5. Separate required base checks from optional executor availability. Missing
-   Docker is an unavailable isolation option, not a base-readiness blocker when
-   the executor is deferred.
+   Docker is degraded isolation, not a base-readiness blocker when the executor
+   is deferred. Never treat it as a reason to skip the workflow or to silently
+   choose local execution.
 6. Give the exact remediation supplied by the diagnostic. Describe actions the
    user can take, but do not perform them.
 

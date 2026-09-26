@@ -45,6 +45,8 @@ def test_deferred_doctor_is_ready_without_docker(
     assert docker.available is False
     assert docker.remediation == "Install Docker and ensure docker is on PATH"
     assert all(not hasattr(item, "option_digest") for item in report.executors)
+    assert report.degraded is True
+    assert "Docker isolation is unavailable" in report.degraded_reasons
 
 
 def test_doctor_reports_git_scope_without_counting_ignored_large_tree(

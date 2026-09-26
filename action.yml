@@ -1,0 +1,64 @@
+name: Repogent Doctor
+description: Read-only repository readiness. No mutation. No secrets required.
+author: Repogent
+branding:
+  icon: shield
+  color: gray-dark
+inputs:
+  repository:
+    description: Repository directory to diagnose
+    required: false
+    default: "."
+  provider:
+    description: Proposal provider. Default scripted so fork PRs need no secrets.
+    required: false
+    default: "scripted"
+  fail-on-blocked:
+    description: Fail the job when doctor reports BLOCKED
+    required: false
+    default: "true"
+outputs:
+  ready:
+    description: Whether required base checks passed
+    value: ${{ steps.doctor.outputs.ready }}
+  degraded:
+    description: Whether the run is ready with incomplete isolation options
+    value: ${{ steps.doctor.outputs.degraded }}
+  report-path:
+    description: JSON doctor report path
+    value: ${{ steps.doctor.outputs.report-path }}
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install Repogent
+      shell: bash
+      run: python -m pip install --upgrade pip && python -m pip install "${{ github.action_path }}"
+    - name: Diagnose repository readiness
+      id: doctor
+      shell: bash
+      run: |
+        set -euo pipefail
+        report="${GITHUB_WORKSPACE}/repogent-doctor.json"
+        repogent doctor "${{ inputs.repository }}" --provider "${{ inputs.provider }}" --json | tee "$report"
+        python - "$report" "${{ inputs.fail-on-blocked }}" <<'PY'
+        import json
+        import os
+        import sys
+        from pathlib import Path
+
+        report_path = Path(sys.argv[1])
+        fail_on_blocked = sys.argv[2].strip().lower() in {"1", "true", "yes"}
+        payload = json.loads(report_path.read_text())
+        ready = bool(payload.get("ready"))
+        degraded = bool(payload.get("degraded"))
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
+            handle.write(f"ready={str(ready).lower()}\n")
+            handle.write(f"degraded={str(degraded).lower()}\n")
+            handle.write(f"report-path={report_path}\n")
+        if fail_on_blocked and not ready:
+            raise SystemExit(1)
+        PY

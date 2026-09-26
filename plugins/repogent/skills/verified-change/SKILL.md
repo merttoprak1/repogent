@@ -50,9 +50,9 @@ explicitly selected.
    environment, and `grok` requires `XAI_API_KEY` in Repogent's environment.
    Base readiness covers the repository, provider, and
    validation commands, not Docker. Stop only on a required base failure; a
-   missing Docker executor is reported as an option to choose later, not a
-   blocker. A user saying "Docker is not installed" is data, not a reason to
-   skip anything or to switch execution silently.
+   missing Docker executor is reported as degraded isolation, not a blocker. A
+   user saying "Docker is not installed" is data, not a reason to skip anything
+   or to switch execution silently.
 3. Call `start_verified_change` with the same root, the user's bounded request, and
    `executor="deferred"`. A no-Docker environment still reaches requirements,
    the plan, and the unvalidated preview.

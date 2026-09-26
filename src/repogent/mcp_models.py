@@ -202,3 +202,5 @@ class DoctorReport(VersionedModel):
     scope: RepositoryScopeSummary | None = None
     checks: list[DoctorCheck] = Field(max_length=12)
     executors: list[ExecutorAvailability] = Field(default_factory=list, max_length=2)
+    degraded: bool = False
+    degraded_reasons: list[str] = Field(default_factory=list, max_length=8)

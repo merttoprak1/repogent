@@ -123,7 +123,9 @@ The default provider is `codex-cli` (local Codex login). Use `--provider openai`
 only when `OPENAI_API_KEY` is set for the Repogent process. Use `--provider grok`
 only when `XAI_API_KEY` is set for the Repogent process (not in the target
 repository). The default doctor executor is `deferred`: a missing Docker daemon
-is an unavailable isolation option, not a base-readiness failure.
+is **degraded isolation**, not a base-readiness failure. Human output prints
+`READY (degraded)` and lists the missing isolation option. It is never a silent
+fallback to local execution.
 
 `analyze` prints a bounded inventory, Python symbol graph, and request-ranked
 localization:
@@ -139,24 +141,49 @@ repogent analyze ./tests/fixtures/python_library \
 repogent report ./.repogent/runs/run-<id>
 ```
 
-For a reproducible local demo, copy the bundled project so tracked files stay
-unchanged:
+`demo` is a labeled **replay**. It copies the bundled FastAPI fixture to a
+disposable directory, auto-approves the checked-in scripted artifacts, and runs
+local validation. It is not a live model call and it does not edit the source
+tree:
 
 ```bash
-REPOGENT_DEMO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repogent-demo.XXXXXX")"
-cp -R examples/fastapi_demo/. "$REPOGENT_DEMO_DIR"/
-repogent run --repository "$REPOGENT_DEMO_DIR" \
-  --request "Add a health endpoint" \
-  --provider scripted --script ./examples/scripted_run.json \
-  --executor local --output-dir ./.repogent/runs
+repogent demo
 ```
 
-The clamp-library fixture uses the same path with
-`tests/fixtures/python_library` and `examples/scripted_clamp.json`.
+The explicit local executor keeps the replay usable without Docker; it is
+`REDUCED ISOLATION`, not `ISOLATED VERIFIED`. Live Codex/OpenAI/Grok runs still
+require the three digest-bound approvals.
 
-The demo asks for three approvals: requirements, plan, and exact patch. The
-explicit local executor keeps the demo usable without Docker; it is a weaker
-boundary than container isolation.
+## GitHub Action
+
+The composite Action runs **read-only** `repogent doctor`. It does not mutate
+the checkout, does not upload SARIF, and does not require secrets. The default
+provider is `scripted` so fork pull requests stay fail-closed without API keys.
+
+```yaml
+name: Repogent readiness
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: merttoprak1/repogent@main
+        with:
+          repository: .
+          provider: scripted
+```
+
+A live provider still needs its credential in the Repogent process, not in the
+target repository. Do not pass host secrets into untrusted repository code.
 
 ## Executors and providers
 
@@ -204,7 +231,7 @@ boundaries:
 
 - a Grok CLI proposal provider (distinct from the `grok` xAI API provider);
 - additional read-only and mutation capabilities on the capability kernel;
-- GitHub and headless CI integrations that preserve human authorization;
+- GitHub mutation/PR adapters that preserve digest-bound human authorization;
 - published benchmarks and broader fixture coverage;
 - broader Python project and validator-image support; and
 - optional interfaces for reviewing runs and evidence.
