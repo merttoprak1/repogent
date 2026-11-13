@@ -239,9 +239,12 @@ def _has_pytest_suite(root: Path, scope: RepositoryScope | None = None) -> bool:
                     if depth >= _DISCOVERY_MAX_DEPTH:
                         return True
                     pending.append((Path(entry.path), depth + 1))
-                elif entry.is_file(follow_symlinks=False) and name.endswith(".py"):
-                    if name.startswith("test_") or name.endswith("_test.py"):
-                        return True
+                elif (
+                    entry.is_file(follow_symlinks=False)
+                    and name.endswith(".py")
+                    and (name.startswith("test_") or name.endswith("_test.py"))
+                ):
+                    return True
             except OSError:
                 return True
     return False
