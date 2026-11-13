@@ -1119,6 +1119,22 @@ def test_demo_replay_completes_without_mutating_bundled_fixture(tmp_path: Path) 
     assert '@app.get("/health")' not in before
 
 
+def test_demo_names_missing_dependencies_before_creating_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "repogent.demo.find_spec", lambda module: None if module == "pytest" else True
+    )
+    evidence = tmp_path / "runs"
+
+    result = runner.invoke(app, ["demo", "--output-dir", str(evidence)])
+
+    assert result.exit_code == 2
+    assert "Missing demo dependencies: pytest." in result.output
+    assert "Install repogent[demo]" in result.output
+    assert not evidence.exists()
+
+
 def test_documented_scripted_demo_completes(tmp_path: Path) -> None:
     target = tmp_path / "target"
     shutil.copytree(Path("examples/fastapi_demo"), target)

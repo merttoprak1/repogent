@@ -58,6 +58,32 @@ def test_localizer_marks_diffuse_results_ambiguous(tmp_path: Path) -> None:
     assert "top locations are not concentrated" in report.ambiguity_reason
 
 
+def test_named_function_gets_context_ahead_of_busy_modules(tmp_path: Path) -> None:
+    from repogent.localization import PythonLocalizer
+
+    inventory, graph = build_fixture(
+        tmp_path,
+        {
+            "iterable.py": "# iterable documentation\n" * 600 + "def count(): return 1\n",
+            "z_core.py": ("# " + "x" * 500 + "\n") * 25 + "def exactly_n():\n    return False\n",
+            "tests/test_iterable.py": (
+                "import iterable\nfrom iterable import count\n"
+                "def test_count(): assert count() == iterable.count()\n"
+            ),
+            "only.py": "def only(): return 1\n",
+        },
+    )
+
+    report = PythonLocalizer().localize(
+        inventory, graph, "Change only z_core.exactly_n for iterable counts"
+    )
+
+    assert report.locations[0].symbol_id == "z_core.py:z_core.exactly_n"
+    assert not report.ambiguous
+    assert "def exactly_n():\n    return False" in report.snippets[0].text
+    assert all(len(snippet.text) <= 4_000 for snippet in report.snippets)
+
+
 def test_localizer_resolves_imports_and_calls_in_their_source_scope(tmp_path: Path) -> None:
     from repogent.localization import PythonLocalizer
 

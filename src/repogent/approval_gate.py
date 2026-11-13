@@ -207,6 +207,7 @@ class GateApprover:
         self._pending: PendingApproval | None = None
         self._decision: ApprovalRecord | None = None
         self._closed = False
+        self.operator_wait_seconds = 0.0
 
     @property
     def generation(self) -> int:
@@ -232,9 +233,11 @@ class GateApprover:
             self._pending = pending
             self._decision = None
             self._generation += 1
+            waiting_started = time.monotonic()
             self._condition.notify_all()
             while self._decision is None and not self._closed:
                 self._condition.wait()
+            self.operator_wait_seconds += time.monotonic() - waiting_started
             record = self._decision or ApprovalRecord(
                 kind=kind, decision=Decision.REJECTED, feedback="run session closed"
             )

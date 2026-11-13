@@ -757,7 +757,7 @@ def test_cancel_wins_while_executor_prepare_is_blocked(tmp_path: Path) -> None:
     assert selection_errors[0].detail.retry is RetryClass.RECONCILE_FIRST
 
 
-def test_executor_timeout_terminal_snapshot_clears_pending_choice(
+def test_operator_wait_preserves_pending_executor_choice(
     tmp_path: Path,
 ) -> None:
     manager, _request, snapshot = deferred_manager_waiting_for_executor(
@@ -767,6 +767,35 @@ def test_executor_timeout_terminal_snapshot_clears_pending_choice(
     session = manager._sessions[snapshot.run_id]
     try:
         assert snapshot.pending_execution is not None
+        assert not session._done.wait(timeout=1.1)
+        pending = manager.get(snapshot.run_id)
+        assert pending.status is RunStatus.RUNNING
+        assert pending.pending_execution == snapshot.pending_execution
+        terminal = manager.cancel(snapshot.run_id)
+        assert terminal.status is RunStatus.CANCELLED
+        assert terminal.pending_execution is None
+    finally:
+        manager.shutdown()
+
+
+def test_executor_preparation_timeout_clears_pending_choice(tmp_path: Path) -> None:
+    registry = BlockingSessionRegistry()
+    manager, _request, snapshot = deferred_manager_waiting_for_executor(
+        tmp_path, registry=registry, budget=Budget(timeout_seconds=1)
+    )
+    session = manager._sessions[snapshot.run_id]
+    errors = []
+
+    def select():
+        try:
+            manager.select_executor(execution_decision_for(snapshot))
+        except RepogentError as error:
+            errors.append(error)
+
+    submitter = threading.Thread(target=select)
+    submitter.start()
+    try:
+        assert registry.prepare_entered.wait(timeout=1)
         assert session._done.wait(timeout=2)
 
         terminal = manager.get(snapshot.run_id)
@@ -776,7 +805,10 @@ def test_executor_timeout_terminal_snapshot_clears_pending_choice(
         assert terminal.pending_approval is None
         assert terminal.pending_execution is None
     finally:
+        registry.release_prepare.set()
+        submitter.join(timeout=2)
         manager.shutdown()
+    assert len(errors) == 1
 
 
 def test_cancel_terminalizes_while_availability_inspection_is_blocked(

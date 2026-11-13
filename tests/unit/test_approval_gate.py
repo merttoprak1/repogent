@@ -1,6 +1,7 @@
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
@@ -33,6 +34,20 @@ def test_gate_waits_for_matching_digest() -> None:
             approver.submit(ApprovalKind.REQUIREMENTS, "0" * 64, Decision.APPROVED, None)
         approver.submit(pending.kind, pending.digest, Decision.APPROVED, None)
         assert future.result(timeout=1).decision is Decision.APPROVED
+
+
+def test_gate_accounts_for_overnight_operator_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("repogent.approval_gate.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    approver = GateApprover("run-1")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(approver.decide, ApprovalKind.REQUIREMENTS, requirements())
+        _, pending = approver.wait(after_generation=0, timeout_seconds=1)
+        assert pending is not None
+        clock[0] = 9 * 3600
+        approver.submit(pending.kind, pending.digest, Decision.APPROVED, None)
+        assert future.result(timeout=1).decision is Decision.APPROVED
+    assert approver.operator_wait_seconds == 9 * 3600
 
 
 def test_patch_digest_is_exact_diff_digest() -> None:

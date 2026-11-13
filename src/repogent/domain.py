@@ -229,7 +229,13 @@ class ContextSnippet(VersionedModel):
 class PatchProposal(VersionedModel):
     summary: str = Field(min_length=1)
     diff: str = Field(min_length=1)
-    acceptance_criteria_addressed: list[str] = Field(default_factory=list)
+    acceptance_criteria_addressed: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact strings from requirements.acceptance_criteria addressed by this patch. "
+            "Copy each criterion without rewording."
+        ),
+    )
     assumptions: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     focused_tests: list[str] = Field(default_factory=list)
@@ -260,9 +266,8 @@ class ValidationReport(VersionedModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def passed(self) -> bool:
-        return bool(self.checks) and all(
-            check.status is CheckStatus.PASSED for check in self.checks if check.required
-        )
+        required = [check for check in self.checks if check.required]
+        return bool(required) and all(check.status is CheckStatus.PASSED for check in required)
 
 
 class Finding(VersionedModel):

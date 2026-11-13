@@ -16,8 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fallback.
 - `repogent demo`: labeled scripted replay against a disposable copy of the
   bundled FastAPI fixture. Not a live model call.
+- The `demo` install extra adds the dependencies for the replay.
 - Composite GitHub Action for read-only `repogent doctor`. Default provider is
   `scripted`; no secrets and no SARIF upload.
+
+### Changed
+
+- Verified Change requires a passing pytest test before it can apply a patch.
+- Reports show why Repogent ranked the top locations. They label the model's
+  criteria claims separately from check results.
+- The source selector gives explicit function names priority over general
+  matches. Each snippet has a size limit and retains the definition.
+- Patch proposals copy the acceptance criteria from the requirements. This
+  keeps the model's claims matched to the approved criteria.
+- Human approval waits pause the execution budget. Executor inspection and
+  preparation retain their deadlines.
+- Docker validation runs Ruff without a cache and keeps the mypy cache in
+  temporary storage. This prevents cache writes to the read-only checkout.
 
 ## [0.4.0] - 2026-08-23
 

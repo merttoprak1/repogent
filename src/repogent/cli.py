@@ -11,7 +11,12 @@ from pydantic import ValidationError
 from repogent import __version__
 from repogent.approvals import CliApprover, ReplayApprover
 from repogent.artifacts import ArtifactStoreError
-from repogent.demo import DemoError, bundled_scripted_run, copy_demo_repository
+from repogent.demo import (
+    DemoError,
+    bundled_scripted_run,
+    copy_demo_repository,
+    require_demo_dependencies,
+)
 from repogent.doctor import DoctorService
 from repogent.domain import RunEvent, RunStatus
 from repogent.events import CompositeEventSink, ConsoleEventSink, EventSink
@@ -68,6 +73,7 @@ def demo_command(
         "those recorded artifacts."
     )
     try:
+        require_demo_dependencies()
         work = Path(tempfile.mkdtemp(prefix="repogent-demo-"))
         repository = copy_demo_repository(work / "repository")
         script = bundled_scripted_run()
@@ -96,6 +102,7 @@ def demo_command(
     except RunBuildError as error:
         typer.echo(str(error))
         if error.store is not None:
+            _echo_preflight_failures(error.store.root)
             typer.echo(f"Evidence: {error.store.root}")
         raise typer.Exit(2) from error
 

@@ -5,6 +5,7 @@ import threading
 import time
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -679,25 +680,26 @@ def test_obsolete_prepare_cannot_clear_newer_generation_reservation(
     assert new_errors == []
 
 
-def test_timeout_advances_generation_to_publish_pending_removal(
-    tmp_path: Path,
+def test_operator_wait_does_not_consume_selection_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("repogent.execution_gate.time", SimpleNamespace(monotonic=lambda: clock[0]))
     gate = GateExecutorSelector("run-1", tmp_path, ValidationPolicy(), RecordingRegistry())
-    worker, outcome = start_selection(gate, preview(), timeout_seconds=0.1)
-    generation, pending = gate.wait(after_generation=0, timeout_seconds=1)
-    assert pending is not None
-
-    with pytest.raises(ExecutorSelectionRejected, match="timed out"):
-        outcome.result(timeout=1)
-    removal_generation, removed = gate.wait(
-        after_generation=generation,
-        timeout_seconds=0.2,
-    )
-
-    assert removal_generation > generation
-    assert removed is None
-    worker.join(timeout=1)
-    assert not worker.is_alive()
+    worker, outcome = start_selection(gate, preview(), timeout_seconds=1)
+    pending = pending_choice(gate)
+    try:
+        clock[0] = 9 * 3600
+        with gate._condition:
+            gate._condition.notify_all()
+        with pytest.raises(TimeoutError):
+            outcome.result(timeout=0.01)
+        gate.submit(local_decision(pending, option(pending, ExecutionMode.LOCAL)))
+        result = outcome.result(timeout=1)
+        assert result.mode is ExecutionMode.LOCAL
+        assert result.operator_wait_seconds == 9 * 3600
+    finally:
+        close_and_join(gate, worker)
 
 
 def test_close_cancels_selection_while_availability_inspection_is_blocked(
