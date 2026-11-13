@@ -5,6 +5,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from repogent.domain import Decision, ExecutionMode, ValidationTarget
@@ -113,6 +114,8 @@ class GateExecutorSelector:
         self._rejection: str | None = None
         self._closed = False
         self._active_selections = 0
+        self._human_wait_started: float | None = None
+        self._human_wait_total = 0.0
 
     def select(
         self,
@@ -177,14 +180,21 @@ class GateExecutorSelector:
             self._pending_generation = generation
             self._prepared = None
             self._rejection = None
+            self._human_wait_started = time.monotonic()
+            self._human_wait_total = 0.0
             self._condition.notify_all()
             while self._prepared is None and self._rejection is None and not self._closed:
-                remaining = deadline - time.monotonic()
+                now = (
+                    self._human_wait_started
+                    if self._human_wait_started is not None
+                    else time.monotonic()
+                )
+                remaining = deadline + self._human_wait_total - now
                 if remaining <= 0:
                     self._clear_generation(generation)
                     self._condition.notify_all()
                     raise ExecutorSelectionRejected("executor selection timed out")
-                self._condition.wait(remaining)
+                self._condition.wait(None if self._human_wait_started is not None else remaining)
             if self._closed:
                 self._clear_generation(generation)
                 raise WorkflowCancelled("executor selection gate is closed")
@@ -196,9 +206,10 @@ class GateExecutorSelector:
             if prepared is None:
                 self._clear_generation(generation)
                 raise ExecutorSelectionRejected("executor selection did not complete")
+            operator_wait_seconds = self._human_wait_total
             self._clear_generation(generation)
             self._condition.notify_all()
-            return prepared
+            return replace(prepared, operator_wait_seconds=operator_wait_seconds)
 
     def submit(self, decision: ValidationDecision) -> int:
         with self._condition:
@@ -241,6 +252,10 @@ class GateExecutorSelector:
                 self._condition.notify_all()
                 return generation
             self._preparing_generation = generation
+            if self._human_wait_started is not None:
+                self._human_wait_total += time.monotonic() - self._human_wait_started
+                self._human_wait_started = None
+            self._condition.notify_all()
         try:
             prepared = self._registry.prepare(self._root, decision.mode, self._policy)
         except ExecutorSelectionError as error:
@@ -314,6 +329,8 @@ class GateExecutorSelector:
                 self._preparing_generation = None
             self._prepared = None
             self._rejection = None
+            self._human_wait_started = None
+            self._human_wait_total = 0.0
             self._generation += 1
             self._condition.notify_all()
 
@@ -321,6 +338,7 @@ class GateExecutorSelector:
         with self._condition:
             if self._preparing_generation == generation:
                 self._preparing_generation = None
+                self._human_wait_started = time.monotonic()
                 self._condition.notify_all()
 
     def _inspect_availability(self, deadline: float) -> list[ExecutorAvailability]:

@@ -178,13 +178,13 @@ def _render_localization(localization: LocalizationReport | None) -> list[str]:
     if localization.ambiguity_reason:
         lines.append(f"- Ambiguity reason: {_markdown_text(localization.ambiguity_reason)}")
     if localization.locations:
-        lines.append(
-            "- Top locations: "
-            + ", ".join(
-                _markdown_text(f"{location.path}:{location.start_line}")
-                for location in localization.locations[:3]
+        lines.extend(["", "Top locations and ranking signals:", ""])
+        for location in localization.locations[:3]:
+            path = _markdown_text(f"{location.path}:{location.start_line}-{location.end_line}")
+            reasons = _markdown_text(
+                ", ".join(signal.reason for signal in location.signals) or "none recorded"
             )
-        )
+            lines.append(f"- {path}: {reasons}")
     return [*lines, ""]
 
 
@@ -199,7 +199,7 @@ def _render_candidates(
         [
             (
                 "| Candidate | Eligible | Required failures | Skipped checks | "
-                "Size (files/lines) | Coverage | Cost | Selected |"
+                "Size (files/lines) | Claimed criteria score | Cost | Selected |"
             ),
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
@@ -236,6 +236,7 @@ def _render_candidates(
             )
             + " |"
         )
+    lines.extend(["", "The criteria score uses claims from the model. Check results are separate."])
     return [*lines, ""]
 
 

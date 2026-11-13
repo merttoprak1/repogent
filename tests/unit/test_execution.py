@@ -35,6 +35,31 @@ def test_policy_returns_only_fixed_module_commands(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("config", "test_body", "expected"),
+    [
+        ("", "pass", CheckStatus.PASSED),
+        ("addopts = --collect-only", "pass", CheckStatus.FAILED),
+        ("", "pytest.skip('no test ran')", CheckStatus.FAILED),
+    ],
+)
+def test_pytest_success_requires_a_passing_test(
+    tmp_path: Path, config: str, test_body: str, expected: CheckStatus
+) -> None:
+    (tmp_path / "pytest.ini").write_text(f"[pytest]\n{config}\n")
+    (tmp_path / "test_example.py").write_text(
+        f"import pytest\n\ndef test_example():\n    {test_body}\n"
+    )
+    command = ValidationPolicy().commands(tmp_path)[0]
+
+    result = LocalExecutor().run(command, tmp_path)
+
+    assert result.exit_code == 0
+    assert result.status is expected
+    if expected is CheckStatus.FAILED:
+        assert result.reason == "Pytest did not report a passing test."
+
+
+@pytest.mark.parametrize(
     ("relative_path", "contents"),
     [
         ("quality/regression/test_nested.py", "def test_value(): pass\n"),

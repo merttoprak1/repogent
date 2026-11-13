@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -11,17 +12,20 @@ from repogent.domain import ContextSnippet, ValidationReport, VersionedModel
 from repogent.repository import TOKEN, FileRecord, RepositoryInventory
 from repogent.symbols import PythonSymbolGraph, SymbolEdge, SymbolKind, SymbolNode
 
-SignalName = Literal["lexical", "symbol", "import", "call", "test", "failure"]
+SignalName = Literal["lexical", "symbol", "named_symbol", "import", "call", "test", "failure"]
 
 _SIGNAL_WEIGHTS: dict[SignalName, float] = {
     "lexical": 1.0,
     "symbol": 1.5,
+    "named_symbol": 8.0,
     "import": 0.5,
     "call": 0.5,
     "test": 0.75,
     "failure": 2.0,
 }
 _TOTAL_SIGNAL_WEIGHT = sum(_SIGNAL_WEIGHTS.values())
+_MAX_SNIPPET_CHARS = 4_000
+_REQUEST_SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 class LocalizationSignal(VersionedModel):
@@ -66,6 +70,21 @@ class PythonLocalizer:
             return self._report([], inventory)
 
         records = {record.path: record for record in inventory.files}
+        request_identifiers = {
+            identifier.rsplit(".", 1)[-1]
+            for identifier in _REQUEST_SYMBOL.findall(request)
+            if "_" in identifier or "." in identifier or f"`{identifier}`" in request
+        }
+        named_symbols = {
+            node.symbol_id
+            for node in graph.nodes
+            if node.path in records
+            and node.kind is not SymbolKind.MODULE
+            and node.name in request_identifiers
+        }
+        max_score = _TOTAL_SIGNAL_WEIGHT
+        if not named_symbols:
+            max_score -= _SIGNAL_WEIGHTS["named_symbol"]
         file_lexical_tokens = {
             record.path: _file_lexical_tokens(record.path, record.text)
             for record in inventory.files
@@ -88,6 +107,8 @@ class PythonLocalizer:
                 test_paths,
                 source_paths,
             )
+            if node.symbol_id in named_symbols:
+                signals.insert(0, _signal("named_symbol", [node.name]))
             if signals:
                 locations.append(
                     LocalizedSymbol(
@@ -95,7 +116,7 @@ class PythonLocalizer:
                         path=node.path,
                         start_line=node.start_line,
                         end_line=node.end_line,
-                        score=sum(signal.score for signal in signals) / _TOTAL_SIGNAL_WEIGHT,
+                        score=sum(signal.score for signal in signals) / max_score,
                         signals=signals,
                     )
                 )
@@ -162,13 +183,18 @@ class PythonLocalizer:
             lines = record.text.splitlines()
             start_line = max(1, location.start_line - 20)
             last_available_line = min(max(1, len(lines)), location.end_line + 20)
-            remaining = self.max_total_chars - total_chars
+            remaining = min(_MAX_SNIPPET_CHARS, self.max_total_chars - total_chars)
+            through_definition = lines[start_line - 1 : location.start_line]
+            if len("\n".join(through_definition)) > remaining:
+                start_line = location.start_line
             included_lines: list[str] = []
+            snippet_chars = 0
             for line in lines[start_line - 1 : last_available_line]:
-                separator = "\n" if included_lines else ""
-                if len("\n".join(included_lines)) + len(separator) + len(line) > remaining:
+                line_chars = len(line) + bool(included_lines)
+                if snippet_chars + line_chars > remaining:
                     break
                 included_lines.append(line)
+                snippet_chars += line_chars
             if not included_lines:
                 continue
             text = "\n".join(included_lines)
@@ -182,7 +208,7 @@ class PythonLocalizer:
                     reason="; ".join(signal.reason for signal in location.signals),
                 )
             )
-            total_chars += len(text)
+            total_chars += snippet_chars
         return snippets
 
 

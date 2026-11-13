@@ -46,7 +46,7 @@ def test_pipeline_records_missing_optional_check_as_skipped(tmp_path: Path) -> N
     assert report.passed is True
 
 
-def test_pipeline_keeps_available_failed_optional_check_non_blocking(tmp_path: Path) -> None:
+def test_pipeline_keeps_failed_optional_check_non_blocking_when_tests_pass(tmp_path: Path) -> None:
     class FailedOptionalExecutor:
         def available(self, command: CommandSpec) -> bool:
             return True
@@ -56,17 +56,20 @@ def test_pipeline_keeps_available_failed_optional_check_non_blocking(tmp_path: P
             return CheckResult(
                 name=command.name,
                 argv=list(command.argv),
-                status=CheckStatus.FAILED,
+                status=CheckStatus.PASSED if command.required else CheckStatus.FAILED,
             )
 
-    class OptionalPolicy(ValidationPolicy):
+    class TestAndLintPolicy(ValidationPolicy):
         def commands(self, root: Path) -> list[CommandSpec]:
             del root
-            return [CommandSpec("ruff", ("ruff", "check", "."), required=False)]
+            return [
+                CommandSpec("ruff", ("ruff", "check", "."), required=False),
+                CommandSpec("pytest", ("python", "-m", "pytest", "-q"), required=True),
+            ]
 
-    report = ValidationPipeline(FailedOptionalExecutor(), policy=OptionalPolicy()).run(tmp_path)
+    report = ValidationPipeline(FailedOptionalExecutor(), policy=TestAndLintPolicy()).run(tmp_path)
 
-    assert report.checks[0].required is False
+    assert report.checks[0].status is CheckStatus.FAILED
     assert report.passed is True
 
 

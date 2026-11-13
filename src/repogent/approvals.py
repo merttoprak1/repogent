@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections import deque
 from typing import Protocol
 
@@ -18,12 +19,16 @@ def render_artifact(artifact: BaseModel | str) -> str:
 
 
 class CliApprover:
+    operator_wait_seconds = 0.0
+
     def decide(self, kind: ApprovalKind, artifact: BaseModel | str) -> ApprovalRecord:
         typer.echo(f"\n--- {kind.value} approval ---\n{render_artifact(artifact)}\n")
+        waiting_started = time.monotonic()
         approved = typer.confirm(f"Approve {kind.value}?", default=False)
         feedback = (
             None if approved else typer.prompt("Reason for rejection", default="Rejected by user")
         )
+        self.operator_wait_seconds += time.monotonic() - waiting_started
         return ApprovalRecord(
             kind=kind,
             decision=Decision.APPROVED if approved else Decision.REJECTED,

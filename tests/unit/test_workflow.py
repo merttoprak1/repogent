@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -114,8 +117,9 @@ QA_OUTPUT = {
 
 
 class SequenceValidator:
-    def __init__(self, statuses: list[CheckStatus]) -> None:
+    def __init__(self, statuses: list[CheckStatus], *, required: bool = True) -> None:
         self.statuses = statuses
+        self.required = required
 
     def run(self, root: Path, *, timeout_seconds: float | None = None) -> ValidationReport:
         del root, timeout_seconds
@@ -127,6 +131,7 @@ class SequenceValidator:
                     argv=["pytest"],
                     status=status,
                     exit_code=0 if status is CheckStatus.PASSED else 1,
+                    required=self.required,
                 )
             ]
         )
@@ -250,6 +255,7 @@ def make_phase2_workflow(
     *,
     outputs: list[dict[str, object]],
     validation_statuses: list[CheckStatus],
+    validation_required: bool = True,
     candidate_policy: CandidatePolicy | None = None,
     events: EventSink | None = None,
     budget: Budget | None = None,
@@ -265,7 +271,7 @@ def make_phase2_workflow(
         run_id="run-1",
         secrets=artifact_secrets,
     )
-    validator = SequenceValidator(validation_statuses)
+    validator = SequenceValidator(validation_statuses, required=validation_required)
     patch_policy = PatchPolicy()
     patch_applier = PatchApplier()
     return Workflow(
@@ -356,6 +362,72 @@ def test_valid_first_candidate_is_only_candidate_and_is_applied(tmp_path: Path) 
     assert (workflow.root / "app.py").read_text() == "def value():\n    return 2\n"
     assert [event["sequence"] for event in _events(workflow)] == list(
         range(1, len(_events(workflow)) + 1)
+    )
+
+
+def test_optional_checks_cannot_authorize_a_patch(tmp_path: Path) -> None:
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED],
+        validation_required=False,
+        candidate_policy=CandidatePolicy(max_candidates=1),
+    )
+
+    manifest = workflow.run()
+
+    assert manifest.status is RunStatus.HUMAN_INTERVENTION_REQUIRED
+    assert manifest.checkout_state is CheckoutState.NOT_APPLIED
+    assert "No required tests were found" in (manifest.reason or "")
+    assert (workflow.root / "app.py").read_text() == "def value():\n    return 1\n"
+    assert not any(event["stage"] == RunStage.PATCH_PROPOSED.value for event in _events(workflow))
+
+
+@pytest.mark.parametrize("wait_at", ["approval", "executor"])
+def test_operator_wait_does_not_consume_workflow_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wait_at: str
+) -> None:
+    offset = [0.0]
+    clock = time.monotonic
+    monkeypatch.setattr(
+        "repogent.workflow.time", SimpleNamespace(monotonic=lambda: clock() + offset[0])
+    )
+    delay = 9 * 3600
+    workflow = make_phase2_workflow(
+        tmp_path,
+        outputs=[REQUIREMENTS_OUTPUT, PLAN_OUTPUT, VALID_PATCH_OUTPUT, QA_OUTPUT],
+        validation_statuses=[CheckStatus.PASSED, CheckStatus.PASSED],
+    )
+
+    class DelayedApprover(FakeApprover):
+        operator_wait_seconds = 0.0
+
+        def decide(self, kind, artifact):
+            record = super().decide(kind, artifact)
+            offset[0] += delay
+            self.operator_wait_seconds += delay
+            return record
+
+    class DelayedSelector(RecordingExecutorSelector):
+        def select(self, target, preview, *, timeout_seconds):
+            prepared = super().select(target, preview, timeout_seconds=timeout_seconds)
+            offset[0] += delay
+            return replace(prepared, operator_wait_seconds=delay)
+
+    if wait_at == "approval":
+        workflow.approver = DelayedApprover([Decision.APPROVED] * 3)
+        expected_wait = 3 * delay
+    else:
+        selector = DelayedSelector(workflow.validator)
+        selector.workflow = workflow
+        workflow.executor_selector = selector
+        expected_wait = delay
+
+    result = workflow.run()
+
+    assert result.status is RunStatus.COMPLETED
+    assert workflow.deadline - workflow.started_at == pytest.approx(
+        workflow.budget.timeout_seconds + expected_wait
     )
 
 

@@ -39,6 +39,11 @@ Issues = "https://github.com/merttoprak1/repogent/issues"
 Changelog = "https://github.com/merttoprak1/repogent/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
+demo = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<9",
+]
 dev = [
   "bandit>=1.8,<2",
   "build>=1.2,<2",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import configparser
 import importlib.util
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -35,6 +36,13 @@ _DOCKER_CONTROL_TIMEOUT_SECONDS = 5
 _DISCOVERY_MAX_ENTRIES = 20_000
 _DISCOVERY_MAX_DEPTH = 16
 _PYTEST_CONFIG_MAX_BYTES = 256_000
+_PYTEST_ARGV = ("python", "-m", "pytest", "-q")
+_PYTEST_OTHER_COUNTS = r"[0-9]+ (?:skipped|xfailed|xpassed|deselected|warnings?|reruns?)"
+_PYTEST_PASS_SUMMARY = re.compile(
+    rf"(?:=+ )?(?:{_PYTEST_OTHER_COUNTS}, )*[1-9][0-9]* passed"
+    rf"(?:, {_PYTEST_OTHER_COUNTS})* in [0-9.]+s(?: \([0-9:]+\))?(?: =+)?"
+)
+_ANSI_COLOR = re.compile(r"\x1b\[[0-9;]*m")
 _SUPPORTS_FD_RELATIVE_CONFIG = (
     os.open in os.supports_dir_fd
     and os.stat in os.supports_dir_fd
@@ -184,9 +192,7 @@ class ValidationPolicy:
     def commands(self, root: Path) -> list[CommandSpec]:
         pytest_required = _has_pytest_suite(root, self.scope)
         return [
-            CommandSpec(
-                "pytest", ("python", "-m", "pytest", "-q"), pytest_required, module="pytest"
-            ),
+            CommandSpec("pytest", _PYTEST_ARGV, pytest_required, module="pytest"),
             CommandSpec("ruff", ("python", "-m", "ruff", "check", "."), False, module="ruff"),
             CommandSpec("mypy", ("python", "-m", "mypy", "."), False, module="mypy"),
             CommandSpec(
@@ -419,6 +425,28 @@ class _RestrictedExecutor:
         )
 
 
+def _completed_check(
+    command: CommandSpec, argv: list[str], result: _ProcessResult, duration: float
+) -> CheckResult:
+    status = CheckStatus.PASSED if result.exit_code == 0 else CheckStatus.FAILED
+    reason = None
+    if status is CheckStatus.PASSED and command.argv == _PYTEST_ARGV:
+        lines = _ANSI_COLOR.sub("", result.stdout).strip().splitlines()
+        if not lines or not _PYTEST_PASS_SUMMARY.fullmatch(lines[-1].strip()):
+            status = CheckStatus.FAILED
+            reason = "Pytest did not report a passing test."
+    return CheckResult(
+        name=command.name,
+        argv=argv,
+        status=status,
+        exit_code=result.exit_code,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        duration_seconds=duration,
+        reason=reason,
+    )
+
+
 class LocalExecutor(_RestrictedExecutor):
     def __init__(
         self,
@@ -471,15 +499,7 @@ class LocalExecutor(_RestrictedExecutor):
                 duration_seconds=time.monotonic() - started,
                 reason="command timed out",
             )
-        return CheckResult(
-            name=command.name,
-            argv=argv,
-            status=CheckStatus.PASSED if result.exit_code == 0 else CheckStatus.FAILED,
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            duration_seconds=time.monotonic() - started,
-        )
+        return _completed_check(command, argv, result, time.monotonic() - started)
 
 
 _DOCKER_DAEMON_MARKERS = (
@@ -630,6 +650,10 @@ class DockerExecutor(_RestrictedExecutor):
             "PYTHONDONTWRITEBYTECODE=1",
             "--env",
             "PYTEST_ADDOPTS=-p no:cacheprovider",
+            "--env",
+            "RUFF_NO_CACHE=true",
+            "--env",
+            "MYPY_CACHE_DIR=/tmp/repogent-mypy-cache",
             "--workdir",
             "/workspace",
             self.image,
@@ -657,12 +681,4 @@ class DockerExecutor(_RestrictedExecutor):
                 duration_seconds=time.monotonic() - started,
                 reason="container timed out",
             )
-        return CheckResult(
-            name=command.name,
-            argv=list(command.argv),
-            status=CheckStatus.PASSED if result.exit_code == 0 else CheckStatus.FAILED,
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            duration_seconds=time.monotonic() - started,
-        )
+        return _completed_check(command, list(command.argv), result, time.monotonic() - started)

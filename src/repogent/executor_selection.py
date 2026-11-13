@@ -35,6 +35,7 @@ class PreparedExecutor:
     isolation_level: IsolationLevel
     preflight: PreflightReport
     validator: ValidationPipeline
+    operator_wait_seconds: float = 0.0
 
 
 class FixedExecutorSelector:

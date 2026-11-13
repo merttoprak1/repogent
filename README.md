@@ -82,8 +82,8 @@ The Codex plugin exposes two capabilities:
   readiness, validation-command availability, and executor options without
   editing files or running repository code.
 - **Verified Change** prepares a bounded change through explicit requirements,
-  plan, executor, and patch approvals. It validates the selected patch before
-  it can touch the real checkout.
+  plan, executor, and patch approvals. The candidate must pass at least one
+  pytest test in a disposable copy before it can touch the real checkout.
 
 Repogent supports conventional Python packages, CLIs, data transforms, and the
 bundled FastAPI example. Terminal commands `doctor`, `analyze`, `run`,
@@ -142,13 +142,17 @@ repogent report ./.repogent/runs/run-<id>
 ```
 
 `demo` is a labeled **replay**. It copies the bundled FastAPI fixture to a
-disposable directory, auto-approves the checked-in scripted artifacts, and runs
-local validation. It is not a live model call and it does not edit the source
-tree:
+disposable directory, approves the recorded artifacts, and runs local tests.
+It does not call a model or edit the source tree.
+
+From a checkout of this version, install the demo dependencies and run the replay:
 
 ```bash
+python -m pip install '.[demo]'
 repogent demo
 ```
+
+For a published package, use `pipx install 'repogent[demo]'`.
 
 The explicit local executor keeps the replay usable without Docker; it is
 `REDUCED ISOLATION`, not `ISOLATED VERIFIED`. Live Codex/OpenAI/Grok runs still
@@ -197,6 +201,9 @@ make validator-image
 The image runs without network access, mounts the checkout read-only, and
 applies CPU, memory, process, output, and time limits. If Docker or the image
 is unavailable, choose local execution explicitly.
+
+Ruff runs without a cache in Docker. Mypy writes its cache to the container's
+temporary filesystem. The checkout remains read-only.
 
 Proposal providers (`codex-cli`, `openai`, `grok`, `scripted`) only produce typed
 artifacts. Repogent still validates schemas and patches, records evidence, and

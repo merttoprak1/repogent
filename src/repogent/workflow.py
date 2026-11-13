@@ -659,6 +659,7 @@ class Workflow:
             selector_preview,
             timeout_seconds=self.remaining_time(),
         )
+        self.deadline += prepared.operator_wait_seconds
         if selector_target != target:
             raise CandidateEvaluationError("validation target changed after persistence")
         if selector_preview != selector_preview_baseline:
@@ -843,7 +844,9 @@ class Workflow:
         self.artifacts.write_text(name, json.dumps(payload, indent=2, default=str))
 
     def approve(self, kind: ApprovalKind, artifact: BaseModel | str) -> bool:
+        waited_before = getattr(self.approver, "operator_wait_seconds", 0.0)
         record = self.approver.decide(kind, artifact)
+        self.deadline += getattr(self.approver, "operator_wait_seconds", 0.0) - waited_before
         self.artifacts.write_model("approval", record)
         self.emit(
             EventKind.APPROVAL,

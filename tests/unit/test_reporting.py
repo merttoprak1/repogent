@@ -25,7 +25,7 @@ from repogent.domain import (
     WorkflowKind,
     WorkflowOutcome,
 )
-from repogent.localization import LocalizationReport, LocalizedSymbol
+from repogent.localization import LocalizationReport, LocalizationSignal, LocalizedSymbol
 from repogent.reporting import derive_trust_label, render_report
 
 
@@ -138,7 +138,7 @@ def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
                 start_line=1,
                 end_line=4,
                 score=1,
-                signals=[],
+                signals=[LocalizationSignal(name="symbol", score=1, reason="symbol matches route")],
             )
         ],
         snippets=[],
@@ -227,6 +227,8 @@ def test_report_shows_localization_candidate_evidence_and_recovery() -> None:
     assert "candidate-2" in report
     assert "pytest \\| unit" in report
     assert "two paths \\| tied" in report
+    assert "app.py:1-4: symbol matches route" in report
+    assert "Claimed criteria score" in report
     assert "selected" in report
     assert "0.875" in report
     assert "$0.18" in report

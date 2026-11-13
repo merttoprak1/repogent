@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import shutil
+from importlib.util import find_spec
 from pathlib import Path
 
 
 class DemoError(RuntimeError):
     pass
+
+
+def require_demo_dependencies() -> None:
+    missing = [module for module in ("fastapi", "httpx", "pytest") if find_spec(module) is None]
+    if missing:
+        raise DemoError(
+            f"Missing demo dependencies: {', '.join(missing)}. "
+            "Install repogent[demo] in this environment."
+        )
 
 
 def bundled_fastapi_demo() -> Path:

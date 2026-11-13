@@ -357,10 +357,19 @@ class CandidateSelector:
         )
 
         if not ranked:
+            missing_required_checks = evidence and all(
+                item.validation.checks
+                and not any(check.required for check in item.validation.checks)
+                for item in evidence
+            )
             return CandidateSelection(
                 selected_candidate_id=None,
                 eligible_candidate_ids=[],
-                reason="no candidate passed required validation",
+                reason=(
+                    "No required tests were found. Add a pytest suite before applying a change."
+                    if missing_required_checks
+                    else "no candidate passed required validation"
+                ),
             )
 
         accepted = ranked[: self.max_candidates]

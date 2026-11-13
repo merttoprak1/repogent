@@ -3,10 +3,12 @@ import subprocess
 import sys
 import tomllib
 import zipfile
+from email import message_from_bytes
 from importlib.resources import files
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 import repogent
 
@@ -45,6 +47,9 @@ def test_project_declares_mit_license_metadata() -> None:
 def test_built_wheel_contains_runtime_and_license_contract() -> None:
     with zipfile.ZipFile(_built_wheel()) as archive:
         names = archive.namelist()
+        metadata = message_from_bytes(
+            archive.read(next(name for name in names if name.endswith(".dist-info/METADATA")))
+        )
 
     assert "repogent/mcp_server.py" in names
     assert "repogent/py.typed" in names
@@ -52,6 +57,15 @@ def test_built_wheel_contains_runtime_and_license_contract() -> None:
     assert any(name.startswith("repogent/_demo/fastapi_demo/") for name in names)
     assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
     assert not any(".superpowers" in name for name in names)
+    assert "demo" in metadata.get_all("Provides-Extra", [])
+    demo_dependencies = {
+        requirement.name
+        for requirement in map(Requirement, metadata.get_all("Requires-Dist", []))
+        if requirement.marker is not None
+        and requirement.marker.evaluate({"extra": "demo"})
+        and not requirement.marker.evaluate({"extra": ""})
+    }
+    assert demo_dependencies == {"fastapi", "httpx", "pytest"}
 
 
 def test_built_wheel_installs_in_isolated_environment(tmp_path: Path) -> None:

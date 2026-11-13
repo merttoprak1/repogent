@@ -5,7 +5,7 @@ from pathlib import Path
 from repogent.agents import RoleSet
 from repogent.approvals import FakeApprover
 from repogent.artifacts import ArtifactStore
-from repogent.domain import Budget, Decision, RunManifest, RunStatus
+from repogent.domain import Budget, CheckStatus, Decision, RunManifest, RunStatus
 from repogent.execution import LocalExecutor, ValidationPolicy
 from repogent.patching import PatchApplier, PatchPolicy
 from repogent.providers import ScriptedProvider
@@ -55,7 +55,8 @@ def test_scripted_fastapi_change_reaches_verified_report(tmp_path: Path) -> None
 
 def test_scripted_clamp_change_reaches_verified_report(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    shutil.copytree(Path("tests/fixtures/python_library"), target)
+    fixture = Path("tests/fixtures/python_library")
+    shutil.copytree(fixture, target)
     outputs = json.loads(Path("examples/scripted_clamp.json").read_text())
     policy = ValidationPolicy()
     executor = LocalExecutor(
@@ -92,3 +93,12 @@ def test_scripted_clamp_change_reaches_verified_report(tmp_path: Path) -> None:
     assert "Verification: REDUCED ISOLATION" in report
     assert "Execution mode: local" in report
     assert f"Evaluated target: patch:{manifest['evaluated_target']['digest']}" in report
+
+    baseline = tmp_path / "baseline"
+    shutil.copytree(fixture, baseline)
+    shutil.copyfile(target / "tests/test_math.py", baseline / "tests/test_math.py")
+    reproduction = executor.run(policy.commands(baseline)[0], baseline)
+    assert reproduction.status is CheckStatus.FAILED
+    assert reproduction.exit_code == 1
+    assert "test_rejects_inverted_bounds" in reproduction.stdout
+    assert "DID NOT RAISE" in reproduction.stdout
